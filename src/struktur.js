@@ -74,7 +74,49 @@ function parse(xahBuf) {
   return tiles;
 }
 
-module.exports = { parse, openIndex, REC, START };
+// Поуровневые таблицы XAC-STRUKTUR L1..L4. Записей столько же, сколько тайлов,
+// и порядок тот же, что в главном реестре.
+//   заголовок раздела: +0x10 u32 длина, +0x14 u32 номер уровня (0x00010001..4)
+//   записи с 24, по 44 байта:
+//     +0x00..0x0C  рамка: xmin, ymin, xmax, ymax; 0x7FFFFFFF если данных нет
+//     +0x10        назначение не установлено
+//     +0x14        смещение области VEKTORBLOCK в файле уровня
+//     +0x18        суммарный размер этой области
+//     +0x1C        размер раздела XAC HEADER
+//     +0x20        размер раздела ZF-NAMEN
+//     +0x24        суммарный размер данных тайла на уровне (уровни 2..4)
+//     +0x28        назначение не установлено
+// Уровень 1 — файл тайла <П>_<код>_1.xac, уровень 2 — <П>_<код>_2.xac.
+// Уровни 3 и 4 лежат кусками внутри укрупнённых <П>_<регион>_3.b и _4.b.
+// Сверка L1 и L2 с настоящими файлами: 120 из 120 тайлов без расхождений.
+
+const LEVEL_REC = 44;
+const LEVEL_START = 24;
+const NO_DATA = 0x7fffffff;
+
+function parseLevels(xahBuf) {
+  const all = xac.sections(xahBuf).list;
+  const out = {};
+  for (const n of [1, 2, 3, 4]) {
+    const s = all.find(x => x.name === 'XAC-STRUKTUR L' + n);
+    if (!s) continue;
+    const b = xahBuf.subarray(s.offset, s.offset + s.total);
+    const rows = [];
+    for (let o = LEVEL_START; o + LEVEL_REC <= s.total; o += LEVEL_REC) {
+      const u = i => b.readUInt32BE(o + i);
+      rows.push({
+        bbox: [u(0), u(4), u(8), u(12)],
+        empty: u(0) === NO_DATA,
+        vektorOffset: u(0x14), vektorSize: u(0x18),
+        headerSize: u(0x1c), zfNamenSize: u(0x20), totalSize: u(0x24),
+      });
+    }
+    out[n] = { level: b.readUInt32BE(0x14) & 0xffff, rows };
+  }
+  return out;
+}
+
+module.exports = { parse, parseLevels, openIndex, REC, START };
 
 if (require.main === module) {
   const arg = process.argv[2];
@@ -108,6 +150,21 @@ if (require.main === module) {
     console.log('   ' + nm.padEnd(14),
       v.offset ? 'смещение ' + String(v.offset).padStart(8) + '  размер ' + String(v.size).padStart(8)
                : 'отсутствует');
+  }
+
+  const levels = parseLevels(idx.buf);
+  const li = [...tiles.keys()].indexOf(rec.code);
+  const LAT = 40000000 / 360;
+  console.log();
+  console.log('по уровням:');
+  for (const n of [1, 2, 3, 4]) {
+    const r = levels[n] && levels[n].rows[li];
+    if (!r) continue;
+    if (r.empty) { console.log('   L' + n + '  данных нет'); continue; }
+    console.log('   L' + n +
+      '  рамка ' + (r.bbox[1] / LAT).toFixed(4) + '..' + (r.bbox[3] / LAT).toFixed(4) + ' с.ш., ' +
+      (r.bbox[0] / 72000).toFixed(4) + '..' + (r.bbox[2] / 72000).toFixed(4) + ' в.д.' +
+      '   VEKTORBLOCK @' + r.vektorOffset + ', ' + r.vektorSize + ' б');
   }
 
   if (process.argv[3] === '--verify') {
