@@ -13,10 +13,11 @@
 // Число записей — u16BE по смещению 0x1A заголовка.
 // Имена файлов таблиц: EJ211_<код RDS>_<LTN>.tlt
 
+const fs = require('fs');
 const path = require('path');
 const fldb = require('./fldb');
 
-const ROOT = path.join(__dirname, '..');
+const dataset = require('./dataset');
 const REC = 36;
 const FIRST = 0x20;
 
@@ -50,8 +51,18 @@ function registry(dbPath) {
   return { out, files, count };
 }
 
+// Контейнер TMC по умолчанию: каталог TMC3GP или TMC внутри набора,
+// имя файла в каждом наборе своё, поэтому берётся первый .db в каталоге.
+function defaultContainer() {
+  const dir = dataset.pick(dataset.resolveRoot(), 'pkgdb/TMC3GP', 'pkgdb/TMC');
+  if (!dir) throw new Error('каталог TMC в наборе не найден');
+  const db = fs.readdirSync(dir).find(f => f.toLowerCase().endsWith('.db'));
+  if (!db) throw new Error('в каталоге ' + dir + ' нет файла .db');
+  return path.join(dir, db);
+}
+
 if (require.main === module) {
-  const p = process.argv[2] || path.join(ROOT, 'pkgdb/TMC3GP/kN221EUx01t01.db');
+  const p = process.argv[2] || defaultContainer();
   const { out, files } = registry(p);
   console.log('ISO  ECC  RDS  LTN  язык  флаги     файл таблицы        размер');
   for (const r of out.sort((a, b) => a.iso.localeCompare(b.iso))) {

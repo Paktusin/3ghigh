@@ -11,8 +11,9 @@
 const fs = require('fs');
 const path = require('path');
 const fldb = require('./fldb');
+const dataset = require('./dataset');
 
-const base = process.argv[2] || '.';
+const base = dataset.resolveRoot(process.argv[2]);
 
 function meta(file, keys) {
   const p = path.join(base, file);

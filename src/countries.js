@@ -11,8 +11,9 @@
 const fs = require('fs');
 const path = require('path');
 const fldb = require('./fldb');
+const dataset = require('./dataset');
 
-const ROOT = path.join(__dirname, '..');
+const ROOT = dataset.resolveRoot(process.argv[2]);
 const XAC = ['XAC/kN221EUx01_0.db', 'XAC2/kN221EUx01_1.db', 'XAC3/kN221EUx01_2.db']
   .map(p => path.join(ROOT, 'pkgdb', p));
 
