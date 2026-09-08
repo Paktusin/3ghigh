@@ -9,7 +9,7 @@
 
 const fs = require('fs');
 
-const DIR_OFFSET = 0x21c;
+const DIR_OFFSET = 0x220;
 const ENTRY_SIZE = 36;
 
 const file = process.argv[2];
@@ -56,9 +56,9 @@ const ortRanges = [];
 let tiles = 0, prefix = null;
 for (let i = 0; i < readable; i++) {
   fs.readSync(fd, b, 0, ENTRY_SIZE, DIR_OFFSET + i * ENTRY_SIZE);
-  const name = b.toString('latin1', 12, 32).replace(/\0[\s\S]*$/, '');
-  const offset = b.readUInt32LE(4);
-  const size = b.readUInt32LE(8);
+  const name = b.toString('latin1', 8, 32).replace(/\0[\s\S]*$/, '');
+  const offset = b.readUInt32LE(0);
+  const size = b.readUInt32LE(4);
   if (!prefix) { const p = name.match(/^([A-Z0-9]+)_/); if (p) prefix = p[1]; }
   // справочники названий — по ним страна опознаётся однозначно
   if (/^[A-Z0-9]+_[0-9]+[.]ort$/.test(name)) ortRanges.push({ name, offset, size });

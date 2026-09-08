@@ -36,10 +36,12 @@ function build(srcPath) {
 
   placed.forEach((p, i) => {
     const o = fldb.DIR_OFFSET + i * fldb.ENTRY_SIZE;
-    out.writeUInt32LE(p.entry.checksum, o);      // пересчитать нечем — алгоритм не опознан
-    out.writeUInt32LE(p.offset, o + 4);
-    out.writeUInt32LE(p.entry.size, o + 8);
-    out.write(p.entry.name, o + 12, 20, 'latin1');
+    out.writeUInt32LE(p.offset, o);
+    out.writeUInt32LE(p.entry.size, o + 4);
+    out.write(p.entry.name, o + 8, 24, 'latin1');
+    // Сумма переносится как есть: алгоритм не опознан, а при установке
+    // это поле не проверяется — см. раздел о проверках целостности в README.
+    out.writeUInt32LE(p.entry.checksum, o + 32);
     fldb.read(db, p.entry).copy(out, p.offset);
   });
 

@@ -8,16 +8,20 @@
 //   0x10 u32  0x24 = 36 — размер записи каталога
 //   0x14 4б   сигнатура "FLDB"
 //   0x20 ..   текстовый блок !dbinfo0001 ... !enddbinfo
-//   0x21C ..  каталог, записи по 36 байт:
-//               +0x00 u32      контрольная сумма (алгоритм не опознан)
-//               +0x04 u32      смещение данных
-//               +0x08 u32      размер
-//               +0x0C char[20] имя, дополненное нулями
+//   0x220 ..  каталог, записи по 36 байт:
+//               +0x00 u32      смещение данных
+//               +0x04 u32      размер
+//               +0x08 char[24] имя, дополненное нулями
+//               +0x20 u32      контрольная сумма (алгоритм не опознан)
 // Данные выровнены по 2048 байт.
+//
+// Начало каталога подтверждается полем 0x00, которое и содержит 0x220.
+// Раскладка проверяется тем, что у файлов с одинаковым содержимым совпадает
+// и контрольная сумма: у всех 45 файлов .plz она одна, у всех 45 .poi тоже.
 
 const fs = require('fs');
 
-const DIR_OFFSET = 0x21c;
+const DIR_OFFSET = 0x220;
 const ENTRY_SIZE = 36;
 
 function open(path) {
@@ -47,10 +51,10 @@ function entries(db) {
     fs.readSync(db.fd, b, 0, ENTRY_SIZE, DIR_OFFSET + i * ENTRY_SIZE);
     out.push({
       index: i,
-      checksum: b.readUInt32LE(0),
-      offset: b.readUInt32LE(4),
-      size: b.readUInt32LE(8),
-      name: b.toString('latin1', 12, 32).replace(/\0[\s\S]*$/, ''),
+      offset: b.readUInt32LE(0),
+      size: b.readUInt32LE(4),
+      name: b.toString('latin1', 8, 32).replace(/\0[\s\S]*$/, ''),
+      checksum: b.readUInt32LE(32),
     });
   }
   return out;
