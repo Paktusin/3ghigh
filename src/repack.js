@@ -15,13 +15,19 @@ const fldb = require('./fldb');
 const ALIGN = 2048;
 const align = n => Math.ceil(n / ALIGN) * ALIGN;
 
-function build(srcPath) {
+// drop — необязательная функция, получает запись и возвращает true,
+// если её нужно исключить из пересобранного контейнера.
+function build(srcPath, drop) {
   const db = fldb.open(srcPath);
-  const list = fldb.entries(db);
+  const all = fldb.entries(db);
+  const list = drop ? all.filter(e => !drop(e)) : all;
+  const dropped = all.length - list.length;
 
-  // шапка до начала каталога копируется как есть (заголовок + блок dbinfo)
+  // шапка до начала каталога копируется как есть (заголовок + блок dbinfo),
+  // но количество файлов в заголовке приходится поправить
   const head = Buffer.alloc(fldb.DIR_OFFSET);
   fs.readSync(db.fd, head, 0, head.length, 0);
+  head.writeUInt32LE(list.length, 0x0c);
 
   const dirEnd = fldb.DIR_OFFSET + list.length * fldb.ENTRY_SIZE;
   let pos = align(dirEnd);
@@ -45,8 +51,10 @@ function build(srcPath) {
     fldb.read(db, p.entry).copy(out, p.offset);
   });
 
-  return { out, list, placed };
+  return { out, list, placed, dropped };
 }
+
+module.exports = { build, align, ALIGN };
 
 if (require.main === module) {
   const src = process.argv[2];
