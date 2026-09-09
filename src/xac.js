@@ -47,7 +47,8 @@ function sections(buf) {
     const len = buf.readUInt32BE(p + 16);
     const total = len + 20;
     if (total < 20 || p + total > buf.length) break;
-    if (!/^[A-Z0-9 +-]+$/.test(name)) break;
+    // подчёркивание встречается в именах разделов .xah, например FE_MIX_INFO
+    if (!/^[A-Z0-9 _+-]+$/.test(name)) break;
     list.push({ name, offset: p, total, payload: len });
     p += total;
   }
