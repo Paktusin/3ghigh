@@ -145,11 +145,20 @@ if (require.main === module) {
   console.log('компоненты в наборе:', [...present].join(', '));
 
   // .pkg и подпись
+  // Ключ --keep-pkg оставляет манифест оригинальным. Смысл: рядом лежит
+  // .pkg.sig на 128 байт, то есть подпись RSA-1024. При установке она не
+  // проверяется, но загрузчик базы может сверять её сам — тогда переписанный
+  // манифест сделает базу невалидной («no valid acios_db found on HDD»).
+  // С оригинальным манифестом подпись остаётся верной, зато он перечисляет
+  // компоненты, которых в наборе нет.
+  const keepPkg = process.argv.includes('--keep-pkg');
   const pkgName = fs.readdirSync(path.join(root, 'pkgdb')).find(f => /^MMI3G_.*[.]pkg$/.test(f));
-  const pkg = rewritePkg(fs.readFileSync(path.join(root, 'pkgdb', pkgName), 'latin1'), present);
+  const pkgOrig = fs.readFileSync(path.join(root, 'pkgdb', pkgName), 'latin1');
+  const pkg = keepPkg ? pkgOrig : rewritePkg(pkgOrig, present);
   fs.writeFileSync(path.join(outDir, 'pkgdb', pkgName), Buffer.from(pkg, 'latin1'));
   fs.copyFileSync(path.join(root, 'pkgdb', pkgName + '.sig'), path.join(outDir, 'pkgdb', pkgName + '.sig'));
-  console.log('манифест           :', pkgName, pkg.length, 'б');
+  console.log('манифест           :', pkgName, pkg.length, 'б',
+    keepPkg ? '— оригинальный, подпись сохранена' : '— переписан под состав набора');
 
   // корневой metainfo2.txt — без изменений
   fs.copyFileSync(path.join(root, 'metainfo2.txt'), path.join(outDir, 'metainfo2.txt'));
