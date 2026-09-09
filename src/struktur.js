@@ -116,7 +116,37 @@ function parseLevels(xahBuf) {
   return out;
 }
 
-module.exports = { parse, parseLevels, openIndex, REC, START };
+// Таблица смежности NACHBARN. Шапка u32 = 0x00010000 (версия), дальше по записи
+// на тайл в порядке реестра: u16 номер тайла, u16 номера соседей, 0xFFFF. После
+// последней записи ещё одно слово 0xFFFF. В европейском наборе 18195 связей,
+// в среднем 4,8 на тайл; связь почти всегда взаимная (5 исключений, все в RU).
+// 586 пар не касаются рамками — паромы: BE–UK, DM–UK. 36 тайлов без соседей —
+// острова (Азоры PO1O, Русский Север).
+//
+// Именно через соседей устройство добирается до анклавов, которых нет в общем
+// растре .ras: VA00 — сосед IT1H, VA01 — сосед IT3S.
+function parseNeighbors(xahBuf) {
+  const s = xac.sections(xahBuf).list.find(x => x.name === 'NACHBARN');
+  if (!s) throw new Error('раздел NACHBARN не найден');
+  const b = xahBuf.subarray(s.offset + 20, s.offset + s.total);
+  const out = [];
+  let p = 4;
+  while (p + 2 <= b.length) {
+    const id = b.readUInt16BE(p); p += 2;
+    if (id === 0xffff) break;
+    const list = [];
+    for (;;) {
+      const v = b.readUInt16BE(p); p += 2;
+      if (v === 0xffff) break;
+      list.push(v);
+    }
+    if (id !== out.length) throw new Error('NACHBARN: запись ' + out.length + ' с номером ' + id);
+    out.push(list);
+  }
+  return out;
+}
+
+module.exports = { parse, parseLevels, parseNeighbors, openIndex, REC, START };
 
 if (require.main === module) {
   const arg = process.argv[2];
@@ -166,6 +196,11 @@ if (require.main === module) {
       (r.bbox[0] / 72000).toFixed(4) + '..' + (r.bbox[2] / 72000).toFixed(4) + ' в.д.' +
       '   VEKTORBLOCK @' + r.vektorOffset + ', ' + r.vektorSize + ' б');
   }
+
+  const order = [...tiles.keys()];
+  const nb = parseNeighbors(idx.buf)[li];
+  console.log();
+  console.log('соседи (NACHBARN):', nb.length ? nb.map(j => order[j]).join(' ') : 'нет');
 
   if (process.argv[3] === '--verify') {
     const ents = fldb.entries(idx.db);
