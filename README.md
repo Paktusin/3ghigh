@@ -801,6 +801,87 @@ telnet на `172.16.42.1` через переходник D-Link DUB-E100. Бе�
 Файлы FSC, признанные недействительными, устройство переносит в
 `/mnt/efs-persist/FSC/illegal/signature/` — оттуда их можно вернуть обратно.
 
+## Что даёт Java-on-Audi-MMI-3G
+
+Заброшенный любительский проект (автор продал машину): попытка запустить свой
+Java-код, в идее — Doom, на встроенной в MMI виртуальной машине J9. Из 379 МБ
+около 370 занимает IBM WebSphere Real Time для i386, положенный туда лишь
+потому, что J9 иначе не найти. Не заработало: в логах
+`Unable to find and initialize required class java/lang/Object` и SIGSEGV —
+библиотеки классов собирались из несовместимых сборок.
+
+### Java — это оболочка, но не навигация
+
+Меню и зелёные инженерные экраны действительно на Java: J9 исполняет `lsd.jxe`,
+каркас `de.dreisoft.lsd.LSD` от 3Soft. Но список процессов, снятый с живой
+машины, показывает, что навигация — родной код QNX:
+
+```
+/usr/bin/ndr           -hfs=/etc/hfs.cfg -rev=wheel -e=lvm -e=disChina
+/sbin/mme-becker       -c /etc/mme.conf          (2 МБ, SH4 ELF)
+/usr/bin/srv-hddmgr    -c /usr/bin/hddmgr.cfg
+/usr/bin/vdev-logvolmgr -p SDS,MAPSTYLES -A -B acios_db.tmp -vvrml -f
+```
+
+Разбор карт живёт здесь, а не в Java. Декомпиляцией срезать путь не получится —
+наш разбор XAC и GDB заменить нечем.
+
+Заодно видно, что `-p` защищает именно `SDS` и `MAPSTYLES`, а не `XAC`.
+
+### Оболочку можно подменить без перепрошивки
+
+Настоящий пусковой скрипт `lsd.sh` со всеми ключами показывает два места, куда
+стоит смотреть:
+
+| Ключ | Что даёт |
+|---|---|
+| `-Dde.audi.tghu.engineering.base_dir=/HBpersistence/engdefs` | инженерные экраны — просто файлы `.esd` в доступном на запись каталоге |
+| `-DLOG=all=0,Fw.Storage.Provider=2`, `-DSLOG=`, `-Ddsi.debuglevel=2` | уровни протоколирования |
+| `-Dde.audi.tghu.traceConfig=/lsd/traceConfig.properties` | настройка трассировки |
+| `-Dstartup.max.prepare.wait`, `-Dstartup.max.domain.wait` | таймауты запуска доменов, по 10 с |
+
+Сам `lsd.jxe` берётся из `/HBextended/lsd.jxe`, затем `/HBextended/lsd2.jxe`,
+затем `/HBpersistence/lsd.jxe` и лишь потом `/lsd/lsd.jxe` — то есть оболочку
+подменяют файлом, не трогая флеш.
+
+### Готовые экраны диагностики навигации
+
+В `/HBpersistence/engdefs` на живой машине лежат, среди прочих: `NavMapEng.esd`
+(движок карты), `NavDiag.esd`, `NavEngineering.esd`, `NavEngRoute.esd`,
+`NavEngRouteTables.esd`, `NavCopy.esd`, `Hdd.esd`. Это готовая поверхность для
+расспроса движка карты — ею мы ещё не пользовались.
+
+### Инструменты для машины
+
+В `utils/` лежат собранные под QNX SH4 двоичные файлы: `DecodeScript`
+(расшифровка `copie_scr.sh`), `hd`, `pax`, `sqlite3`, `sysctl`, `showScreen`.
+Вместе со сборщиком из MMI3G-Toolkit этого достаточно, чтобы делать свои
+диагностические карты.
+
+### Подтверждение раскладки на устройстве
+
+```
+/dev/hd0t77 on /mnt/nav type qnx6            24 ГБ, занято 56%
+/mnt/nav/db/pkgdb/SDS_NAR/SDS_Data.iso on /SDS type cd (joliet)
+database -> /HBpersistence/navi/db
+```
+
+База лежит в `/mnt/nav/db/pkgdb/`, как мы и считали; `SDS` — примонтированный
+образ, отсюда и формат ISO у этого компонента. В доводах драйвера диска стоит
+`decrypt=all`: расшифровку раздела делает FPGA, прозрачно для файловой системы.
+
+### Образец диагностического отчёта
+
+Лог `mmi3ginfo3-v230501` из той машины — готовый образец того, что нам нужно
+снять со своей:
+
+```
+[INFO] MU train name: HNav_US_P0114_D1
+[INFO] Installed HDD: TOSHIBA MK4050GAC
+[INFO] HDD navigation database info: 8R0060884P NAR 5.4.7
+[INFO] Nav database release activation file: 00040002
+```
+
 ## Правила работы с устройством
 
 Список выстрадан опытами на живой машине. Каждое правило стоило отдельного
