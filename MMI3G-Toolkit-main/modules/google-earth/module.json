@@ -1,0 +1,54 @@
+{
+    "name": "google-earth",
+    "version": "2.0.0",
+    "description": "Google Earth satellite imagery restoration — CONFIRMED WORKING. On-car proxy serves dbRoot + auth locally, forwards tiles to kh.google.com via plain HTTP. No PC required.",
+    "author": "dspl1236",
+    "status": "tested",
+    "compatible": [
+        "MMI3G+",
+        "RNS-850"
+    ],
+    "standalone": true,
+    "run_script": "ge_deploy.sh",
+    "script_dir": "/scripts/GoogleEarth",
+    "requires_reboot": true,
+    "scripts": [
+        "ge_deploy.sh - Deploy: install on-car proxy + patched binaries",
+        "ge_probe.sh - SAFE: Probe GEMMI state, check patches, verify connectivity",
+        "ge_restore.sh - SAFE: Revert all changes, restore original binary"
+    ],
+    "payload_dirs": [
+        {
+            "source": "payload",
+            "target": "gemmi"
+        }
+    ],
+    "recommended_flow": [
+        "1. Ensure working internet (LTE, WiFi, USB ethernet — any method)",
+        "2. Build SD card from web app (dspl1236.github.io/MMI3G-Toolkit/app/)",
+        "3. Insert SD card, wait ~1 minute for deploy",
+        "4. Eject SD card, hard reboot MMI",
+        "5. Open Google Earth from map menu — satellite imagery!",
+        "6. If issues: run ge_probe.sh to diagnose, ge_restore.sh to revert"
+    ],
+    "technical": {
+        "patches": [
+            {
+                "offset": "0x343d20",
+                "original": "862f1fc7962f",
+                "patched": "01e00b000900",
+                "purpose": "Image validation bypass (return TRUE)"
+            },
+            {
+                "offset": "0x3470a0",
+                "original": "862f2dc7",
+                "patched": "0b000900",
+                "purpose": "Post-validation DRM skip"
+            }
+        ],
+        "proxy": "gemmi_proxy v5 — on-car HTTP server (dlopen libsocket.so.2, gethostbyname DNS, plain HTTP tile forwarding)",
+        "dbroot": "Custom EncryptedDbRootProto with geoServer→kh.google.com",
+        "auth": "Static cached responses (auth1: 16b, auth2: 136b)",
+        "tiles": "Plain HTTP from kh.google.com (no SSL needed)"
+    }
+}

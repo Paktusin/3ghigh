@@ -1,0 +1,1355 @@
+{
+    "generated": "2026-06-26",
+    "branch": "main",
+    "raw_url_base": "https://raw.githubusercontent.com/dspl1236/MMI3G-Toolkit/main/",
+    "core_files": {
+        "copie_scr_plain_sh": "core/copie_scr_plain.sh",
+        "uninstall_sh": "core/uninstall.sh",
+        "platform_sh": "core/platform.sh",
+        "showScreen": "core/bin/showScreen",
+        "lib_running_png": "core/lib/running.png",
+        "lib_done_png": "core/lib/done.png",
+        "lib_gem_enabled_png": "core/lib/gem_enabled.png",
+        "lib_gem_disabled_png": "core/lib/gem_disabled.png"
+    },
+    "modules": {
+        "can-diag": {
+            "status": "alpha",
+            "description": "CAN bus diagnostics via NDR — v3 with correct devctl codes (class=5, cmd=7/8 from NavigationNdrInfo disassembly). Probes devctl format, scans ~25 ECU module addresses, reads fault codes, module info, and live sensor data. READ-ONLY — no writes to vehicle systems.",
+            "standalone": true,
+            "run_script": "can_diag.sh",
+            "artifact": null,
+            "payload_dirs": [],
+            "release_zip": null,
+            "release_assets": null,
+            "web_build": true,
+            "prebuilt_zip": null,
+            "script_dir": "/scripts/CanDiag",
+            "installs_to_flash": false,
+            "compatible": [
+                "MMI3G",
+                "MMI3G+",
+                "RNS-850"
+            ],
+            "files": [
+                {
+                    "path": "bin/ndr_probe",
+                    "size": 66264
+                },
+                {
+                    "path": "bin/uds_send",
+                    "size": 66268
+                },
+                {
+                    "path": "module.json",
+                    "size": 1311
+                },
+                {
+                    "path": "scripts/can_diag.sh",
+                    "size": 5568
+                },
+                {
+                    "path": "scripts/grab_binaries.sh",
+                    "size": 2625
+                },
+                {
+                    "path": "scripts/read_dtc.sh",
+                    "size": 1031
+                },
+                {
+                    "path": "scripts/read_live_data.sh",
+                    "size": 4043
+                },
+                {
+                    "path": "scripts/read_module_info.sh",
+                    "size": 956
+                },
+                {
+                    "path": "scripts/scan_modules.sh",
+                    "size": 1688
+                }
+            ]
+        },
+        "can-scanner": {
+            "status": "ready",
+            "description": "CAN bus / namespace address scanner - discovers what vehicle data is available via GEM key-value polling on your specific MMI3G system",
+            "standalone": false,
+            "run_script": null,
+            "artifact": null,
+            "payload_dirs": [],
+            "release_zip": null,
+            "release_assets": null,
+            "web_build": true,
+            "prebuilt_zip": null,
+            "script_dir": "/scripts/Scanner",
+            "installs_to_flash": true,
+            "compatible": [
+                "MMI3G",
+                "MMI3G+",
+                "RNS-850"
+            ],
+            "files": [
+                {
+                    "path": "engdefs/ScannerEngine1.esd",
+                    "size": 1309
+                },
+                {
+                    "path": "engdefs/ScannerEngine2.esd",
+                    "size": 1284
+                },
+                {
+                    "path": "engdefs/ScannerGPS.esd",
+                    "size": 1162
+                },
+                {
+                    "path": "engdefs/ScannerGaps1.esd",
+                    "size": 2294
+                },
+                {
+                    "path": "engdefs/ScannerGaps2.esd",
+                    "size": 1194
+                },
+                {
+                    "path": "engdefs/ScannerMixed.esd",
+                    "size": 1272
+                },
+                {
+                    "path": "engdefs/ScannerPer3Engine.esd",
+                    "size": 1264
+                },
+                {
+                    "path": "engdefs/ScannerPer3Low.esd",
+                    "size": 1289
+                },
+                {
+                    "path": "engdefs/ScannerPer3Mid1.esd",
+                    "size": 1245
+                },
+                {
+                    "path": "engdefs/ScannerStrings.esd",
+                    "size": 1168
+                },
+                {
+                    "path": "module.json",
+                    "size": 1449
+                },
+                {
+                    "path": "scripts/scan_log.sh",
+                    "size": 3637
+                },
+                {
+                    "path": "scripts/scan_shmem.sh",
+                    "size": 2703
+                },
+                {
+                    "path": "scripts/scanner_install.sh",
+                    "size": 5975
+                }
+            ]
+        },
+        "diag-tool": {
+            "status": "alpha",
+            "description": "UDS diagnostic scanner for VAG modules — simulated transport + full UDS client (alpha). Live mode requires external VAG-COM interface (VCDS HEX, VNCI 6154a). Installed as a Java JAR artifact; no GEM screens.",
+            "standalone": false,
+            "run_script": null,
+            "artifact": "diag-tool.jar",
+            "payload_dirs": [],
+            "release_zip": null,
+            "release_assets": null,
+            "web_build": true,
+            "prebuilt_zip": null,
+            "script_dir": "/scripts/DiagTool",
+            "installs_to_flash": true,
+            "compatible": [
+                "MMI3G",
+                "MMI3G+",
+                "RNS-850"
+            ],
+            "files": [
+                {
+                    "path": "diag-tool.jar",
+                    "size": 23061
+                },
+                {
+                    "path": "module.json",
+                    "size": 1021
+                },
+                {
+                    "path": "src/de/audi/mmi3g/diag/DiagApp.java",
+                    "size": 9148
+                },
+                {
+                    "path": "src/de/audi/mmi3g/diag/scanner/ModuleScanner.java",
+                    "size": 6786
+                },
+                {
+                    "path": "src/de/audi/mmi3g/diag/scanner/VAGModules.java",
+                    "size": 4714
+                },
+                {
+                    "path": "src/de/audi/mmi3g/diag/transport/SimulatedTransport.java",
+                    "size": 8742
+                },
+                {
+                    "path": "src/de/audi/mmi3g/diag/transport/TransportLayer.java",
+                    "size": 1979
+                },
+                {
+                    "path": "src/de/audi/mmi3g/diag/uds/DiagException.java",
+                    "size": 874
+                },
+                {
+                    "path": "src/de/audi/mmi3g/diag/uds/UDSClient.java",
+                    "size": 13095
+                },
+                {
+                    "path": "src/de/audi/mmi3g/diag/uds/UDSConstants.java",
+                    "size": 10165
+                },
+                {
+                    "path": "src/de/audi/mmi3g/diag/uds/UDSMessage.java",
+                    "size": 4859
+                }
+            ]
+        },
+        "dns-refresh-probe": {
+            "status": "alpha",
+            "description": "One-shot network diagnostic that snapshots route/DNS state, rewrites /etc/resolv.conf to a better DNS candidate, and reruns connectivity checks.",
+            "standalone": true,
+            "run_script": "dns_refresh_probe.sh",
+            "artifact": null,
+            "payload_dirs": [],
+            "release_zip": null,
+            "release_assets": null,
+            "web_build": true,
+            "prebuilt_zip": null,
+            "script_dir": "/scripts/NetDiag",
+            "installs_to_flash": false,
+            "compatible": [
+                "MMI3G+",
+                "RNS-850"
+            ],
+            "files": [
+                {
+                    "path": "module.json",
+                    "size": 1006
+                },
+                {
+                    "path": "scripts/dns_refresh_probe.sh",
+                    "size": 3966
+                }
+            ]
+        },
+        "game-loader": {
+            "status": "ready",
+            "description": "Java game launcher for MMI3G — run games from SD card on the J9 JVM. Use SD slot 2 as your game library!",
+            "standalone": false,
+            "run_script": null,
+            "artifact": null,
+            "payload_dirs": [],
+            "release_zip": null,
+            "release_assets": null,
+            "web_build": true,
+            "prebuilt_zip": null,
+            "script_dir": "/scripts/game-loader",
+            "installs_to_flash": true,
+            "compatible": [
+                "MMI3G",
+                "MMI3G+",
+                "RNS-850"
+            ],
+            "files": [
+                {
+                    "path": "engdefs/GamesMenu.esd",
+                    "size": 525
+                },
+                {
+                    "path": "games/adventure/QuattroQuest.java",
+                    "size": 7641
+                },
+                {
+                    "path": "games/adventure/game.jar",
+                    "size": 3993
+                },
+                {
+                    "path": "games/adventure/game.manifest",
+                    "size": 64
+                },
+                {
+                    "path": "games/benchmark/game.jar",
+                    "size": 1644
+                },
+                {
+                    "path": "games/benchmark/game.manifest",
+                    "size": 89
+                },
+                {
+                    "path": "games/fortune/game.jar",
+                    "size": 1785
+                },
+                {
+                    "path": "games/fortune/game.manifest",
+                    "size": 80
+                },
+                {
+                    "path": "games/snake/Snake.java",
+                    "size": 6006
+                },
+                {
+                    "path": "games/snake/game.jar",
+                    "size": 2625
+                },
+                {
+                    "path": "games/snake/game.manifest",
+                    "size": 45
+                },
+                {
+                    "path": "module.json",
+                    "size": 1374
+                },
+                {
+                    "path": "scripts/game_install.sh",
+                    "size": 4520
+                },
+                {
+                    "path": "scripts/game_loader.sh",
+                    "size": 5450
+                },
+                {
+                    "path": "scripts/launch_game.sh",
+                    "size": 2541
+                }
+            ]
+        },
+        "gauges-dashboard": {
+            "status": "ready",
+            "description": "Live vehicle telemetry dashboard - battery voltage, GPS status, system info with data logging to SD card",
+            "standalone": false,
+            "run_script": null,
+            "artifact": null,
+            "payload_dirs": [],
+            "release_zip": null,
+            "release_assets": null,
+            "web_build": true,
+            "prebuilt_zip": null,
+            "script_dir": "/scripts/Gauges",
+            "installs_to_flash": true,
+            "compatible": [
+                "MMI3G",
+                "MMI3G+",
+                "RNS-850"
+            ],
+            "files": [
+                {
+                    "path": "engdefs/GaugesDashboard.esd",
+                    "size": 1074
+                },
+                {
+                    "path": "engdefs/GaugesNetwork.esd",
+                    "size": 832
+                },
+                {
+                    "path": "engdefs/GaugesSystem.esd",
+                    "size": 969
+                },
+                {
+                    "path": "module.json",
+                    "size": 1029
+                },
+                {
+                    "path": "scripts/diskinfo.sh",
+                    "size": 2318
+                },
+                {
+                    "path": "scripts/dnscheck.sh",
+                    "size": 304
+                },
+                {
+                    "path": "scripts/fullreport.sh",
+                    "size": 3308
+                },
+                {
+                    "path": "scripts/ifconfig.sh",
+                    "size": 96
+                },
+                {
+                    "path": "scripts/netstatus.sh",
+                    "size": 2417
+                },
+                {
+                    "path": "scripts/proclist.sh",
+                    "size": 2099
+                },
+                {
+                    "path": "scripts/routetable.sh",
+                    "size": 95
+                },
+                {
+                    "path": "scripts/snapshot.sh",
+                    "size": 3429
+                },
+                {
+                    "path": "scripts/syslog.sh",
+                    "size": 2078
+                }
+            ]
+        },
+        "gem-activator": {
+            "status": "ready",
+            "description": "Enable/disable the Green Engineering Menu from SD card — creates /HBpersistence/DBGModeActive. No VCDS needed!",
+            "standalone": true,
+            "run_script": "gem_enable.sh",
+            "artifact": null,
+            "payload_dirs": [],
+            "release_zip": null,
+            "release_assets": null,
+            "web_build": true,
+            "prebuilt_zip": null,
+            "script_dir": "/scripts/GEM",
+            "installs_to_flash": true,
+            "compatible": [
+                "MMI3G",
+                "MMI3G+",
+                "RNS-850"
+            ],
+            "files": [
+                {
+                    "path": "engdefs/ToolkitDiag.esd",
+                    "size": 1046
+                },
+                {
+                    "path": "engdefs/ToolkitMain.esd",
+                    "size": 1425
+                },
+                {
+                    "path": "engdefs/ToolkitSWDL.esd",
+                    "size": 1052
+                },
+                {
+                    "path": "module.json",
+                    "size": 986
+                },
+                {
+                    "path": "scripts/gem_disable.sh",
+                    "size": 893
+                },
+                {
+                    "path": "scripts/gem_enable.sh",
+                    "size": 3095
+                },
+                {
+                    "path": "scripts/gem_status.sh",
+                    "size": 1378
+                }
+            ]
+        },
+        "gemmi-dump": {
+            "status": "ready",
+            "description": "Extract GEMMI (Google Earth) binaries and config from HDD for offline analysis — needed for auth bypass patching",
+            "standalone": true,
+            "run_script": "gemmi_dump.sh",
+            "artifact": null,
+            "payload_dirs": [],
+            "release_zip": null,
+            "release_assets": null,
+            "web_build": true,
+            "prebuilt_zip": null,
+            "script_dir": "/scripts/GEMMIDump",
+            "installs_to_flash": false,
+            "compatible": [
+                "MMI3G",
+                "MMI3G+",
+                "RNS-850"
+            ],
+            "files": [
+                {
+                    "path": "module.json",
+                    "size": 624
+                },
+                {
+                    "path": "scripts/gemmi_dump.sh",
+                    "size": 3373
+                }
+            ]
+        },
+        "google-earth": {
+            "status": "tested",
+            "description": "Google Earth satellite imagery restoration — CONFIRMED WORKING. On-car proxy serves dbRoot + auth locally, forwards tiles to kh.google.com via plain HTTP. No PC required.",
+            "standalone": true,
+            "run_script": "ge_deploy.sh",
+            "artifact": null,
+            "payload_dirs": [
+                {
+                    "source": "payload",
+                    "target": "gemmi"
+                }
+            ],
+            "release_zip": null,
+            "release_assets": null,
+            "web_build": true,
+            "prebuilt_zip": null,
+            "script_dir": "/scripts/GoogleEarth",
+            "installs_to_flash": true,
+            "compatible": [
+                "MMI3G+",
+                "RNS-850"
+            ],
+            "files": [
+                {
+                    "path": "module.json",
+                    "size": 2124
+                },
+                {
+                    "path": "payload/auth_resp1.bin",
+                    "size": 16
+                },
+                {
+                    "path": "payload/auth_resp2.bin",
+                    "size": 136
+                },
+                {
+                    "path": "payload/dbRoot_custom.bin",
+                    "size": 16959
+                },
+                {
+                    "path": "payload/ge_settings.dat",
+                    "size": 1119
+                },
+                {
+                    "path": "payload/gemmi_control.sh",
+                    "size": 1220
+                },
+                {
+                    "path": "payload/gemmi_proxy",
+                    "size": 66328
+                },
+                {
+                    "path": "payload/gemmi_proxy_v6",
+                    "size": 131904
+                },
+                {
+                    "path": "payload/gemmi_proxy_v7",
+                    "size": 131916
+                },
+                {
+                    "path": "payload/gemmi_server.sh",
+                    "size": 2310
+                },
+                {
+                    "path": "payload/models/audisvcursor.png",
+                    "size": 4107
+                },
+                {
+                    "path": "payload/models/audisvinfocursor.png",
+                    "size": 5168
+                },
+                {
+                    "path": "payload/models/audisvjumpcursor.png",
+                    "size": 3105
+                },
+                {
+                    "path": "payload/models/streetviewguy.png",
+                    "size": 816
+                },
+                {
+                    "path": "payload/run_gemmi.sh",
+                    "size": 4140
+                },
+                {
+                    "path": "scripts/ge_deploy.sh",
+                    "size": 6856
+                },
+                {
+                    "path": "scripts/ge_deploy_oncar.sh",
+                    "size": 116
+                },
+                {
+                    "path": "scripts/ge_deploy_v6.sh",
+                    "size": 7312
+                },
+                {
+                    "path": "scripts/ge_probe.sh",
+                    "size": 13151
+                },
+                {
+                    "path": "scripts/ge_restore.sh",
+                    "size": 2437
+                }
+            ]
+        },
+        "google-earth-gemmi-wrappers": {
+            "status": "alpha",
+            "description": "Install legacy /scripts/GEMMI control-script wrappers so the OEM GoogleEarth GEM screen can call the donor GEMMI runtime already deployed under /mnt/nav/gemmi/.",
+            "standalone": true,
+            "run_script": "gemmi_wrapper_install.sh",
+            "artifact": null,
+            "payload_dirs": [],
+            "release_zip": null,
+            "release_assets": null,
+            "web_build": true,
+            "prebuilt_zip": null,
+            "script_dir": "/scripts/GEMMI",
+            "installs_to_flash": true,
+            "compatible": [
+                "RNS-850"
+            ],
+            "files": [
+                {
+                    "path": "module.json",
+                    "size": 923
+                },
+                {
+                    "path": "scripts/activateGEMMI.sh",
+                    "size": 447
+                },
+                {
+                    "path": "scripts/deactivateGEMMI.sh",
+                    "size": 404
+                },
+                {
+                    "path": "scripts/deleteCacheGEMMI.sh",
+                    "size": 195
+                },
+                {
+                    "path": "scripts/gemmi_wrapper_install.sh",
+                    "size": 1354
+                },
+                {
+                    "path": "scripts/getCacheStatus.sh",
+                    "size": 331
+                },
+                {
+                    "path": "scripts/getInfoGEMMI.sh",
+                    "size": 628
+                },
+                {
+                    "path": "scripts/restartGEMMI.sh",
+                    "size": 549
+                },
+                {
+                    "path": "scripts/shutdownGEMMI.sh",
+                    "size": 216
+                },
+                {
+                    "path": "scripts/startGEMMI.sh",
+                    "size": 582
+                }
+            ]
+        },
+        "google-earth-p0824-deploy": {
+            "status": "alpha",
+            "description": "Deploy the bundled EU VW P0824 GEMMI donor payload to /mnt/nav/gemmi with on-car backup and minimal drivers.ini auth-bypass patching. SD-card only; does not modify lsd.jxe or firmware.",
+            "standalone": true,
+            "run_script": "ge_p0824_deploy.sh",
+            "artifact": null,
+            "payload_dirs": [
+                {
+                    "source": "gemmi",
+                    "target": "gemmi"
+                }
+            ],
+            "release_zip": {
+                "url": "https://github.com/dspl1236/MMI3G-Toolkit/releases/download/v1.0-gemmi-p0824/gemmi_p0824_eu_vw.zip",
+                "web_url": "https://dspl1236.github.io/MMI3G-Toolkit/payloads/gemmi_p0824_eu_vw.zip",
+                "target": "gemmi",
+                "size": 9823685
+            },
+            "release_assets": null,
+            "web_build": true,
+            "prebuilt_zip": "https://github.com/dspl1236/MMI3G-Toolkit/releases/download/v1.0-gemmi-p0824/gemmi_p0824_eu_vw.zip",
+            "script_dir": "/scripts/GoogleEarth",
+            "installs_to_flash": true,
+            "compatible": [
+                "RNS-850"
+            ],
+            "files": [
+                {
+                    "path": "BINARIES.md",
+                    "size": 938
+                },
+                {
+                    "path": "gemmi/debug_gemmi.sh",
+                    "size": 152
+                },
+                {
+                    "path": "gemmi/debug_memcpu.sh",
+                    "size": 269
+                },
+                {
+                    "path": "gemmi/drivers.cfg",
+                    "size": 1119
+                },
+                {
+                    "path": "gemmi/pg.sh",
+                    "size": 410
+                },
+                {
+                    "path": "gemmi/run_gemmi.sh",
+                    "size": 4155
+                },
+                {
+                    "path": "module.json",
+                    "size": 1621
+                },
+                {
+                    "path": "scripts/ge_p0824_deploy.sh",
+                    "size": 5962
+                }
+            ]
+        },
+        "google-earth-p0824-restore": {
+            "status": "alpha",
+            "description": "Restore /mnt/nav/gemmi to the pre-deploy state saved by google-earth-p0824-deploy. SD-card only; does not touch firmware.",
+            "standalone": true,
+            "run_script": "ge_p0824_restore.sh",
+            "artifact": null,
+            "payload_dirs": [],
+            "release_zip": null,
+            "release_assets": null,
+            "web_build": true,
+            "prebuilt_zip": null,
+            "script_dir": "/scripts/GoogleEarth",
+            "installs_to_flash": true,
+            "compatible": [
+                "RNS-850"
+            ],
+            "files": [
+                {
+                    "path": "module.json",
+                    "size": 925
+                },
+                {
+                    "path": "scripts/ge_p0824_restore.sh",
+                    "size": 2302
+                }
+            ]
+        },
+        "jvm-extract": {
+            "status": "ready",
+            "description": "Extract J9 JVM runtime, UI framework JARs, and application config for offline reverse engineering — the first step toward custom MMI menu entries",
+            "standalone": true,
+            "run_script": "jvm_extract.sh",
+            "artifact": null,
+            "payload_dirs": [],
+            "release_zip": null,
+            "release_assets": null,
+            "web_build": true,
+            "prebuilt_zip": null,
+            "script_dir": "/scripts/jvm-extract",
+            "installs_to_flash": false,
+            "compatible": [
+                "MMI3G",
+                "MMI3G+",
+                "RNS-850"
+            ],
+            "files": [
+                {
+                    "path": "module.json",
+                    "size": 1975
+                },
+                {
+                    "path": "scripts/jvm_extract.sh",
+                    "size": 15299
+                }
+            ]
+        },
+        "long-coding": {
+            "status": "alpha",
+            "description": "Display current long-coding / adaptation values for each configurable MMI feature. Read-only display module — for safe editing use VCDS or ODIS.",
+            "standalone": false,
+            "run_script": null,
+            "artifact": null,
+            "payload_dirs": [],
+            "release_zip": null,
+            "release_assets": null,
+            "web_build": true,
+            "prebuilt_zip": null,
+            "script_dir": "/scripts/long-coding",
+            "installs_to_flash": true,
+            "compatible": [
+                "MMI3G",
+                "MMI3G+",
+                "RNS-850"
+            ],
+            "files": [
+                {
+                    "path": "engdefs/CodingBusRouting.esd",
+                    "size": 1718
+                },
+                {
+                    "path": "engdefs/CodingCarConfig.esd",
+                    "size": 1920
+                },
+                {
+                    "path": "engdefs/CodingMain.esd",
+                    "size": 1498
+                },
+                {
+                    "path": "module.json",
+                    "size": 1353
+                },
+                {
+                    "path": "scripts/coding_changelog.sh",
+                    "size": 3212
+                },
+                {
+                    "path": "scripts/coding_dump.sh",
+                    "size": 7827
+                },
+                {
+                    "path": "scripts/coding_install.sh",
+                    "size": 4602
+                }
+            ]
+        },
+        "lte-setup": {
+            "status": "deprecated",
+            "description": "[DEPRECATED — use the 'usb-net' module] LTE mobile data via USB Ethernet. Superseded by usb-net, which ships the universal ASIX driver (incl. AX88772B/C) and an 'lte' mode that does the same DLinkReplacesPPP + DNS setup. The old AX88772B/D override scripts never worked on io-net and have been removed.",
+            "standalone": true,
+            "run_script": "lte_setup.sh",
+            "artifact": null,
+            "payload_dirs": [],
+            "release_zip": null,
+            "release_assets": null,
+            "web_build": true,
+            "prebuilt_zip": null,
+            "script_dir": "/scripts/LTE",
+            "installs_to_flash": true,
+            "compatible": [
+                "MMI3G+",
+                "RNS-850"
+            ],
+            "files": [
+                {
+                    "path": "module.json",
+                    "size": 1380
+                },
+                {
+                    "path": "scripts/lte_restore.sh",
+                    "size": 4599
+                },
+                {
+                    "path": "scripts/lte_setup.sh",
+                    "size": 12293
+                },
+                {
+                    "path": "scripts/lte_static.sh",
+                    "size": 2590
+                },
+                {
+                    "path": "scripts/lte_status.sh",
+                    "size": 4443
+                }
+            ]
+        },
+        "map-parser": {
+            "status": "ready",
+            "description": "Extract and analyze navigation database config — reads nav DB version, map regions, configured paths, and FSC activation state. Read-only.",
+            "standalone": true,
+            "run_script": "map_parse.sh",
+            "artifact": null,
+            "payload_dirs": [],
+            "release_zip": null,
+            "release_assets": null,
+            "web_build": true,
+            "prebuilt_zip": null,
+            "script_dir": "/scripts/MapParser",
+            "installs_to_flash": false,
+            "compatible": [
+                "MMI3G",
+                "MMI3G+",
+                "RNS-850"
+            ],
+            "files": [
+                {
+                    "path": "module.json",
+                    "size": 1261
+                },
+                {
+                    "path": "scripts/map_parse.sh",
+                    "size": 7848
+                }
+            ]
+        },
+        "nav-unblocker": {
+            "status": "ready",
+            "description": "Bypass navigation database activation check - uses DrGER2's improved manage_cd.sh patch method (Keldo's discovery)",
+            "standalone": true,
+            "run_script": "nav_unblocker.sh",
+            "artifact": null,
+            "payload_dirs": [],
+            "release_zip": null,
+            "release_assets": null,
+            "web_build": true,
+            "prebuilt_zip": null,
+            "script_dir": "/scripts/NavUnblocker",
+            "installs_to_flash": true,
+            "compatible": [
+                "MMI3G",
+                "MMI3G+",
+                "RNS-850"
+            ],
+            "files": [
+                {
+                    "path": "module.json",
+                    "size": 932
+                },
+                {
+                    "path": "scripts/nav_restore.sh",
+                    "size": 4668
+                },
+                {
+                    "path": "scripts/nav_status.sh",
+                    "size": 4778
+                },
+                {
+                    "path": "scripts/nav_unblocker.sh",
+                    "size": 8024
+                }
+            ]
+        },
+        "password-finder": {
+            "status": "ready",
+            "description": "Dump stored Wi-Fi hotspot passwords, Audi Connect credentials, and other stored secrets from the MMI's persistence partitions. Read-only — changes nothing on the unit.",
+            "standalone": true,
+            "run_script": "password_dump.sh",
+            "artifact": null,
+            "payload_dirs": [],
+            "release_zip": null,
+            "release_assets": null,
+            "web_build": true,
+            "prebuilt_zip": null,
+            "script_dir": "/scripts/PasswordFinder",
+            "installs_to_flash": false,
+            "compatible": [
+                "MMI3G",
+                "MMI3G+",
+                "RNS-850"
+            ],
+            "files": [
+                {
+                    "path": "module.json",
+                    "size": 1455
+                },
+                {
+                    "path": "scripts/password_dump.sh",
+                    "size": 8552
+                }
+            ]
+        },
+        "per3-reader": {
+            "status": "alpha",
+            "description": "Read per3 / DSI persistence values from shell scripts. Ships an OSGi bundle that installs into the DSITracer.jar slot on /mnt/efs-system/lsd/ — on MMI boot, the bundle registers as a DSIPersistenceListener and serves synchronous reads through a file-based trigger mechanism. Answers the long-standing 'how do I read per3 addresses without writing a Java GEM screen' question.",
+            "standalone": true,
+            "run_script": "per3_install.sh",
+            "artifact": "per3-reader.jar",
+            "payload_dirs": [],
+            "release_zip": null,
+            "release_assets": null,
+            "web_build": true,
+            "prebuilt_zip": null,
+            "script_dir": "/scripts/Per3Reader",
+            "installs_to_flash": true,
+            "compatible": [
+                "MMI3G",
+                "MMI3G+",
+                "RNS-850"
+            ],
+            "files": [
+                {
+                    "path": "MANIFEST.MF",
+                    "size": 368
+                },
+                {
+                    "path": "build.sh",
+                    "size": 3170
+                },
+                {
+                    "path": "module.json",
+                    "size": 3194
+                },
+                {
+                    "path": "per3-reader.jar",
+                    "size": 9411
+                },
+                {
+                    "path": "scripts/per3_install.sh",
+                    "size": 6086
+                },
+                {
+                    "path": "scripts/per3_read.sh",
+                    "size": 2592
+                },
+                {
+                    "path": "scripts/per3_restore.sh",
+                    "size": 1519
+                },
+                {
+                    "path": "src/de/dspl/per3reader/Activator.java",
+                    "size": 5919
+                },
+                {
+                    "path": "src/de/dspl/per3reader/Per3Reader.java",
+                    "size": 6871
+                },
+                {
+                    "path": "src/de/dspl/per3reader/TriggerLoop.java",
+                    "size": 6805
+                },
+                {
+                    "path": "src/de/dspl/per3reader/test/MockDSIPersistence.java",
+                    "size": 5843
+                },
+                {
+                    "path": "src/de/dspl/per3reader/test/TestMain.java",
+                    "size": 8616
+                },
+                {
+                    "path": "src/stubs/org/dsi/ifc/admin/JDSIAdmin.java",
+                    "size": 433
+                },
+                {
+                    "path": "src/stubs/org/dsi/ifc/base/DSIBase.java",
+                    "size": 291
+                },
+                {
+                    "path": "src/stubs/org/dsi/ifc/base/DSIFatalException.java",
+                    "size": 181
+                },
+                {
+                    "path": "src/stubs/org/dsi/ifc/base/DSIListener.java",
+                    "size": 60
+                },
+                {
+                    "path": "src/stubs/org/dsi/ifc/base/DSINonFatalException.java",
+                    "size": 190
+                },
+                {
+                    "path": "src/stubs/org/dsi/ifc/persistence/DSIPersistence.java",
+                    "size": 6560
+                },
+                {
+                    "path": "src/stubs/org/dsi/ifc/persistence/DSIPersistenceListener.java",
+                    "size": 3289
+                },
+                {
+                    "path": "src/stubs/org/osgi/framework/BundleActivator.java",
+                    "size": 411
+                },
+                {
+                    "path": "src/stubs/org/osgi/framework/BundleContext.java",
+                    "size": 801
+                },
+                {
+                    "path": "src/stubs/org/osgi/framework/InvalidSyntaxException.java",
+                    "size": 164
+                },
+                {
+                    "path": "src/stubs/org/osgi/framework/ServiceReference.java",
+                    "size": 135
+                },
+                {
+                    "path": "src/stubs/org/osgi/framework/ServiceRegistration.java",
+                    "size": 130
+                },
+                {
+                    "path": "src/stubs/org/osgi/util/tracker/ServiceTracker.java",
+                    "size": 491
+                },
+                {
+                    "path": "src/stubs/org/osgi/util/tracker/ServiceTrackerCustomizer.java",
+                    "size": 316
+                }
+            ]
+        },
+        "per3-writer": {
+            "status": "design",
+            "description": "Write DSI persistence values from shell scripts via OSGi bundle. Enables GEM activation, coding changes, and feature configuration entirely from SD card — no VCDS/ODIS needed.",
+            "standalone": false,
+            "run_script": null,
+            "artifact": null,
+            "payload_dirs": [],
+            "release_zip": null,
+            "release_assets": null,
+            "web_build": true,
+            "prebuilt_zip": null,
+            "script_dir": "/scripts/per3-writer",
+            "installs_to_flash": true,
+            "compatible": [
+                "MMI3G",
+                "MMI3G+",
+                "RNS-850"
+            ],
+            "files": [
+                {
+                    "path": "README.md",
+                    "size": 2750
+                },
+                {
+                    "path": "module.json",
+                    "size": 650
+                }
+            ]
+        },
+        "persistence-dump": {
+            "status": "ready",
+            "description": "Dumps persistence state (HBpersistence, efs-persist, shmem, coding) to SD card for offline analysis — use before/after VCDS changes to find exact byte locations",
+            "standalone": true,
+            "run_script": "persist_dump.sh",
+            "artifact": null,
+            "payload_dirs": [],
+            "release_zip": null,
+            "release_assets": null,
+            "web_build": true,
+            "prebuilt_zip": null,
+            "script_dir": "/scripts/PersistDump",
+            "installs_to_flash": false,
+            "compatible": [
+                "MMI3G",
+                "MMI3G+",
+                "RNS-850"
+            ],
+            "files": [
+                {
+                    "path": "module.json",
+                    "size": 573
+                },
+                {
+                    "path": "scripts/persist_dump.sh",
+                    "size": 3893
+                }
+            ]
+        },
+        "region-audit": {
+            "status": "planned",
+            "description": "Read-only region and VZE/TSR audit. Shows live region-related persistence values in GEM and writes a structured audit report to SD card.",
+            "standalone": false,
+            "run_script": null,
+            "artifact": null,
+            "payload_dirs": [],
+            "release_zip": null,
+            "release_assets": null,
+            "web_build": true,
+            "prebuilt_zip": null,
+            "script_dir": "/scripts/RegionAudit",
+            "installs_to_flash": true,
+            "compatible": [
+                "MMI3G+",
+                "RNS-850"
+            ],
+            "files": [
+                {
+                    "path": "engdefs/RegionAuditMain.esd",
+                    "size": 1221
+                },
+                {
+                    "path": "module.json",
+                    "size": 1540
+                },
+                {
+                    "path": "scripts/region_audit.sh",
+                    "size": 9713
+                }
+            ]
+        },
+        "splash-screen": {
+            "status": "ready",
+            "description": "Custom boot splash screen installer - upload any image, auto-formatted to 800x480 PNG via the desktop app",
+            "standalone": true,
+            "run_script": "splash_install.sh",
+            "artifact": null,
+            "payload_dirs": [],
+            "release_zip": null,
+            "release_assets": null,
+            "web_build": true,
+            "prebuilt_zip": null,
+            "script_dir": "/scripts/Splash",
+            "installs_to_flash": true,
+            "compatible": [
+                "MMI3G",
+                "MMI3G+",
+                "RNS-850"
+            ],
+            "files": [
+                {
+                    "path": "module.json",
+                    "size": 973
+                },
+                {
+                    "path": "scripts/splash_install.sh",
+                    "size": 4999
+                },
+                {
+                    "path": "scripts/splash_restore.sh",
+                    "size": 3099
+                }
+            ]
+        },
+        "system-info": {
+            "status": "ready",
+            "description": "Deep system forensic — gathers identity, activations, credentials, storage, network, persistence state, RSA keys, DataPST database, IPC channel captures (CAN/BAP data), QDB dumps, full process maps, syslog, and system configs. Single pass, no flash writes.",
+            "standalone": true,
+            "run_script": "sysinfo_dump.sh",
+            "artifact": null,
+            "payload_dirs": [],
+            "release_zip": null,
+            "release_assets": null,
+            "web_build": true,
+            "prebuilt_zip": null,
+            "script_dir": "/scripts/SystemInfo",
+            "installs_to_flash": false,
+            "compatible": [
+                "MMI3G",
+                "MMI3G+",
+                "RNS-850"
+            ],
+            "files": [
+                {
+                    "path": "module.json",
+                    "size": 933
+                },
+                {
+                    "path": "scripts/sysinfo_dump.sh",
+                    "size": 22098
+                }
+            ]
+        },
+        "usb-net": {
+            "status": "ready",
+            "description": "Universal ASIX USB-Ethernet for MMI3G+ / RNS-850. Ships a devn-asix driver that supports AX88772 / 772A / 772B / 772C (+ 88178 and Linksys/NetGear rebadges) by activating Harman's own AX88772B init path from later firmware. Brings up the link + telnet; 'lte' mode also sets DLinkReplacesPPP so the unit uses the USB adapter for online services. Loads from USB only — never modifies the read-only firmware.",
+            "standalone": true,
+            "run_script": "usb_net_run.sh",
+            "artifact": null,
+            "payload_dirs": [
+                {
+                    "source": "bin",
+                    "target": "bin"
+                }
+            ],
+            "release_zip": null,
+            "release_assets": null,
+            "web_build": true,
+            "prebuilt_zip": null,
+            "script_dir": "/scripts/USBNet",
+            "installs_to_flash": true,
+            "compatible": [
+                "MMI3G+",
+                "RNS-850"
+            ],
+            "files": [
+                {
+                    "path": "README.md",
+                    "size": 2415
+                },
+                {
+                    "path": "bin/devn-asix-universal.so",
+                    "size": 75540
+                },
+                {
+                    "path": "module.json",
+                    "size": 1924
+                },
+                {
+                    "path": "scripts/usb_net_run.sh",
+                    "size": 4761
+                }
+            ]
+        },
+        "variant-dump": {
+            "status": "ready",
+            "description": "MMI identification + configuration dumper — captures train name, MU software version, MU variant, HMI region, kernel info, HDD/partition layout, nav database state, FSC status, persistence file inventory, and LVM unblocker status. Mirrors DrGER2's mmi3ginfo3 approach. Read-only, writes a text report to SD card.",
+            "standalone": true,
+            "run_script": "variant_dump.sh",
+            "artifact": null,
+            "payload_dirs": [],
+            "release_zip": null,
+            "release_assets": null,
+            "web_build": true,
+            "prebuilt_zip": null,
+            "script_dir": "/scripts/VariantDump",
+            "installs_to_flash": false,
+            "compatible": [
+                "MMI3G",
+                "MMI3G+",
+                "RNS-850"
+            ],
+            "files": [
+                {
+                    "path": "module.json",
+                    "size": 2250
+                },
+                {
+                    "path": "scripts/variant_dump.sh",
+                    "size": 9763
+                }
+            ]
+        }
+    },
+    "gemmi_assets": {
+        "base_url": "https://raw.githubusercontent.com/dspl1236/MMI3G-Toolkit/main/binaries/gemmi/",
+        "files": [
+            {
+                "name": "gemmi_final",
+                "path": "gemmi/gemmi_final",
+                "size": 1965004
+            },
+            {
+                "name": "libembeddedearth_oncar.so",
+                "path": "gemmi/libembeddedearth_oncar.so",
+                "size": 20839388
+            },
+            {
+                "name": "libmessaging.so",
+                "path": "gemmi/libmessaging.so",
+                "size": 826149
+            },
+            {
+                "name": "libthirdparty_icu_3_5.so",
+                "path": "gemmi/libthirdparty_icu_3_5.so",
+                "size": 1524205
+            },
+            {
+                "name": "mapStylesWrite",
+                "path": "gemmi/mapStylesWrite",
+                "size": 507383
+            },
+            {
+                "name": "gemmi_models_res.zip",
+                "path": "gemmi/gemmi_models_res.zip",
+                "size": 801183
+            },
+            {
+                "name": "ge_settings.dat",
+                "path": "gemmi/ge_settings.dat",
+                "size": 1119,
+                "url": "https://raw.githubusercontent.com/dspl1236/MMI3G-Toolkit/main/modules/google-earth/payload/ge_settings.dat"
+            },
+            {
+                "name": "dbRoot_custom.bin",
+                "path": "gemmi/dbRoot_custom.bin",
+                "size": 16892,
+                "url": "https://raw.githubusercontent.com/dspl1236/MMI3G-Toolkit/main/modules/google-earth/payload/dbRoot_custom.bin"
+            },
+            {
+                "name": "auth_resp1.bin",
+                "path": "gemmi/auth_resp1.bin",
+                "size": 16,
+                "url": "https://raw.githubusercontent.com/dspl1236/MMI3G-Toolkit/main/modules/google-earth/payload/auth_resp1.bin"
+            },
+            {
+                "name": "auth_resp2.bin",
+                "path": "gemmi/auth_resp2.bin",
+                "size": 136,
+                "url": "https://raw.githubusercontent.com/dspl1236/MMI3G-Toolkit/main/modules/google-earth/payload/auth_resp2.bin"
+            },
+            {
+                "name": "run_gemmi.sh",
+                "path": "gemmi/run_gemmi.sh",
+                "size": 4140,
+                "url": "https://raw.githubusercontent.com/dspl1236/MMI3G-Toolkit/main/modules/google-earth/payload/run_gemmi.sh"
+            }
+        ],
+        "total_size_mb": 24.8,
+        "note": "Downloaded from GitHub Release assets (not in git repo). Only fetched when google-earth module is selected."
+    }
+}

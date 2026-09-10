@@ -1,0 +1,49 @@
+#############################################
+#
+#  MMI3G-Toolkit Gauges Dashboard
+#  github.com/dspl1236/MMI3G-Toolkit
+#
+#############################################
+
+screen	GaugesDashboard	Toolkit
+
+   keyValue
+      value    int per 3 0x00000023
+      label    "Battery (x100 mV)"
+      poll     500
+
+   keyValue
+      value    int per 7 0x000200bb
+      label    "GPS Sats Used"
+      poll     1000
+
+   keyValue
+      value    int per 7 0x000200bc
+      label    "GPS Sats Visible"
+      poll     1000
+
+   keyValue
+      value    int per 1 0x00030019
+      label    "GPS Altitude (m)"
+      poll     1000
+
+   keyValue
+      value    String per 3 0x00120004
+      label    "SW Train"
+
+   keyValue
+      value    String per 1 0x0000100d
+      label    "MU Version"
+
+   keyValue
+      value    int per 1 0x00180000
+      label    "USB Devices"
+      poll     2000
+
+   script
+      value    sys 1 0x0100 "/scripts/Gauges/snapshot.sh"
+      label    ">> Snapshot to SD <<"
+
+   script
+      value    sys 1 0x0100 "/scripts/Gauges/syslog.sh"
+      label    ">> Syslog to SD <<"

@@ -1,0 +1,1088 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MMI-Toolkit — SD Card Builder</title>
+  <meta name="description" content="SD card toolkit for Audi/VW MMI infotainment systems infotainment systems">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='16' fill='%23c41e3a'/><text y='72' x='12' font-size='56' font-family='monospace' font-weight='bold' fill='white'>M3</text></svg>">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0a0a0c; }
+    #root { min-height: 100vh; }
+    input[type="range"] { height: 4px; }
+    input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%; background: #c41e3a; cursor: pointer; }
+    ::selection { background: rgba(196,30,58,0.3); }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #0a0a0c; }
+    ::-webkit-scrollbar-thumb { background: #2a2a2e; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <script type="text/babel">
+    const { useState, useRef, useCallback, useEffect } = React;
+
+const MMI_W = 800;
+const MMI_H = 480;
+const PREVIEW_SCALE = 0.72;
+
+// MMI3GCipher — XOR PRNG matching Harman Becker proc_scriptlauncher
+// Verified byte-identical to builder/encoder.py
+class MMI3GCipher {
+  constructor() {
+    this.SEED_INIT = 0x001be3ac >>> 0;
+    this.seed = this.SEED_INIT;
+  }
+  _prng_rand() {
+    const r0 = this.seed >>> 0;
+    let r1 = ((this.seed >>> 1) | ((this.seed << 31) >>> 0)) >>> 0;
+    let r3 = ((((r1 >>> 16) & 0xFF) + r1) >>> 0);
+    r1 = ((((r3 >>> 8) & 0xFF) << 16) >>> 0);
+    r3 = ((r3 - r1) >>> 0);
+    this.seed = r3;
+    return r0;
+  }
+  process(data) {
+    this.seed = this.SEED_INIT;
+    this._prng_rand();
+    const out = new Uint8Array(data.length);
+    for (let i = 0; i < data.length; i++) {
+      out[i] = data[i] ^ (this._prng_rand() & 0xFF);
+    }
+    return out;
+  }
+}
+
+const MANIFEST_URL = "./manifest.json";
+const MODULES_DISPLAY = [
+  { id: "system-info", name: "System Info", status: "tested",
+    desc: "Complete diagnostic — identity, activations, credentials, nav DB, persistence backup, bus topology. Single pass, no flash writes.",
+    compat: ["3G", "3G+", "RNS-850"], category: "diag", primary: true,
+    prereq: null, detail: "14-section report: system identity, GEM state, activation/FSC, credentials + sweep, storage, network, installed mods, HBpersistence backup, processes, syslog, nav DB/map/acios_db.ini, credential sweep, CVALUE/FSC file backup, QNX kernel + IPC/DSP/MOST/CAN bus topology. Consolidates system-info + password-finder + variant-dump + persistence-dump + map-parser." },
+  { id: "gem-activator", name: "GEM Activator", status: "tested",
+    desc: "Enable the Green Engineering Menu from SD card — creates /HBpersistence/DBGModeActive. No VCDS needed!",
+    compat: ["3G", "3G+", "RNS-850"], category: "system",
+    prereq: null, detail: "Creates the DBGModeActive file marker checked by the MMI firmware at boot. Reboot after running to activate GEM. Confirmed working on MMI 3G+." },
+  { id: "gauges-dashboard", name: "Gauges Dashboard", status: "tested",
+    desc: "Live telemetry — voltage, GPS, system info, data logging",
+    compat: ["3G", "3G+", "RNS-850"], category: "gem",
+    prereq: "gem-activator", detail: "3 GEM screens with 500ms battery polling, GPS satellite tracking, and one-tap data logging to SD card." },
+  { id: "splash-screen", name: "Splash Screen", status: "alpha",
+    desc: "Custom boot logo — use the formatter tab to prepare your image",
+    compat: ["3G", "3G+", "RNS-850"], category: "visual",
+    prereq: null, detail: "Copies 800x480 PNG to /mnt/efs-system/etc/splashscreens/. Backs up factory screens automatically." },
+  { id: "nav-unblocker", name: "Nav Unblocker", status: "alpha",
+    desc: "Bypass navigation database activation check",
+    compat: ["3G", "3G+", "RNS-850"], category: "nav",
+    prereq: null, detail: "Patches manage_cd.sh to terminate vdev-logvolmgr. Persistent, reversed by firmware reinstall." },
+  { id: "usb-net", name: "USB Ethernet", status: "beta",
+    desc: "Universal ASIX USB-Ethernet (AX88772 / 772A / 772B / 772C) + telnet. Modes: dhcp / static / lte.",
+    compat: ["3G+", "RNS-850"], category: "net",
+    prereq: null, detail: "Ships devn-asix-universal.so — activates Harman's own AX88772B init from later (MU9498) firmware so modern 772B/772C adapters work, not just 772/772A. Loads from USB into the running io-net; never touches the read-only flash (reboot-safe). 'lte' mode also sets DLinkReplacesPPP so the unit uses the adapter for online services. Validated on a Porsche PCM 3.1; MMI3G+/RNS-850 expected (same QNX 6.3 io-net SH4 driver). Supersedes lte-setup." },
+  { id: "lte-setup", name: "LTE Setup", status: "deprecated",
+    desc: "DEPRECATED — use USB Ethernet. The old AX88772B/D overrides never worked on io-net.",
+    compat: ["3G+", "RNS-850"], category: "net",
+    prereq: null, detail: "Superseded by the usb-net module, which ships the universal ASIX driver (incl. 772B/C) and an 'lte' mode that does the same DLinkReplacesPPP + DNS setup. Kept for now for its lte_restore.sh helper." },
+  { id: "can-scanner", name: "CAN Scanner", status: "alpha",
+    desc: "CAN bus address scanner — discover RPM, boost, coolant, speed",
+    compat: ["3G", "3G+", "RNS-850"], category: "diag",
+    prereq: "gem-activator", detail: "Live address scan via per3 namespace. Great for discovering custom data for gauges dashboard." },
+    { id: "dtc-checker", name: "DTC Checker", status: "tested",
+    desc: "Onboard diagnostic trouble code reader — view and clear DTCs from the GEM",
+    compat: ["3G", "3G+", "RNS-850"], category: "gem",
+    prereq: "gem-activator", detail: "3 GEM screens: DTC overview (20 rows), single DTC detail with status flags, and DTC control (clear/test). Uses DSI namespace 2 via IOC. V850 IOC has TP2.0 diagnostic protocol support." },
+    { id: "per3-reader", name: "Per3 Reader", status: "alpha",
+    desc: "Read DSI persistence values from shell scripts via Java OSGi bundle",
+    compat: ["3G", "3G+", "RNS-850"], category: "system",
+    prereq: null, detail: "OSGi bundle installs into DSITracer.jar slot. After reboot, shell scripts can read any DSI persistence value (battery voltage, coding bytes, train name). Requires reboot after install." },
+  { id: "per3-writer", name: "Per3 Writer", status: "design",
+    desc: "Write DSI persistence values — enable GEM, change coding without VCDS",
+    compat: ["3G", "3G+", "RNS-850"], category: "system",
+    prereq: "per3-reader", detail: "Same OSGi pattern as per3-reader but calls requestWriteInt. Would enable GEM activation, coding changes, and feature configuration entirely from SD card. Design phase — needs per3-reader verified first." },
+  { id: "jvm-extract", name: "JVM Extract", status: "alpha",
+    desc: "Extract J9 JVM and UI framework for reverse engineering",
+    compat: ["3G", "3G+", "RNS-850"], category: "diag",
+    prereq: null, detail: "Copies J9 runtime and AppDevelopment.jar to SD for offline analysis." },
+  { id: "game-loader", name: "Game Loader", status: "alpha",
+    desc: "Run Java games on the MMI's J9 JVM from SD card",
+    compat: ["3G", "3G+", "RNS-850"], category: "visual",
+    prereq: "gem-activator", detail: "Launcher module plus example games. Loads signed JARs via the built-in job framework." },
+  { id: "gemmi-dump", name: "GEMMI Dump", status: "tested",
+    desc: "Extract Google Earth binaries from HDD for offline analysis and patching",
+    compat: ["3G+", "RNS-850"], category: "diag",
+    prereq: null, detail: "Copies gemmi_final (~2MB), libembeddedearth.so (~20MB), and all GEMMI config/scripts to SD card. Needed for Ghidra RE of Google hostnames and auth bypass. Based on ruthr/congo approach." },
+  { id: "google-earth", name: "Google Earth", status: "tested",
+    desc: "Google Earth satellite imagery — live tiles from Google\'s servers",
+    compat: ["3G+", "RNS-850"], category: "system",
+    prereq: null, detail: "Restores Google Earth satellite imagery to your MMI3G+ head unit. Deploys a lightweight on-car proxy that serves map data directly from Google\\'s tile servers — no PC or external server required. Just build the SD card, insert, reboot, and enjoy live satellite imagery from the map menu. Requires working internet (LTE, WiFi tethering, USB Ethernet, or any other method). Zoom levels 1-22+ confirmed working." },
+  { id: "google-earth-gemmi-wrappers", name: "GEMMI Wrappers", status: "alpha",
+    desc: "Install legacy /scripts/GEMMI controls expected by the OEM Google Earth screen",
+    compat: ["RNS-850"], category: "system",
+    prereq: null, detail: "Installs shell wrappers for activate/deactivate/start/stop/cache controls that forward to the deployed /mnt/nav/gemmi runtime." },
+  { id: "google-earth-p0824-deploy", name: "P0824 GEMMI Deploy", status: "alpha",
+    desc: "Deploy bundled EU VW P0824 GEMMI donor payload to /mnt/nav/gemmi",
+    compat: ["RNS-850"], category: "system",
+    prereq: null, payloadUrl: "payloads/gemmi_p0824_eu_vw.zip", detail: "Backs up the existing /mnt/nav/gemmi tree, copies the bundled EU VW P0824 GEMMI payload from SD card root /gemmi, and adds minimal drivers.ini auth-bypass settings. Does not patch lsd.jxe or firmware. The web app fetches the payload relative to its own origin, so the request is same-origin wherever the site is hosted and never hits browser CORS limits." },
+  { id: "google-earth-p0824-restore", name: "P0824 GEMMI Restore", status: "alpha",
+    desc: "Restore /mnt/nav/gemmi from the backup made by P0824 GEMMI Deploy",
+    compat: ["RNS-850"], category: "system",
+    prereq: null, detail: "Uses /mnt/nav/.mmi3g_toolkit/google-earth-p0824/active.env to restore the previous GEMMI tree or remove the donor tree if none existed before deploy." },
+  { id: "dns-refresh-probe", name: "DNS Refresh Probe", status: "alpha",
+    desc: "One-shot route/DNS diagnostic and temporary /etc/resolv.conf refresh",
+    compat: ["3G+", "RNS-850"], category: "net",
+    prereq: null, detail: "Snapshots route and DNS state, backs up /etc/resolv.conf to SD, rewrites nameserver to /dns-refresh-target.txt override or the default gateway, then reruns connectivity checks." },
+  { id: "diag-tool", name: "Diag Tool", status: "alpha",
+    desc: "UDS diagnostic scanner — needs VAG-COM cable",
+    compat: ["3G+"], category: "diag",
+    prereq: null, detail: "Auto-scans modules, reads/clears DTCs. Alpha — requires external diagnostic hardware." },
+  { id: "password-finder", name: "Password Finder", status: "tested",
+    desc: "Dump stored Wi-Fi, Bluetooth, Audi Connect credentials",
+    compat: ["3G", "3G+", "RNS-850"], category: "diag",
+    prereq: null, detail: "Read-only scan of /mnt/efs-persist and /mnt/persist. Inspired by jilleb/mib2-toolbox." },
+  { id: "variant-dump", name: "Variant Dump", status: "tested",
+    desc: "System ID dump — train, versions, FSC status, partitions, nav DB state",
+    compat: ["3G", "3G+", "RNS-850"], category: "diag",
+    prereq: null, detail: "Car-device list, CAN assignments, ID strings, live sensors. Uses the documented per3 map." },
+  { id: "map-parser", name: "Map Parser", status: "tested",
+    desc: "Extract nav DB descriptor, FSC state, map metadata",
+    compat: ["3G", "3G+", "RNS-850"], category: "nav",
+    prereq: null, detail: "Dumps acios_db.ini, FSC activation files, nav HDD inventory for offline analysis." },
+  { id: "long-coding", name: "Long Coding", status: "alpha",
+    desc: "Live display of adaptation values via GEM (read-only)",
+    compat: ["3G", "3G+", "RNS-850"], category: "gem",
+    prereq: "gem-activator", detail: "3 GEM screens for car-device, CAN routing. Read-only — use VCDS/ODIS to change values." },
+];
+
+const MODELS = [
+  { id: "a6c7", label: "A6/A7 C7", brand: "audi", fsc: "escrsa" },
+  { id: "a4b85", label: "A4/A5 B8.5", brand: "audi", fsc: "escrsa" },
+  { id: "a8d4", label: "A8 D4", brand: "audi", fsc: "escrsa" },
+  { id: "q5", label: "Q5 8R", brand: "audi", fsc: "escrsa" },
+  { id: "q7", label: "Q7 4L", brand: "audi", fsc: "escrsa" },
+  { id: "rs", label: "RS4/RS5", brand: "audi", fsc: "escrsa" },
+  { id: "touareg", label: "Touareg 7P", brand: "vw", fsc: "bouncy" },
+];
+
+const CAT_COLORS = { system: "#f59e0b", gem: "#10b981", visual: "#8b5cf6", nav: "#3b82f6", diag: "#6b7280", net: "#ef4444" };
+const CAT_LABELS = { system: "System", gem: "GEM Screens", visual: "Visual", nav: "Navigation", diag: "Diagnostics", net: "Network" };
+
+// ============================================================
+// SD card assembly — runs entirely in the browser
+// ============================================================
+
+async function fetchBinary(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`HTTP ${r.status}: ${url}`);
+  return new Uint8Array(await r.arrayBuffer());
+}
+async function fetchText(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`HTTP ${r.status}: ${url}`);
+  return await r.text();
+}
+async function fetchJson(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`HTTP ${r.status}: ${url}`);
+  return await r.json();
+}
+function safeZipPath(name, stripComponents = 0, target = "") {
+  const parts = String(name || "").replaceAll("\\", "/").split("/").filter(Boolean);
+  const stripped = parts.slice(stripComponents);
+  if (stripped.length === 0) return null;
+  if (stripped.some((p) => p === "." || p === "..")) return null;
+  const targetParts = String(target || "").replaceAll("\\", "/").split("/").filter(Boolean);
+  if (targetParts.some((p) => p === "." || p === "..")) return null;
+  return [...targetParts, ...stripped].join("/");
+}
+function releaseZipUrl(rz) {
+  if (typeof rz === "string") return rz;
+  if (rz && rz.web_url) return rz.web_url;
+  if (rz && rz.url) return rz.url;
+  if (rz && rz.base_url && rz.name) return rz.base_url + rz.name;
+  throw new Error("Invalid release_zip declaration");
+}
+async function fetchReleaseZipFiles(rz, onEntry) {
+  const url = releaseZipUrl(rz);
+  const bytes = await fetchBinary(url);
+  if (rz && rz.size && bytes.length !== rz.size) {
+    throw new Error(`release ZIP size mismatch: got ${bytes.length}, expected ${rz.size}`);
+  }
+  const zip = await JSZip.loadAsync(bytes);
+  const strip = Math.max(0, Number(rz?.strip_components || 0));
+  const target = rz?.target || "";
+  const files = [];
+  for (const entry of Object.values(zip.files)) {
+    if (entry.dir) continue;
+    const outPath = safeZipPath(entry.name, strip, target);
+    if (!outPath) continue;
+    const entryBytes = await entry.async("uint8array");
+    files.push({ path: outPath, bytes: entryBytes });
+    onEntry && onEntry(outPath);
+  }
+  return files;
+}
+
+/**
+ * Generate the combined run.sh installer from selected modules.
+ * Mirrors generate_run_sh() in builder/build_sd.py.
+ */
+function generateRunSh(selected, manifest, overrides) {
+  overrides = overrides || {};
+  const needsFlashInstall = selected.some((modName) => {
+    const meta = manifest.modules[modName];
+    return meta && meta.installs_to_flash !== false;
+  });
+  const lines = [
+    "#!/bin/ksh",
+    "# ============================================================",
+    "# MMI3G-Toolkit - Combined Installer",
+    "# Auto-generated by the web SD card builder",
+    "# ============================================================",
+    "",
+    "SDPATH=\"${1:-$(dirname $0)}\"",
+    "export SDPATH",
+    "",
+    "# Source platform.sh for QNX compatibility shims (head, basename,",
+    "# wc, printf, awk, sync, mkdir -p all shimmed for QNX)",
+    "if [ -f \"${SDPATH}/scripts/common/platform.sh\" ]; then",
+    "    . \"${SDPATH}/scripts/common/platform.sh\"",
+    "fi",
+    "",
+    "# Show \"running\" status on MMI display",
+    "if [ -f \"${SDPATH}/bin/showScreen\" ] && [ -f \"${SDPATH}/lib/running.png\" ]; then",
+    "    cp \"${SDPATH}/bin/showScreen\" /tmp/showScreen 2>/dev/null",
+    "    chmod +x /tmp/showScreen 2>/dev/null",
+    "    /tmp/showScreen \"${SDPATH}/lib/running.png\" &",
+    "    SHOWSCREEN_PID=$!",
+    "fi",
+    "",
+    "mkdir -p \"${SDPATH}/var\" 2>/dev/null",
+    "LOGFILE=\"${SDPATH}/var/install-$(date +%Y%m%d-%H%M%S).log\"",
+    "EFSDIR=\"/mnt/efs-system\"",
+    "ENGDEFS=\"${EFSDIR}/engdefs\"",
+    "",
+    "exec > ${LOGFILE} 2>&1",
+    "",
+    "echo \"============================================\"",
+    "echo \" MMI3G-Toolkit Installer\"",
+    "echo \" $(date)\"",
+    "echo \" Train: $(cat /dev/shmem/sw_trainname.txt 2>/dev/null)\"",
+    "echo \"============================================\"",
+    "echo \"\"",
+    "",
+  ];
+
+  if (needsFlashInstall) {
+    lines.push(
+      "# Safety checks",
+      "if [ ! -d \"${EFSDIR}\" ]; then",
+      "    echo \"[ERROR] /mnt/efs-system not found!\"",
+      "    exit 1",
+      "fi",
+      "",
+      "# Create engdefs if needed (gem-activator will populate it)",
+      "mkdir -p \"${ENGDEFS}\" 2>/dev/null",
+      "",
+      "# Remount read-write",
+      "mount -uw ${EFSDIR} 2>/dev/null",
+      "if [ $? -ne 0 ]; then",
+      "    echo \"[ERROR] Failed to remount efs-system\"",
+      "    exit 1",
+      "fi",
+      "echo \"[OK] efs-system remounted rw\"",
+      "echo \"\"",
+      "",
+      "# Install shared platform.sh helper (sourced by module scripts)",
+      "if [ -f \"${SDPATH}/scripts/common/platform.sh\" ]; then",
+      "    mkdir -p \"${EFSDIR}/scripts/common\"",
+      "    cp -v \"${SDPATH}/scripts/common/platform.sh\" \"${EFSDIR}/scripts/common/platform.sh\"",
+      "    chmod 0644 \"${EFSDIR}/scripts/common/platform.sh\"",
+      "    echo \"[OK] platform.sh installed to ${EFSDIR}/scripts/common/\"",
+      "fi",
+      "echo \"\"",
+      "",
+    );
+  } else {
+    lines.push(
+      "# Selected modules are SD-only; do not remount or write efs-system.",
+      "echo \"[INFO] SD-only module set; efs-system will not be remounted\"",
+      "echo \"\"",
+      "",
+    );
+  }
+
+  for (const modName of selected) {
+    const meta = manifest.modules[modName];
+    if (!meta) continue;
+    const installsToFlash = meta.installs_to_flash !== false;
+    const scriptDir = meta.script_dir || `/scripts/${modName}`;
+    const esdFiles = (meta.files || [])
+      .filter(f => f.path.startsWith("engdefs/") && f.path.endsWith(".esd"))
+      .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+    const shFiles = (meta.files || [])
+      .filter(f => f.path.startsWith("scripts/") && f.path.endsWith(".sh"))
+      .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+
+    lines.push(`# --- Module: ${modName} ---`);
+    lines.push(`echo "[MODULE] Installing ${modName}..."`);
+    if (installsToFlash) {
+      // Re-mount EFS rw (standalone modules may trigger F3S reclaim)
+      lines.push('mount -uw ${EFSDIR} 2>/dev/null');
+    } else {
+      lines.push("# SD-only module: run from card and skip flash install");
+    }
+    if (meta.standalone && meta.run_script) {
+      const runScript = overrides[modName] || meta.run_script;
+      lines.push(`if [ -f "\${SDPATH}/scripts/${runScript}" ]; then`);
+      lines.push(`    ksh "\${SDPATH}/scripts/${runScript}" "\${SDPATH}"`);
+      lines.push(`    echo "[OK] ${modName} standalone script executed"`);
+      lines.push("else");
+      lines.push(`    echo "[WARN] ${runScript} not found for ${modName}"`);
+      lines.push("fi");
+
+      if (installsToFlash && shFiles.length > 0) {
+        lines.push(`SCRIPTDIR="\${EFSDIR}${scriptDir}"`);
+        lines.push("mkdir -p ${SCRIPTDIR}");
+        for (const f of shFiles) {
+          const name = f.path.split("/").pop();
+          lines.push(`if [ -f "\${SDPATH}/scripts/${name}" ]; then`);
+          lines.push(`    cp -v "\${SDPATH}/scripts/${name}" "\${SCRIPTDIR}/${name}"`);
+          lines.push(`    chmod +x "\${SCRIPTDIR}/${name}"`);
+          lines.push("fi");
+        }
+      }
+    } else if (installsToFlash) {
+      lines.push(`if [ -d "\${SDPATH}/engdefs" ]; then`);
+      for (const f of esdFiles) {
+        const name = f.path.split("/").pop();
+        lines.push(`    if [ -f "\${SDPATH}/engdefs/${name}" ]; then`);
+        lines.push(`        cp -v "\${SDPATH}/engdefs/${name}" "\${ENGDEFS}/${name}"`);
+        lines.push(`        echo "[INST] ${name}"`);
+        lines.push(`    fi`);
+      }
+      lines.push(`fi`);
+      if (shFiles.length > 0) {
+        lines.push(`SCRIPTDIR="\${EFSDIR}${scriptDir}"`);
+        lines.push(`mkdir -p \${SCRIPTDIR}`);
+        lines.push(`if [ -d "\${SDPATH}/scripts" ]; then`);
+        for (const f of shFiles) {
+          const name = f.path.split("/").pop();
+          lines.push(`    if [ -f "\${SDPATH}/scripts/${name}" ]; then`);
+          lines.push(`        cp -v "\${SDPATH}/scripts/${name}" "\${SCRIPTDIR}/${name}"`);
+          lines.push(`        chmod +x "\${SCRIPTDIR}/${name}"`);
+          lines.push(`        echo "[INST] ${name}"`);
+          lines.push(`    fi`);
+        }
+        lines.push(`fi`);
+      }
+    } else {
+      lines.push(`echo "[INFO] ${modName} is SD-only; no flash files installed"`);
+    }
+
+    lines.push(`echo "[OK] ${modName} installed"`);
+    lines.push(`echo ""`);
+    lines.push("");
+  }
+
+  lines.push("# --- Complete ---");
+  lines.push("echo \"============================================\"");
+  lines.push("echo \" Installation Complete\"");
+  lines.push(`echo " Modules installed: ${selected.length}"`);
+  lines.push("echo \" Log: ${LOGFILE}\"");
+  lines.push("echo \"\"");
+  lines.push("echo \" Open GEM (CAR + BACK) to access new screens\"");
+  lines.push("echo \"============================================\"");
+  lines.push("");
+  lines.push("# Show \"done\" status on MMI display");
+  lines.push("if [ -x /tmp/showScreen ] && [ -f \"${SDPATH}/lib/done.png\" ]; then");
+  lines.push("    kill ${SHOWSCREEN_PID} 2>/dev/null");
+  lines.push("    sleep 1");
+  lines.push("    /tmp/showScreen \"${SDPATH}/lib/done.png\" &");
+  lines.push("fi");
+
+  return lines.join("\n") + "\n";
+}
+
+/**
+ * Fetch every file required by the selected modules plus core files.
+ * Returns an array of { path, bytes } ready to be written either to a
+ * directory picker or to a ZIP.
+ */
+async function buildSdBundle(selected, onProgress, overrides) {
+  overrides = overrides || {};
+  onProgress && onProgress("Loading manifest...", 0);
+  const manifest = await fetchJson(MANIFEST_URL + "?t=" + Date.now());  // cache-bust: always fresh
+  const rawBase = manifest.raw_url_base;
+  const moduleOutputPath = (modName, meta, f) => {
+    if (f.path === "module.json") return null;
+    if (f.path.startsWith("engdefs/") || f.path.startsWith("scripts/")) return f.path;
+    if (meta.artifact && f.path === meta.artifact) return `modules/${modName}/${f.path}`;
+    for (const payload of (meta.payload_dirs || [])) {
+      const source = String(payload.source || "").replace(/\/+$/, "");
+      const target = String(payload.target || source).replace(/\/+$/, "");
+      if (source && target && f.path.startsWith(`${source}/`)) {
+        return `${target}/${f.path.slice(source.length + 1)}`;
+      }
+    }
+    return null;
+  };
+
+  // Count total fetches for progress
+  let totalFiles = 2; // copie_scr_plain.sh + uninstall.sh
+  if (manifest.core_files.platform_sh) totalFiles += 1;
+  if (manifest.core_files.showScreen) totalFiles += 1;
+  for (const pngKey of ["lib_running_png", "lib_done_png"]) {
+    if (manifest.core_files[pngKey]) totalFiles += 1;
+  }
+  if (selected.includes("gem-activator")) {
+    for (const pngKey of ["lib_gem_enabled_png", "lib_gem_disabled_png"]) {
+      if (manifest.core_files[pngKey]) totalFiles += 1;
+    }
+  }
+  for (const mod of selected) {
+    const meta = manifest.modules[mod];
+    if (!meta) continue;
+    totalFiles += (meta.files || []).filter((f) => moduleOutputPath(mod, meta, f)).length;
+    if (meta.release_zip) totalFiles += 1;
+  }
+  let done = 0;
+  const step = (label) => {
+    done += 1;
+    onProgress && onProgress(label, Math.min(99, Math.round(done * 95 / totalFiles)));
+  };
+
+  // --- Core files ---
+  onProgress && onProgress("Fetching copie_scr.sh template...", 2);
+  const plainCopie = await fetchBinary(rawBase + manifest.core_files.copie_scr_plain_sh);
+  step("Encoding copie_scr.sh");
+  const encodedCopie = new MMI3GCipher().process(plainCopie);
+
+  const uninstallSh = await fetchBinary(rawBase + manifest.core_files.uninstall_sh);
+  step("Fetched uninstall.sh");
+
+  let platformSh = null;
+  if (manifest.core_files.platform_sh) {
+    try {
+      platformSh = await fetchBinary(rawBase + manifest.core_files.platform_sh);
+      step("Fetched platform.sh");
+    } catch (e) {
+      console.warn("platform.sh not available:", e);
+    }
+  }
+
+  // Fetch showScreen binary (proven SH4 QNX tool for displaying PNGs on MMI)
+  let showScreenBin = null;
+  if (manifest.core_files.showScreen) {
+    try {
+      showScreenBin = await fetchBinary(rawBase + manifest.core_files.showScreen);
+      step("Fetched showScreen");
+    } catch (e) {
+      console.warn("showScreen not available:", e);
+    }
+  }
+
+  // --- Module files (parallel fetches per module) ---
+  const files = [];
+  files.push({ path: "copie_scr.sh", bytes: encodedCopie });
+  files.push({ path: "uninstall.sh", bytes: uninstallSh });
+  if (platformSh) {
+    files.push({ path: "scripts/common/platform.sh", bytes: platformSh });
+  }
+
+  // Track paths provided by gemmi_assets to skip payload duplicates
+  const gemmiAssetPaths = new Set();
+  if (manifest.gemmi_assets && selected.includes("google-earth")) {
+    for (const a of manifest.gemmi_assets.files) gemmiAssetPaths.add(a.path);
+  }
+
+  for (const modName of selected) {
+    const meta = manifest.modules[modName];
+    if (!meta) continue;
+    const bundleFiles = (meta.files || []).filter((f) => {
+      const outPath = moduleOutputPath(modName, meta, f);
+      if (!outPath) return false;
+      if (gemmiAssetPaths.has(outPath)) return false; // skip — provided by gemmi_assets
+      return true;
+    });
+    const tasks = bundleFiles.map(async (f) => {
+      const url = rawBase + `modules/${modName}/${f.path}`;
+      const bytes = await fetchBinary(url);
+      step(`Fetched ${modName}/${f.path}`);
+      return { path: moduleOutputPath(modName, meta, f), bytes };
+    });
+    const results = await Promise.all(tasks);
+    for (const r of results) if (r) files.push(r);
+
+    // --- Release assets: fetch individual binaries from GitHub Release ---
+    const ra = meta.release_assets;
+    if (ra && ra.files && ra.files.length > 0) {
+      onProgress && onProgress(`Downloading ${modName} binaries (${ra.files.length} files)...`, Math.round(done * 95 / totalFiles));
+      for (const asset of ra.files) {
+        try {
+          const url = ra.base_url + asset.name;
+          const bytes = await fetchBinary(url);
+          files.push({ path: asset.path, bytes });
+          step(`Fetched ${asset.name}`);
+        } catch (e) {
+          console.warn(`Skip asset ${asset.name}: ${e.message}`);
+        }
+      }
+    }
+
+    const rz = meta.release_zip;
+    if (rz) {
+      onProgress && onProgress(`Downloading ${modName} payload ZIP...`, Math.round(done * 95 / totalFiles));
+      const zipFiles = await fetchReleaseZipFiles(rz);
+      files.push(...zipFiles);
+      step(`Extracted ${modName} payload ZIP (${zipFiles.length} files)`);
+    }
+  }
+
+  // --- Generated run.sh ---
+  onProgress && onProgress("Generating run.sh...", 97);
+  const runSh = generateRunSh(selected, manifest, overrides);
+  files.push({ path: "run.sh", bytes: new TextEncoder().encode(runSh) });
+
+  // --- Placeholder dirs so bin/ lib/ var/ exist even if empty ---
+  if (showScreenBin) {
+    files.push({ path: "bin/showScreen", bytes: showScreenBin });
+  }
+  // Always include universal status PNGs
+  for (const pngKey of ['lib_running_png', 'lib_done_png']) {
+    if (manifest.core_files[pngKey]) {
+      try {
+        const png = await fetchBinary(rawBase + manifest.core_files[pngKey]);
+        const fname = pngKey.replace('lib_', '').replace('_png', '.png');
+        files.push({ path: `lib/${fname}`, bytes: png });
+        step(`Fetched ${fname}`);
+      } catch (e) { console.warn(`${pngKey} not available:`, e); }
+    }
+  }
+  // Module-specific PNGs — only when that module is selected
+  if (selected.includes("gem-activator")) {
+    for (const pngKey of ['lib_gem_enabled_png', 'lib_gem_disabled_png']) {
+      if (manifest.core_files[pngKey]) {
+        try {
+          const png = await fetchBinary(rawBase + manifest.core_files[pngKey]);
+          const fname = pngKey.replace('lib_', '').replace('_png', '.png');
+          files.push({ path: `lib/${fname}`, bytes: png });
+          step(`Fetched ${fname}`);
+        } catch (e) { console.warn(`${pngKey} not available:`, e); }
+      }
+    }
+  }
+  files.push({ path: "bin/.keep", bytes: new Uint8Array(0) });
+  files.push({ path: "lib/.keep", bytes: new Uint8Array(0) });
+  files.push({ path: "var/.keep", bytes: new Uint8Array(0) });
+
+  // --- GEMMI binaries (only when google-earth module is selected) ---
+  // P0824 deploy already bundles a /gemmi payload, so avoid overwriting it.
+  if (selected.includes("google-earth") && !selected.includes("google-earth-p0824-deploy") && manifest.gemmi_assets) {
+    const ga = manifest.gemmi_assets;
+    onProgress && onProgress("Fetching GEMMI binaries (~25MB)...", 96);
+    for (const asset of ga.files) {
+      try {
+        const url = asset.url || (ga.base_url + asset.name);
+        let bytes = await fetchBinary(url);
+        files.push({ path: asset.path, bytes });
+        step(`Fetched ${asset.name} (${(bytes.length / 1024 / 1024).toFixed(1)}MB)`);
+      } catch (e) {
+        console.warn(`GEMMI asset ${asset.name} not available:`, e);
+        // Don't fail the build — ge_deploy.sh handles missing files gracefully
+      }
+    }
+  }
+
+  // Deduplicate: later entries (release_zip) override earlier ones (manifest)
+  const deduped = new Map();
+  for (const f of files) deduped.set(f.path, f);
+  const uniqueFiles = Array.from(deduped.values());
+
+  onProgress && onProgress("Bundle ready", 100);
+  return { files: uniqueFiles, manifest };
+}
+
+/**
+ * Write the bundle directly to a user-chosen directory (Chrome/Edge).
+ * Uses the File System Access API — same approach as PCM-Forge.
+ */
+async function writeBundleToDirectory(bundle, dirHandle) {
+  async function ensureDir(parent, name) {
+    return await parent.getDirectoryHandle(name, { create: true });
+  }
+  async function getNestedDir(root, relPath) {
+    const parts = relPath.split("/").filter(Boolean);
+    let h = root;
+    for (const p of parts) h = await ensureDir(h, p);
+    return h;
+  }
+
+  const writeErrors = [];
+  for (const f of bundle.files) {
+    if (f.path.endsWith("/.keep")) continue;
+    const parts = f.path.split("/").filter(Boolean);
+    if (parts.length === 0) continue;
+    const fname = parts.pop();
+    if (!fname || fname === '.' || fname === '..') continue;
+    const parentRel = parts.join("/");
+    try {
+      const parentH = parentRel ? await getNestedDir(dirHandle, parentRel) : dirHandle;
+      const fileH = await parentH.getFileHandle(fname, { create: true });
+      const writable = await fileH.createWritable();
+      await writable.write(f.bytes);
+      await writable.close();
+    } catch (e) {
+      writeErrors.push(f.path);
+      console.warn(`Skip: ${f.path} (${e.message})`);
+    }
+  }
+  if (writeErrors.length > 0) {
+    console.warn(`Failed to write ${writeErrors.length} files:`, writeErrors);
+    alert(`Warning: ${writeErrors.length} file(s) could not be written to the SD card.\n\nUse "Download ZIP" instead and extract manually.\n\nFailed: ${writeErrors.slice(0, 5).join(", ")}${writeErrors.length > 5 ? "..." : ""}`);
+  }
+}
+
+/**
+ * Package the bundle as a ZIP file and trigger a download.
+ */
+async function downloadBundleAsZip(bundle, filename) {
+  const zip = new JSZip();
+  for (const f of bundle.files) {
+    if (f.path.endsWith("/.keep")) continue; // directories get created automatically when child files added; .keep not needed
+    zip.file(f.path, f.bytes);
+  }
+  const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 6 } });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+// ============================================================
+// React component
+// ============================================================
+
+function App() {
+  const [tab, setTab] = useState("modules");
+  const [selected, setSelected] = useState(new Set(["system-info"]));
+  const [model, setModel] = useState("a6c7");
+  const [expandedMod, setExpandedMod] = useState(null);
+  const [geScript, setGeScript] = useState("ge_deploy_oncar.sh");
+  const [lteMode, setLteMode] = useState("lte_setup.sh");
+  const [buildState, setBuildState] = useState("idle"); // idle | building | done | error
+  const [buildProgress, setBuildProgress] = useState({ label: "", pct: 0 });
+  const [buildError, setBuildError] = useState(null);
+  const [buildStats, setBuildStats] = useState(null);
+  const [sourceImg, setSourceImg] = useState(null);
+  const [processedUrl, setProcessedUrl] = useState(null);
+  const [zoom, setZoom] = useState(1);
+  const [panX, setPanX] = useState(0);
+  const [panY, setPanY] = useState(0);
+  const [exported, setExported] = useState(false);
+  const canvasRef = useRef(null);
+  const fileRef = useRef(null);
+
+  const processImage = useCallback(() => {
+    if (!sourceImg) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    canvas.width = MMI_W; canvas.height = MMI_H;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#000"; ctx.fillRect(0, 0, MMI_W, MMI_H);
+    const imgA = sourceImg.width / sourceImg.height;
+    const mmiA = MMI_W / MMI_H;
+    let dw, dh;
+    if (imgA > mmiA) { dh = MMI_H * zoom; dw = dh * imgA; }
+    else { dw = MMI_W * zoom; dh = dw / imgA; }
+    ctx.drawImage(sourceImg, (MMI_W - dw) / 2 + panX, (MMI_H - dh) / 2 + panY, dw, dh);
+    setProcessedUrl(canvas.toDataURL("image/png"));
+    setExported(false);
+  }, [sourceImg, zoom, panX, panY]);
+
+  useEffect(() => { processImage(); }, [processImage]);
+
+  const handleFile = (f) => {
+    if (!f || !f.type.startsWith("image/")) return;
+    const r = new FileReader();
+    r.onload = (e) => {
+      const img = new Image();
+      img.onload = () => { setSourceImg(img); setZoom(1); setPanX(0); setPanY(0); };
+      img.src = e.target.result;
+    };
+    r.readAsDataURL(f);
+  };
+
+  const toggle = (id) => {
+    const s = new Set(selected);
+    if (s.has(id)) s.delete(id); else s.add(id);
+    MODULES_DISPLAY.forEach(m => { if (s.has(m.id) && m.prereq && !s.has(m.prereq)) s.add(m.prereq); });
+    setSelected(s);
+  };
+
+  const selectAll = () => setSelected(new Set(MODULES_DISPLAY.map(m => m.id)));
+  const selectNone = () => setSelected(new Set());
+  const pw = MMI_W * PREVIEW_SCALE;
+  const ph = MMI_H * PREVIEW_SCALE;
+
+  // Build bundle into memory. Used by both "Write to SD" and "Download ZIP".
+  const buildInMemory = async () => {
+    // Check for modules that can't be web-built (CORS-blocked release assets)
+    const blocked = [...selected].filter(m => MODULES_DISPLAY.find(d => d.id === m && d.cliOnly));
+    if (blocked.length > 0) {
+      const mod = MODULES_DISPLAY.find(d => d.id === blocked[0]);
+      const payloadLine = mod.payloadUrl ? `\n\nPayload ZIP:\n  ${mod.payloadUrl}` : "";
+      const message =
+        `"${mod.name}" requires a payload ZIP hosted on GitHub Releases which browsers cannot download (CORS).\n\n` +
+        `Use the CLI builder instead:\n  python builder/build_sd.py -m ${blocked[0]} -o F:\\\n\n` +
+        `Or download the payload ZIP separately and build from the CLI.${payloadLine}`;
+      setBuildError(message);
+      setBuildState("error");
+      const err = new Error(message);
+      err.userFacing = true;
+      throw err;
+    }
+    setBuildState("building");
+    setBuildError(null);
+    setBuildStats(null);
+    setBuildProgress({ label: "Starting...", pct: 0 });
+    try {
+      const bundle = await buildSdBundle([...selected], (label, pct) => {
+        setBuildProgress({ label, pct });
+      }, { "google-earth": geScript, "lte-setup": lteMode });
+      const totalBytes = bundle.files.reduce((n, f) => n + f.bytes.length, 0);
+      setBuildStats({ fileCount: bundle.files.filter(f => !f.path.endsWith("/.keep")).length, totalBytes });
+      return bundle;
+    } catch (e) {
+      if (!e.userFacing) console.error(e);
+      setBuildError(String(e.message || e));
+      setBuildState("error");
+      throw e;
+    }
+  };
+
+  const handleWriteToSd = async () => {
+    if (!window.showDirectoryPicker) {
+      setBuildError("Direct SD write needs Chrome or Edge. Use 'Download ZIP' instead.");
+      setBuildState("error");
+      return;
+    }
+    let dirHandle;
+    try {
+      // Ask for the SD card folder FIRST so the user intent is captured before the build runs
+      dirHandle = await window.showDirectoryPicker({ mode: "readwrite", startIn: "desktop" });
+    } catch (e) {
+      // User cancelled the picker
+      return;
+    }
+    try {
+      const bundle = await buildInMemory();
+      setBuildProgress({ label: "Writing to SD...", pct: 99 });
+      await writeBundleToDirectory(bundle, dirHandle);
+      setBuildProgress({ label: "Written to SD", pct: 100 });
+      setBuildState("done-sd");
+    } catch (e) {
+      if (!e.userFacing) console.error(e);
+      setBuildError(String(e.message || e));
+      setBuildState("error");
+    }
+  };
+
+  const handleDownloadZip = async () => {
+    try {
+      const bundle = await buildInMemory();
+      setBuildProgress({ label: "Packaging ZIP...", pct: 99 });
+      const fname = `MMI3G-Toolkit-${new Date().toISOString().slice(0,10)}.zip`;
+      await downloadBundleAsZip(bundle, fname);
+      setBuildProgress({ label: "ZIP downloaded", pct: 100 });
+      setBuildState("done-zip");
+    } catch (e) {
+      if (!e.userFacing) console.error(e);
+      setBuildError(String(e.message || e));
+      setBuildState("error");
+    }
+  };
+
+  const sdTree = () => {
+    let l = ["SD Root/", "\u251C\u2500\u2500 copie_scr.sh  (encoded)", "\u251C\u2500\u2500 run.sh        (auto-generated)", "\u251C\u2500\u2500 uninstall.sh"];
+    if (selected.has("splash-screen")) l.push("\u251C\u2500\u2500 splashscreens/", "\u2502   \u2514\u2500\u2500 startup_generic.png");
+    if ([...selected].some(id => { const m = MODULES_DISPLAY.find(x => x.id === id); return m && (m.category === "gem" || m.category === "visual"); }))
+      l.push("\u251C\u2500\u2500 engdefs/", "\u2502   \u2514\u2500\u2500 *.esd");
+    l.push("\u251C\u2500\u2500 scripts/", "\u2502   \u2514\u2500\u2500 *.sh", "\u251C\u2500\u2500 bin/", "\u251C\u2500\u2500 lib/", "\u2514\u2500\u2500 var/  (logs saved here)");
+    return l.join("\n");
+  };
+
+  const repoUrl = "https://github.com/dspl1236/MMI3G-Toolkit";
+  const chromium = typeof window !== "undefined" && "showDirectoryPicker" in window;
+
+  return React.createElement("div", { style: { minHeight: "100vh", background: "#0a0a0c", color: "#e0ddd8", fontFamily: "'DM Sans', system-ui, sans-serif" } },
+    React.createElement("link", { href: "https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap", rel: "stylesheet" }),
+
+    // Header
+    React.createElement("div", { style: { borderBottom: "1px solid #1c1c20", padding: "14px 20px", display: "flex", alignItems: "center", gap: 14, background: "#0e0e11" } },
+      React.createElement("div", { style: { width: 34, height: 34, background: "linear-gradient(135deg, #c41e3a, #7a1225)", borderRadius: 7, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, fontWeight: 700, color: "#fff", fontFamily: "IBM Plex Mono" } }, "M3"),
+      React.createElement("div", { style: { flex: 1 } },
+        React.createElement("div", { style: { fontSize: 15, fontWeight: 700 } }, "MMI3G-Toolkit"),
+        React.createElement("div", { style: { fontSize: 10, color: "#555", fontFamily: "IBM Plex Mono" } }, "Audi / VW MMI 3G \u00b7 SD Card Builder")
+      ),
+      React.createElement("a", { href: repoUrl, target: "_blank", rel: "noopener", style: { color: "#555", fontSize: 11, fontFamily: "IBM Plex Mono", textDecoration: "none", padding: "5px 10px", border: "1px solid #252528", borderRadius: 5, marginRight: 8 } }, "GitHub \u2197"),
+      React.createElement("div", { style: { display: "flex", gap: 1, background: "#151518", borderRadius: 8, padding: 3 } },
+        [{ id: "modules", label: "Modules" }, { id: "splash", label: "Splash Screen" }, { id: "build", label: "Build SD" }].map(t =>
+          React.createElement("button", { key: t.id, onClick: () => setTab(t.id), style: { padding: "7px 18px", borderRadius: 6, border: "none", background: tab === t.id ? "#c41e3a" : "transparent", color: tab === t.id ? "#fff" : "#777", fontSize: 12, fontWeight: 600, cursor: "pointer" } }, t.label)
+        )
+      )
+    ),
+
+    React.createElement("div", { style: { maxWidth: 1200, margin: "0 auto", padding: 20 } },
+
+      // MODULES TAB
+      tab === "modules" && React.createElement("div", null,
+        React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, marginBottom: 14, flexWrap: "wrap" } },
+          React.createElement("span", { style: { fontSize: 10, color: "#555", fontFamily: "IBM Plex Mono", textTransform: "uppercase", letterSpacing: "0.12em" } }, "Model"),
+          ...MODELS.map(m => React.createElement("button", { key: m.id, onClick: () => setModel(m.id), style: { padding: "5px 12px", borderRadius: 5, fontSize: 11, fontWeight: 500, cursor: "pointer", border: model === m.id ? "1px solid #c41e3a" : "1px solid #252528", background: model === m.id ? "rgba(196,30,58,0.1)" : "#111114", color: model === m.id ? "#e84a6a" : "#777" } }, m.label)),
+          React.createElement("div", { style: { flex: 1 } }),
+          React.createElement("button", { onClick: selectAll, style: { padding: "4px 10px", borderRadius: 4, border: "1px solid #252528", background: "#111114", color: "#777", fontSize: 10, cursor: "pointer", fontFamily: "IBM Plex Mono" } }, "All"),
+          React.createElement("button", { onClick: selectNone, style: { padding: "4px 10px", borderRadius: 4, border: "1px solid #252528", background: "#111114", color: "#777", fontSize: 10, cursor: "pointer", fontFamily: "IBM Plex Mono" } }, "None")
+        ),
+        React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 8 } },
+          // Primary modules (Start Here) rendered full-width at top
+          ...MODULES_DISPLAY.filter(m => m.primary).map(m => {
+            const isSel = selected.has(m.id);
+            return React.createElement("div", { key: m.id, onClick: () => toggle(m.id), style: { gridColumn: "1 / -1", padding: "14px 16px", borderRadius: 7, cursor: "pointer", border: isSel ? "1px solid #c41e3a" : "1px solid #2a4a2a", background: isSel ? "rgba(196,30,58,0.05)" : "rgba(0,80,30,0.08)", transition: "all 0.15s" } },
+              React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
+                React.createElement("div", { style: { width: 16, height: 16, borderRadius: 3, border: isSel ? "none" : "1px solid #4a4", background: isSel ? "#c41e3a" : "transparent", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: "#fff", fontWeight: 700, flexShrink: 0 } }, isSel ? "\u2713" : ""),
+                React.createElement("div", { style: { flex: 1 } },
+                  React.createElement("div", { style: { fontSize: 14, fontWeight: 700, color: "#4a4", display: "flex", alignItems: "center", gap: 6 } },
+                    "\u25B6 START HERE \u2014 ", m.name),
+                  React.createElement("div", { style: { fontSize: 11, color: "#888", marginTop: 2 } }, m.desc)
+                )
+              )
+            );
+          }),
+          // Regular modules in grid
+          ...MODULES_DISPLAY.filter(m => !m.primary).map(m => {
+            const isSel = selected.has(m.id);
+            const isExp = expandedMod === m.id;
+            return React.createElement("div", { key: m.id, onClick: () => toggle(m.id), style: { padding: "11px 12px", borderRadius: 7, cursor: "pointer", border: isSel ? "1px solid #c41e3a" : "1px solid #1e1e22", background: isSel ? "rgba(196,30,58,0.05)" : "#111114", transition: "all 0.15s" } },
+              React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: isExp ? 6 : 0 } },
+                React.createElement("div", { style: { width: 14, height: 14, borderRadius: 3, border: isSel ? "none" : "1px solid #333", background: isSel ? "#c41e3a" : "transparent", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, color: "#fff", fontWeight: 700, flexShrink: 0 } }, isSel ? "\u2713" : ""),
+                React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                  React.createElement("div", { style: { fontSize: 13, fontWeight: 600, color: isSel ? "#fff" : "#bbb", display: "flex", alignItems: "center", gap: 6 } },
+                    React.createElement("div", { style: { width: 6, height: 6, borderRadius: "50%", background: CAT_COLORS[m.category], flexShrink: 0 } }),
+                    m.name,
+                    m.status === "alpha" && React.createElement("span", { style: { fontSize: 9, padding: "1px 5px", borderRadius: 3, background: "#451a03", color: "#fbbf24", fontFamily: "IBM Plex Mono" } }, "alpha"), m.status === "tested" && React.createElement("span", { style: { fontSize: 9, padding: "1px 5px", borderRadius: 3, background: "#052e16", color: "#4ade80", fontFamily: "IBM Plex Mono" } }, "tested"), m.status === "design" && React.createElement("span", { style: { fontSize: 9, padding: "1px 5px", borderRadius: 3, background: "#1e1b4b", color: "#818cf8", fontFamily: "IBM Plex Mono" } }, "design"), m.cliOnly && React.createElement("span", { style: { fontSize: 9, padding: "1px 5px", borderRadius: 3, background: "#1e1b4b", color: "#c084fc", fontFamily: "IBM Plex Mono" } }, "CLI only")
+                  ),
+                  React.createElement("div", { style: { fontSize: 11, color: "#666", marginTop: 1 } }, m.desc)
+                ),
+                React.createElement("button", { onClick: (e) => { e.stopPropagation(); setExpandedMod(isExp ? null : m.id); }, style: { background: "none", border: "none", color: "#555", cursor: "pointer", fontSize: 16, padding: "0 4px" } }, isExp ? "\u25BE" : "\u25B8")
+              ),
+              isExp && React.createElement("div", { style: { fontSize: 11, color: "#888", padding: "6px 0 0 22px", borderTop: "1px solid #1a1a1e", paddingTop: 8, marginTop: 6, lineHeight: 1.5 } },
+                m.detail,
+                m.payloadUrl && React.createElement("div", { style: { marginTop: 8 } },
+                  React.createElement("a", { href: m.payloadUrl, target: "_blank", rel: "noopener", onClick: (e) => e.stopPropagation(), style: { color: "#e84a6a", fontFamily: "IBM Plex Mono", fontSize: 10 } }, "Download payload ZIP")
+                ),
+                m.id === "google-earth" && React.createElement("div", { style: { marginTop: 8, padding: "8px 10px", background: "#0a0a0c", borderRadius: 6, border: "1px solid #1e1e22" } },
+                  React.createElement("div", { style: { fontSize: 10, color: "#fbbf24", fontFamily: "IBM Plex Mono", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.08em" } }, "Script to run"),
+                  React.createElement("select", { value: geScript, onClick: (e) => e.stopPropagation(), onChange: (e) => { e.stopPropagation(); setGeScript(e.target.value); }, style: { width: "100%", padding: "7px 8px", borderRadius: 5, border: "1px solid #2a2a35", background: "#111114", color: "#e0ddd8", fontSize: 12, fontFamily: "IBM Plex Mono", cursor: "pointer", outline: "none" } },
+                    React.createElement("option", { value: "ge_deploy_oncar.sh" }, "\u{1F4E1} Deploy (install Google Earth)"),
+                    React.createElement("option", { value: "ge_deploy_v6.sh" }, "\u{1F6F0}\uFE0F Deploy (v6 StreetView Test)"),
+                    React.createElement("option", { value: "ge_probe.sh" }, "\u{1F50D} Probe (safe, read-only)"),
+                    React.createElement("option", { value: "ge_restore.sh" }, "\u21A9 Restore (revert all changes)")
+                  )
+                ),
+                m.id === "lte-setup" && React.createElement("div", { style: { marginTop: 8, padding: "8px 10px", background: "#0a0a0c", borderRadius: 6, border: "1px solid #1e1e22" } },
+                  React.createElement("div", { style: { fontSize: 10, color: "#fbbf24", fontFamily: "IBM Plex Mono", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.08em" } }, "Configuration"),
+                  React.createElement("select", { value: lteMode, onClick: (e) => e.stopPropagation(), onChange: (e) => { e.stopPropagation(); setLteMode(e.target.value); }, style: { width: "100%", padding: "7px 8px", borderRadius: 5, border: "1px solid #2a2a35", background: "#111114", color: "#e0ddd8", fontSize: 12, fontFamily: "IBM Plex Mono", cursor: "pointer", outline: "none" } },
+                    React.createElement("option", { value: "lte_setup.sh" }, "\u{1F50C} DHCP Fair Mode \u2014 Standard ASIX (88172/772/772A)"),
+                    React.createElement("option", { value: "lte_static.sh" }, "\u{1F50C} Static 172.16.42.1 \u2014 Standard ASIX adapter"),
+                    React.createElement("option", { value: "lte_static_772d.sh" }, "\u{1F50C} Static 172.16.42.1 \u2014 AX88772D")
+                  )
+                ),
+                m.prereq && React.createElement("div", { style: { marginTop: 4, fontSize: 10, color: "#e84a6a", fontFamily: "IBM Plex Mono" } }, "Requires: " + m.prereq)
+              )
+            );
+          })
+        ),
+        React.createElement("div", { style: { marginTop: 16, display: "flex", alignItems: "center", gap: 12, padding: "10px 14px", background: "#111114", border: "1px solid #1e1e22", borderRadius: 7 } },
+          React.createElement("div", { style: { fontSize: 12, color: "#888" } }, React.createElement("span", { style: { color: "#e0ddd8", fontWeight: 600, fontFamily: "IBM Plex Mono" } }, selected.size), " module" + (selected.size !== 1 ? "s" : "") + " selected"),
+          React.createElement("div", { style: { flex: 1 } }),
+          React.createElement("button", { onClick: () => setTab("build"), style: { padding: "8px 20px", borderRadius: 6, border: "none", background: selected.size > 0 ? "linear-gradient(135deg, #c41e3a, #8b0000)" : "#252528", color: selected.size > 0 ? "#fff" : "#555", fontSize: 12, fontWeight: 700, cursor: selected.size > 0 ? "pointer" : "default", boxShadow: selected.size > 0 ? "0 3px 10px rgba(196,30,58,0.25)" : "none" } }, "Build SD Card \u2192")
+        )
+      ),
+
+      // SPLASH TAB  (unchanged)
+      tab === "splash" && React.createElement("div", { style: { display: "grid", gridTemplateColumns: "2fr 1fr", gap: 16, alignItems: "start" } },
+        React.createElement("div", null,
+          React.createElement("div", { style: { fontSize: 10, color: "#555", marginBottom: 8, fontFamily: "IBM Plex Mono", textTransform: "uppercase", letterSpacing: "0.12em" } }, "MMI Preview (800 \u00d7 480 @ " + Math.round(PREVIEW_SCALE * 100) + "%)"),
+          React.createElement("div", { style: { width: pw, height: ph, background: "#000", borderRadius: 8, border: "2px solid #1e1e22", position: "relative", overflow: "hidden" } },
+            processedUrl ? React.createElement("img", { src: processedUrl, style: { width: pw, height: ph, display: "block" } }) :
+              React.createElement("div", { style: { width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "#333", fontSize: 13, fontFamily: "IBM Plex Mono" } }, "No image loaded")
+          ),
+          sourceImg && React.createElement("div", { style: { marginTop: 10, padding: 10, borderRadius: 6, background: "#111114", border: "1px solid #1e1e22", fontSize: 11 } },
+            React.createElement("div", { style: { display: "grid", gridTemplateColumns: "auto 1fr auto", gap: "6px 10px", alignItems: "center" } },
+              React.createElement("span", { style: { color: "#888", fontFamily: "IBM Plex Mono" } }, "Zoom"),
+              React.createElement("input", { type: "range", min: 0.5, max: 3, step: 0.01, value: zoom, onChange: (e) => setZoom(parseFloat(e.target.value)) }),
+              React.createElement("span", { style: { color: "#bbb", fontFamily: "IBM Plex Mono", fontSize: 10 } }, zoom.toFixed(2) + "\u00d7"),
+              React.createElement("span", { style: { color: "#888", fontFamily: "IBM Plex Mono" } }, "X"),
+              React.createElement("input", { type: "range", min: -300, max: 300, step: 1, value: panX, onChange: (e) => setPanX(parseInt(e.target.value)) }),
+              React.createElement("span", { style: { color: "#bbb", fontFamily: "IBM Plex Mono", fontSize: 10 } }, panX),
+              React.createElement("span", { style: { color: "#888", fontFamily: "IBM Plex Mono" } }, "Y"),
+              React.createElement("input", { type: "range", min: -200, max: 200, step: 1, value: panY, onChange: (e) => setPanY(parseInt(e.target.value)) }),
+              React.createElement("span", { style: { color: "#bbb", fontFamily: "IBM Plex Mono", fontSize: 10 } }, panY)
+            ),
+            React.createElement("button", { onClick: () => { setZoom(1); setPanX(0); setPanY(0); }, style: { padding: "3px 8px", borderRadius: 4, border: "1px solid #2a2a2e", background: "#151518", color: "#777", fontSize: 10, cursor: "pointer" } }, "Reset")
+          )
+        ),
+        React.createElement("div", null,
+          React.createElement("div", { style: { fontSize: 10, color: "#555", marginBottom: 8, fontFamily: "IBM Plex Mono", textTransform: "uppercase", letterSpacing: "0.12em" } }, "Source Image"),
+          React.createElement("input", { ref: fileRef, type: "file", accept: "image/*", onChange: (e) => handleFile(e.target.files[0]), style: { display: "none" } }),
+          React.createElement("button", { onClick: () => fileRef.current?.click(), style: { padding: "11px 14px", borderRadius: 7, border: "1px dashed #3a3a3e", background: "#111114", color: "#bbb", fontSize: 12, fontWeight: 600, cursor: "pointer", textAlign: "center" } }, sourceImg ? "\u21BB Replace Image" : "\u2B06 Upload Image"),
+          sourceImg && React.createElement("div", { style: { marginTop: 8, padding: "8px 10px", borderRadius: 6, background: "#111114", border: "1px solid #1e1e22", fontSize: 11, color: "#888" } },
+            React.createElement("div", { style: { fontFamily: "IBM Plex Mono" } }, sourceImg.width + " \u00d7 " + sourceImg.height)
+          ),
+          React.createElement("div", { style: { fontSize: 10, color: "#555", marginTop: 14, marginBottom: 8, fontFamily: "IBM Plex Mono", textTransform: "uppercase", letterSpacing: "0.12em" } }, "Export"),
+          processedUrl && React.createElement("button", { onClick: () => { const a = document.createElement("a"); a.href = processedUrl; a.download = "startup_generic.png"; a.click(); setExported(true); if (!selected.has("splash-screen")) { const s = new Set(selected); s.add("splash-screen"); setSelected(s); } }, style: { padding: "12px 14px", borderRadius: 7, border: "none", background: exported ? "linear-gradient(135deg, #166534, #0a3d1f)" : "linear-gradient(135deg, #c41e3a, #8b0000)", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer", boxShadow: exported ? "none" : "0 3px 10px rgba(196,30,58,0.25)" } }, exported ? "\u2713 Downloaded" : "\u2193 Export startup_generic.png"),
+          React.createElement("div", { style: { marginTop: 12, padding: 12, borderRadius: 7, background: "#111114", border: "1px solid #1e1e22" } },
+            React.createElement("div", { style: { fontSize: 10, color: "#555", fontFamily: "IBM Plex Mono", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 6 } }, "Notes"),
+            React.createElement("ul", { style: { margin: 0, padding: "0 0 0 14px", fontSize: 11, color: "#888", lineHeight: 1.7 } },
+              React.createElement("li", null, "Exported PNG goes in splashscreens/ on SD"),
+              React.createElement("li", null, "Auto-selects 'Splash Screen' module"),
+              React.createElement("li", null, "Replaces factory boot logo on install")
+            )
+          )
+        )
+      ),
+
+      // BUILD TAB
+      tab === "build" && React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20, alignItems: "start" } },
+        React.createElement("div", null,
+          React.createElement("div", { style: { fontSize: 10, color: "#555", marginBottom: 10, fontFamily: "IBM Plex Mono", textTransform: "uppercase", letterSpacing: "0.12em" } }, "Selected Modules (" + selected.size + ")"),
+          selected.size === 0
+            ? React.createElement("div", { style: { padding: 20, borderRadius: 8, background: "#111114", border: "1px solid #1e1e22", textAlign: "center" } },
+                React.createElement("div", { style: { color: "#555", fontSize: 13 } }, "No modules selected"),
+                React.createElement("button", { onClick: () => setTab("modules"), style: { marginTop: 10, padding: "6px 14px", borderRadius: 5, border: "1px solid #2a2a2e", background: "#151518", color: "#888", fontSize: 11, cursor: "pointer" } }, "\u2190 Select Modules")
+              )
+            : React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 4 } },
+                MODULES_DISPLAY.filter(m => selected.has(m.id)).map(m =>
+                  React.createElement("div", { key: m.id, style: { padding: "8px 12px", borderRadius: 6, background: "#111114", border: "1px solid #1e1e22", display: "flex", alignItems: "center", gap: 8 } },
+                    React.createElement("div", { style: { width: 6, height: 6, borderRadius: "50%", background: CAT_COLORS[m.category], flexShrink: 0 } }),
+                    React.createElement("span", { style: { fontSize: 12, fontFamily: "IBM Plex Mono", fontWeight: 500, flex: 1 } }, m.name),
+                    React.createElement("button", { onClick: () => toggle(m.id), style: { background: "none", border: "none", color: "#444", cursor: "pointer", fontSize: 14, padding: 0 } }, "\u00d7")
+                  )
+                )
+              ),
+          React.createElement("div", { style: { marginTop: 14, padding: 12, borderRadius: 7, background: "#111114", border: "1px solid #1e1e22" } },
+            React.createElement("div", { style: { fontSize: 10, color: "#555", fontFamily: "IBM Plex Mono", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 6 } }, "SD Card Structure"),
+            React.createElement("pre", { style: { fontSize: 10, color: "#777", fontFamily: "IBM Plex Mono", margin: 0, lineHeight: 1.5, whiteSpace: "pre" } }, sdTree())
+          )
+        ),
+        React.createElement("div", null,
+          React.createElement("div", { style: { fontSize: 10, color: "#555", marginBottom: 10, fontFamily: "IBM Plex Mono", textTransform: "uppercase", letterSpacing: "0.12em" } }, "Build"),
+
+          // Primary build actions
+          React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 8 } },
+            // Write directly to SD (Chrome/Edge)
+            React.createElement("button", {
+              onClick: handleWriteToSd,
+              disabled: selected.size === 0 || buildState === "building",
+              title: chromium ? "Pick a folder (your SD card), write all files directly" : "Chrome/Edge only — use Download ZIP instead",
+              style: {
+                padding: "14px 16px", borderRadius: 8, border: "none",
+                background: buildState === "done-sd" ? "linear-gradient(135deg, #166534, #0a3d1f)" :
+                            (!chromium || selected.size === 0 || buildState === "building") ? "#1a1a1e" :
+                            "linear-gradient(135deg, #c41e3a, #8b0000)",
+                color: buildState === "done-sd" ? "#fff" :
+                       (!chromium || selected.size === 0 || buildState === "building") ? "#444" : "#fff",
+                fontSize: 14, fontWeight: 700,
+                cursor: (chromium && selected.size > 0 && buildState !== "building") ? "pointer" : "default",
+                boxShadow: (chromium && selected.size > 0 && buildState === "idle") ? "0 4px 14px rgba(196,30,58,0.3)" : "none"
+              }
+            },
+              buildState === "done-sd" ? "\u2713 Written to SD card" :
+              buildState === "building" ? "\u27F3 " + (buildProgress.label || "Building...") :
+              !chromium ? "\u26a0 Write to SD (Chrome/Edge only)" :
+              "\u2193 Write to SD Card..."
+            ),
+
+            // Download as ZIP (universal)
+            React.createElement("button", {
+              onClick: handleDownloadZip,
+              disabled: selected.size === 0 || buildState === "building",
+              style: {
+                padding: "12px 16px", borderRadius: 8, border: "1px solid #2a2a2e",
+                background: buildState === "done-zip" ? "rgba(22,101,52,0.15)" : "#151518",
+                color: buildState === "done-zip" ? "#4ade80" : selected.size > 0 ? "#bbb" : "#555",
+                fontSize: 13, fontWeight: 600,
+                cursor: (selected.size > 0 && buildState !== "building") ? "pointer" : "default"
+              }
+            },
+              buildState === "done-zip" ? "\u2713 ZIP downloaded" :
+              buildState === "building" ? "\u27F3 Building..." :
+              "\u2193 Download ZIP"
+            ),
+
+            // Progress bar (only while building)
+            buildState === "building" && React.createElement("div", { style: { padding: 10, borderRadius: 6, background: "#111114", border: "1px solid #1e1e22" } },
+              React.createElement("div", { style: { fontSize: 10, color: "#888", fontFamily: "IBM Plex Mono", marginBottom: 5 } }, buildProgress.label + " \u00b7 " + buildProgress.pct + "%"),
+              React.createElement("div", { style: { height: 4, background: "#0a0a0c", borderRadius: 2, overflow: "hidden" } },
+                React.createElement("div", { style: { height: "100%", width: buildProgress.pct + "%", background: "linear-gradient(90deg, #c41e3a, #e84a6a)", transition: "width 0.2s" } })
+              )
+            ),
+
+            // Error
+            buildState === "error" && React.createElement("div", { style: { padding: 10, borderRadius: 6, background: "rgba(185,28,28,0.08)", border: "1px solid rgba(185,28,28,0.3)" } },
+              React.createElement("div", { style: { fontSize: 11, color: "#fca5a5", fontFamily: "IBM Plex Mono", wordBreak: "break-word" } }, "\u26A0 " + buildError)
+            ),
+
+            // Success details
+            (buildState === "done-sd" || buildState === "done-zip") && buildStats && React.createElement("div", { style: { padding: 12, borderRadius: 7, background: "rgba(22,101,52,0.08)", border: "1px solid rgba(22,101,52,0.2)" } },
+              React.createElement("div", { style: { fontSize: 12, color: "#4ade80", fontWeight: 600, marginBottom: 6 } }, buildState === "done-sd" ? "Written to SD card" : "ZIP ready"),
+              React.createElement("div", { style: { fontSize: 10, color: "#888", fontFamily: "IBM Plex Mono", marginBottom: 8 } }, buildStats.fileCount + " files \u00b7 " + Math.round(buildStats.totalBytes / 1024) + " KB"),
+              React.createElement("ol", { style: { margin: 0, padding: "0 0 0 16px", fontSize: 11, color: "#888", lineHeight: 1.7 } },
+                buildState === "done-zip" && React.createElement("li", null, "Extract ZIP to the root of a FAT32 32GB SDHC card"),
+                buildState === "done-sd" && React.createElement("li", null, "SD card must be FAT32 32GB SDHC"),
+                React.createElement("li", null, "Boot MMI fully (wait 3+ min)"),
+                React.createElement("li", null, "Insert SD card, wait 30 sec"),
+                React.createElement("li", null, "Remove card, reboot MMI"),
+                React.createElement("li", null, React.createElement("span", null, "Open GEM: "), React.createElement("code", { style: { color: "#e84a6a", fontSize: 10 } }, "CAR + BACK"), " (C7)")
+              )
+            )
+          ),
+
+          // CLI reference card (keep for power users)
+          React.createElement("div", { style: { marginTop: 14, padding: 12, borderRadius: 7, background: "#111114", border: "1px solid #1e1e22" } },
+            React.createElement("div", { style: { fontSize: 10, color: "#555", fontFamily: "IBM Plex Mono", marginBottom: 6 } }, "Or use the CLI"),
+            React.createElement("pre", { style: { background: "#0a0a0c", borderRadius: 6, padding: 10, fontSize: 11, fontFamily: "IBM Plex Mono", color: "#e84a6a", margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-all", border: "1px solid #1a1a1e" } },
+              "python builder/build_sd.py" + (selected.size === MODULES_DISPLAY.length ? " --all" : [...selected].map(id => " -m " + id).join("")) + " -o F:\\"
+            ),
+            React.createElement("button", { onClick: () => { navigator.clipboard?.writeText("python builder/build_sd.py" + (selected.size === MODULES_DISPLAY.length ? " --all" : [...selected].map(id => " -m " + id).join("")) + " -o F:\\"); }, style: { marginTop: 8, padding: "4px 10px", borderRadius: 4, border: "1px solid #2a2a2e", background: "#151518", color: "#777", fontSize: 10, cursor: "pointer", fontFamily: "IBM Plex Mono" } }, "Copy command")
+          ),
+
+          React.createElement("div", { style: { marginTop: 12, padding: 12, borderRadius: 7, background: "#111114", border: "1px solid #1e1e22" } },
+            React.createElement("div", { style: { fontSize: 10, color: "#555", fontFamily: "IBM Plex Mono", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 6 } }, "Platform Family"),
+            React.createElement("div", { style: { fontSize: 10, color: "#666", lineHeight: 1.7, fontFamily: "IBM Plex Mono" } },
+              "All vehicles share the Harman HN+ platform: QNX 6.3.2, SH4 CPU, copie_scr.sh autorun.",
+              React.createElement("br"),
+              React.createElement("span", { style: { color: "#e84a6a" } }, "Audi"), " → EscRsa (2-byte patch) · ",
+              React.createElement("span", { style: { color: "#3b82f6" } }, "VW"), " → BouncyCastle (1-byte patch) · ",
+              React.createElement("span", { style: { color: "#f59e0b" } }, "Porsche"), " → PagSWAct (RSA-64 derived)",
+              React.createElement("br"),
+              "RSA key (1024-bit, e=17) shared across all brands."
+            )
+          )
+        )
+      )
+    ),
+    React.createElement("canvas", { ref: canvasRef, style: { display: "none" } })
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+  </script>
+</body>
+</html>

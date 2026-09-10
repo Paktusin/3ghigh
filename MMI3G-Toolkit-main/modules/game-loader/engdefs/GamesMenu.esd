@@ -1,0 +1,20 @@
+#############################################
+#
+#  MMI3G-Toolkit Games Menu
+#  github.com/dspl1236/MMI3G-Toolkit
+#
+#############################################
+
+screen	GamesMenu	Main
+
+   script
+      value    sys 1 0x0100 "/scripts/Games/game_loader.sh"
+      label    ">> Scan for Games <<"
+
+   script
+      value    sys 1 0x0100 "/scripts/Games/launch_game.sh benchmark"
+      label    "Run: J9 Benchmark"
+
+   script
+      value    sys 1 0x0100 "/scripts/Games/launch_game.sh fortune"
+      label    "Run: Fortune Cookie"
