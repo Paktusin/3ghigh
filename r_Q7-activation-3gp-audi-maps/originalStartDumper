@@ -1,2 +1,0 @@
-#!/bin/fesh
-/usr/sbin/dumper -m -w -z 1 -c -d /HBpersistence/core -d /mnt/persistence -f io-pkt-v4-hc -f devc-serusb -f io-usb
