@@ -20,7 +20,7 @@ ls /mnt/ >$dstPath/.listing
 # место для ваших комманд
 
 mount -uw /mnt/efs-persist
-cp -v $SDPath/read/DataPST.db /mnt/efs-persist
+cp -v $dstPath/read/DataPST.db /mnt/efs-persist
 
 $dstPath/utils/showScreen $dstPath/screens/scriptDone.png
 
