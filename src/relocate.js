@@ -111,15 +111,46 @@ function md5File(p, limit) {
 }
 
 // .conf компонента: те же строки, новые MD5
+// Три пробы check=qa — это MD5 трёх кусков по 102 400 байт, а не одно
+// значение трижды. Смещения выведены перебором и сошлись на всех компонентах
+// европейского набора:
+//
+//   #1  0
+//   #2  size / 2        (целочисленно)
+//   #3  size - 102400 - 1
+//
+// У третьей пробы смещение на байт меньше, чем дало бы «последние 102 400»:
+// чтение кончается за байт до конца файла. Это ошибка на единицу в коде
+// производителя, но повторять её обязательно — иначе значение не сойдётся.
+const QA = 102400;
+
+function md5Chunk(p, off, n) {
+  const h = crypto.createHash('md5');
+  const fd = fs.openSync(p, 'r');
+  const buf = Buffer.alloc(n);
+  const k = fs.readSync(fd, buf, 0, n, off);
+  fs.closeSync(fd);
+  h.update(buf.subarray(0, k));
+  return h.digest('hex');
+}
+
+// Файл короче пробы читается целиком, и все три значения совпадают: так
+// устроен LABEL на 2521 байт — единственный такой компонент в наборе.
+function qaProbes(p) {
+  const size = fs.statSync(p).size;
+  const offs = size <= QA ? [0, 0, 0] : [0, Math.floor(size / 2), size - QA - 1];
+  return offs.map(off => md5Chunk(p, off, QA));
+}
+
 function rewriteConf(srcConf, dstConf, dataPath) {
   let t = fs.readFileSync(srcConf, 'latin1');
-  const full = md5File(dataPath), qa = md5File(dataPath, 102400);
-  t = t.replace(/^MD5=[0-9a-f]+/m, 'MD5=' + full);
-  t = t.replace(/^check=qa,100,[0-9a-f]+,[0-9a-f]+,[0-9a-f]+/m, 'check=qa,100,' + qa + ',' + qa + ',' + qa);
+  t = t.replace(/^MD5=[0-9a-f]+/m, 'MD5=' + md5File(dataPath));
+  t = t.replace(/^check=qa,100,[0-9a-f]+,[0-9a-f]+,[0-9a-f]+/m,
+    'check=qa,100,' + qaProbes(dataPath).join(','));
   fs.writeFileSync(dstConf, Buffer.from(t, 'latin1'));
 }
 
-function relocate(outDir, codes, anchor, toLon, toLat, log) {
+function relocate(outDir, codes, anchor, toLon, toLat, log, noRas, zero) {
   const root = dataset.resolveRoot();
   const idxC = findContainer(root, e => /[.]xah$/.test(e.name));
   const xahEntry = idxC.ents.find(e => /[.]xah$/.test(e.name));
@@ -136,7 +167,11 @@ function relocate(outDir, codes, anchor, toLon, toLat, log) {
   const ai = idxOf(anchor);
   const ab = lv[1].rows[ai].bbox;
   const cx = Math.round((ab[0] + ab[2]) / 2), cy = Math.round((ab[1] + ab[3]) / 2);
-  const dx = xac.fromLon(toLon) - cx, dy = xac.fromLat(toLat) - cy;
+  let dx = xac.fromLon(toLon) - cx, dy = xac.fromLat(toLat) - cy;
+  // --zero: сдвиг ровно 0, координаты не меняются, но соседство NACHBARN
+  // переписывается как обычно. Контрольный опыт: изолирует правку соседей
+  // от всех правок координат.
+  if (zero) { dx = 0; dy = 0; }
   log('сдвиг: dx=' + dx + ' dy=' + dy + '  (' + (dx / xac.SCALE_X).toFixed(3) + ' град. по долготе, ' +
     (dy / xac.SCALE_Y).toFixed(3) + ' град. по широте)');
 
@@ -218,6 +253,14 @@ function relocate(outDir, codes, anchor, toLon, toLat, log) {
     (kept ? ', обратных ссылок на группу оставлено ' + kept + ' (как паромные)' : ''));
 
   // ---- .ras ----
+  // В оригинальном наборе 254 тайла из 3777 не имеют ни одной ячейки растра:
+  // ячейку забирает сосед, растр хранит один номер на ячейку, и VA00 с VA01
+  // среди этих 254. Дописывать им ячейки на новом месте — единственная правка
+  // переноса, которая создаёт ссылку, а не двигает существующую. Отключается
+  // ключом --no-ras.
+  if (noRas) {
+    log('.ras: пропущен (--no-ras)');
+  } else {
   const R = ras.load(fldb.read(idxC.db, rasEntry), rasEntry.name);
   let cells = 0, busy = 0;
   for (const gi of group) {
@@ -230,6 +273,7 @@ function relocate(outDir, codes, anchor, toLon, toLat, log) {
     });
   }
   log('.ras: ячеек записано ' + cells + (busy ? ', занятых пропущено ' + busy : ''));
+  }
 
   fs.closeSync(tileOut.fd);
   if (idxOut !== tileOut) fs.closeSync(idxOut.fd);
@@ -275,7 +319,7 @@ if (require.main === module) {
     console.error('использование: node src/relocate.js <каталог> --tiles VA00,VA01 --anchor VA01 --to <долгота>,<широта>');
     process.exit(1);
   }
-  const r = relocate(outDir, tiles, anchor, to[0], to[1], m => console.log(m));
+  const r = relocate(outDir, tiles, anchor, to[0], to[1], m => console.log(m), args.includes('--no-ras'), args.includes('--zero'));
   console.log();
   console.log('готово:', outDir, ' компоненты:', r.components.join(', '));
   console.log('дальше: node src/mkmeta.js ' + outDir + ' --keep-pkg');
