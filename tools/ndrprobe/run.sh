@@ -11,6 +11,11 @@ mkdir -p "${OUT}"
 echo started > "${SDPATH}/.started"
 rm -f "${SDPATH}/.done"
 
+# --- журнал ПЕРВЫМ: это главное, и он не зависит от nav-раздела ---
+sloginfo                > "${OUT}/syslog_full.txt"     2>&1
+sync
+echo syslog > "${SDPATH}/.syslog"
+
 [ -f "${SDPATH}/bin/showScreen" ] && {
   cp "${SDPATH}/bin/showScreen" /tmp/showScreen 2>/dev/null
   chmod +x /tmp/showScreen 2>/dev/null
@@ -42,13 +47,15 @@ done
 
 # --- что открыто и куда смонтировано ---
 mount                  > "${OUT}/mount.txt"            2>&1
-ls -la /mnt/nav/db/pkgdb/ > "${OUT}/pkgdb_listing.txt" 2>&1
-ls -la /mnt/nav/db/       > "${OUT}/navdb_listing.txt" 2>&1
-cat /mnt/nav/db/config.nfm > "${OUT}/config.nfm"       2>&1
-cat /mnt/nav/db/DBInfo.txt > "${OUT}/DBInfo.txt"       2>&1
-
-# --- журнал ---
-sloginfo                > "${OUT}/syslog_full.txt"     2>&1
+# чтение nav-раздела может блокироваться, когда ядро висит — в фоне, ждём не дольше 8 с
+( ls -la /mnt/nav/db/pkgdb/ > "${OUT}/pkgdb_listing.txt" 2>&1
+  ls -la /mnt/nav/db/       > "${OUT}/navdb_listing.txt" 2>&1
+  cat /mnt/nav/db/config.nfm > "${OUT}/config.nfm"      2>&1
+  cat /mnt/nav/db/DBInfo.txt > "${OUT}/DBInfo.txt"      2>&1
+  echo ok > "${OUT}/nav_read_ok" ) &
+NAVPID=$!
+i=0; while [ $i -lt 8 ] && kill -0 $NAVPID 2>/dev/null; do sleep 1; i=$((i+1)); done
+kill -0 $NAVPID 2>/dev/null && { echo "чтение /mnt/nav не завершилось за 8 с — раздел заблокирован" > "${OUT}/nav_read_BLOCKED.txt"; kill $NAVPID 2>/dev/null; }
 
 sync
 echo done > "${SDPATH}/.done"
