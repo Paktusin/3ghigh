@@ -1,6 +1,7 @@
 #!/bin/zsh
 # Достать ndr из пакета прошивки MU, сложенного в fw/.
-#   tools/extract_ndr.sh            — найти ifs-root.ifs в fw/, распаковать, найти ndr
+#   tools/extract_ndr.sh                 — найти ifs-root.ifs в fw/, распаковать, найти ndr
+#   tools/extract_ndr.sh <путь/ifs-root.ifs> — взять указанный образ (в fw/ их может быть много)
 # Результат: out/ifs/<вариант>/ с деревом образа и out/ndr/ndr (SH4 ELF).
 set -e
 cd "$(dirname "$0")/.."
@@ -8,7 +9,8 @@ TK=MMI3G-Toolkit-main/tools
 
 echo "=== образы ifs-root.ifs в fw/ ==="
 find fw -iname 'ifs-root.ifs' -print 2>/dev/null | sort
-IFS_FILE=$(find fw -iname 'ifs-root.ifs' 2>/dev/null | grep -E '/(41|4[0-9])/' | head -1)
+IFS_FILE="$1"
+[ -z "$IFS_FILE" ] && IFS_FILE=$(find fw -iname 'ifs-root.ifs' 2>/dev/null | grep -E '/(41|4[0-9])/' | head -1)
 [ -z "$IFS_FILE" ] && IFS_FILE=$(find fw -iname 'ifs-root.ifs' 2>/dev/null | head -1)
 [ -z "$IFS_FILE" ] && { echo "ifs-root.ifs не найден в fw/ — положите пакет туда"; exit 1; }
 echo "беру: $IFS_FILE ($(stat -f%z "$IFS_FILE") байт)"
