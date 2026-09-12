@@ -77,7 +77,38 @@ function verify(db) {
   return { contiguous, anomalies, slack: last ? db.size - (last.offset + last.size) : db.size };
 }
 
-module.exports = { open, entries, read, verify, DIR_OFFSET, ENTRY_SIZE };
+// Контрольная сумма записи каталога (+0x20). Восстановлена из ndr (SH-4),
+// функция FUN_0807a0b8, декомпилированная Ghidra. Гибрид: побитовый шаг CRC
+// с полиномом 0x04C11DB7 плюс аддитивное накопление, по 4-байтовым словам BE,
+// хвост — сложением байт. Начальное 0, константа шага 0xC7.
+// Сверено со всеми записями XAC/XAC2/XAC3 европейского набора — сходится.
+function checksum(buf) {
+  let acc = 0;
+  const n = buf.length & ~3;
+  let i = 0;
+  for (; i < n; i += 4) {
+    let step = (acc << 1) >>> 0;
+    if (acc & 0x80000000) step = (step ^ 0x04C11DB7) >>> 0;
+    acc = (0xC7 + step + buf.readUInt32BE(i)) >>> 0;
+  }
+  for (; i < buf.length; i++) acc = (acc + buf[i]) >>> 0;
+  return acc >>> 0;
+}
+
+// Пересчитать и записать сумму записи каталога по актуальным данным файла.
+// fd открыт на запись (r+). Возвращает { name, old, now, changed }.
+function refreshChecksum(fd, entry) {
+  const b = Buffer.alloc(entry.size);
+  fs.readSync(fd, b, 0, entry.size, entry.offset);
+  const now = checksum(b);
+  const at = DIR_OFFSET + entry.index * ENTRY_SIZE + 32;
+  const cur = Buffer.alloc(4); fs.readSync(fd, cur, 0, 4, at);
+  const old = cur.readUInt32LE(0);
+  if (old !== now) { const nb = Buffer.alloc(4); nb.writeUInt32LE(now, 0); fs.writeSync(fd, nb, 0, 4, at); }
+  return { name: entry.name, old, now, changed: old !== now };
+}
+
+module.exports = { open, entries, read, verify, checksum, refreshChecksum, DIR_OFFSET, ENTRY_SIZE };
 
 if (require.main === module) {
   const [, , path, cmd, arg] = process.argv;

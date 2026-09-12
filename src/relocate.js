@@ -275,6 +275,23 @@ function relocate(outDir, codes, anchor, toLon, toLat, log, noRas, zero) {
   log('.ras: ячеек записано ' + cells + (busy ? ', занятых пропущено ' + busy : ''));
   }
 
+  // ---- суммы записей каталога FLDB ----
+  // Правки внесены в файлы по месту, а у каждой записи каталога есть своя
+  // контрольная сумма (+0x20). Без пересчёта движок отвергает блок при чтении
+  // («CIFFDataBlock::CreateForDecoding: illegal Checksum») и инициализация
+  // навигации замирает. Пересчитываем по актуальным данным для всех тронутых
+  // файлов: тайлы в контейнере XAC3, а также .xah и .ras в XAC.
+  const touched = [];
+  for (const c of codes) for (const lvl of ['1', '2']) {
+    const e = tileC.ents.find(x => x.name.indexOf('_' + c + '_' + lvl + '.xac') > 0);
+    if (e) touched.push(fldb.refreshChecksum(tileOut.fd, e));
+  }
+  touched.push(fldb.refreshChecksum(idxOut.fd, xahEntry));
+  touched.push(fldb.refreshChecksum(idxOut.fd, rasEntry));
+  const changed = touched.filter(t => t.changed);
+  log('суммы каталога: пересчитано ' + changed.length + ' из ' + touched.length +
+    (changed.length ? ' (' + changed.map(t => t.name).join(', ') + ')' : ''));
+
   fs.closeSync(tileOut.fd);
   if (idxOut !== tileOut) fs.closeSync(idxOut.fd);
 
