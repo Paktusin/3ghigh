@@ -1,10 +1,12 @@
 #!/bin/zsh
 # Записать набор из out/<dir> на SD, поставив XAC и XAC3 (набор карт).
 #   tools/write_maps.sh cyprus-nonb [--no-wait]
+#   tools/write_maps.sh orig [--no-wait]      — оригинальные XAC/XAC3 из maps/ (откат)
 set -e
 cd "$(dirname "$0")/.."
-SET="$1"; [ -z "$SET" ] && { echo "укажите набор: out/<dir>"; exit 1; }
-D="out/$SET"; [ -d "$D" ] || { echo "нет каталога $D"; exit 1; }
+SET="$1"; [ -z "$SET" ] && { echo "укажите набор: out/<dir>, или orig — оригинальный maps/"; exit 1; }
+if [ "$SET" = "orig" ]; then D="maps"; else D="out/$SET"; fi
+[ -d "$D" ] || { echo "нет каталога $D"; exit 1; }
 V="/Volumes/NO NAME"
 if [ "$2" != "--no-wait" ]; then n=0; until [ -d "$V" ] || [ $n -ge 300 ]; do sleep 2; n=$((n+1)); done; fi
 [ -d "$V" ] || { echo "карта не смонтирована"; exit 1; }
