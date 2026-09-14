@@ -226,7 +226,47 @@ function tileHeader(g, off, size) {
   };
 }
 
-module.exports = { openGdb, read, header, levelHead, locateTable, levelGrid, slotFor, cluster, tileHeader };
+// Привязка координат (см. README «Привязка координат»): сетка равнопромежуточная.
+const CELL_X = 789, CELL_Y = 546;                  // размер ячейки L0 в мировых единицах
+const lonOfCell = cx => (cx - 11264) / 93.1;
+const latOfCell = cy => (cy - 934) / 181.8;
+
+// Точки последнего элемента тайла. Проверено на береговой линии Кипра: узор
+//   1d <u32 Y> <u8 N> 8f 00 00 00 00   затем ровно N × u32
+// где 0x1d — головной байт (X-режим 1 «константа», Y-режим 0xC «читать u32»,
+// поле счётчика = 1 → счётчик следующим байтом). Каждый u32 — одна точка:
+// старшие 16 бит — x (беззнаковый), младшие — y (ЗНАКОВЫЙ i16), в мировых
+// единицах относительно начала тайла. Разбирается пока только этот вариант
+// элемента; остальные режимы головного байта не декодируются.
+function tilePoints(g, off, size, tileCellX, tileCellY) {
+  const th = tileHeader(g, off, size);
+  if (!th.ok) return null;
+  const s = read(g, off, size).subarray(16, th.off0);
+  for (let p = 0; p + 11 <= s.length; p++) {
+    if (s[p] !== 0x1d || s.readUInt32BE(p + 1) !== 0x50) continue;
+    if (s[p + 6] !== 0x8f || s.readUInt32BE(p + 7) !== 0) continue;
+    const n = s[p + 5], start = p + 11;
+    if (s.length - start !== n * 4) continue;        // строгая проверка длины
+    const pts = [];
+    for (let i = 0; i < n; i++) {
+      const v = s.readUInt32BE(start + i * 4);
+      const x = v >>> 16, y = ((v & 0xffff) << 16) >> 16;   // y — знаковый
+      const p2 = { x, y };
+      if (tileCellX !== undefined) {
+        p2.lon = lonOfCell(tileCellX + x / CELL_X);
+        p2.lat = latOfCell(tileCellY + y / CELL_Y);
+      }
+      pts.push(p2);
+    }
+    return { at: 16 + p, count: n, pointsAt: 16 + start, points: pts };
+  }
+  return null;
+}
+
+module.exports = {
+  openGdb, read, header, levelHead, locateTable, levelGrid, slotFor, cluster,
+  tileHeader, tilePoints, lonOfCell, latOfCell, CELL_X, CELL_Y,
+};
 
 if (require.main === module) {
   const args = process.argv.slice(2);
@@ -283,6 +323,17 @@ if (require.main === module) {
       'S3[' + t.s3[0] + '..' + t.s3[1] + ')=' + (t.s3[1] - t.s3[0]));
     const b = read(g, off, Math.min(size, 48));
     console.log('первые байты потока (@+16): ' + b.subarray(16, Math.min(b.length, 48)).toString('hex'));
+    const cellArg = opt('--cell');
+    const pr = cellArg
+      ? tilePoints(g, off, size, Number(cellArg.split(',')[0]), Number(cellArg.split(',')[1]))
+      : tilePoints(g, off, size);
+    if (pr) {
+      console.log('\nточки последнего элемента: ' + pr.count + ' шт, узор @+' + pr.at + ', данные @+' + pr.pointsAt);
+      for (const q of pr.points.slice(0, 20))
+        console.log('  x=' + String(q.x).padStart(6) + ' y=' + String(q.y).padStart(7) +
+          (q.lon !== undefined ? '   ' + q.lon.toFixed(4) + '°E ' + q.lat.toFixed(4) + '°N' : ''));
+      if (pr.points.length > 20) console.log('  … ещё ' + (pr.points.length - 20));
+    } else console.log('\nточки: узор последнего элемента не распознан');
     process.exit(0);
   }
 
