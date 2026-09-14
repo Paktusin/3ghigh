@@ -15,10 +15,15 @@
 //     LOCAL POIS      записи по 10 байт: x, y, атрибут
 //   общий индекс .xah (контейнер XAC):
 //     XAC-STRUKTUR L1..L4  рамка строки тайла
-//     NACHBARN             соседи вне группы заменяются соседями внутри неё,
-//                          а у чужих тайлов ссылка на группу — их же другим
-//                          соседом; длины записей не меняются
+//     NACHBARN             исходящие связи группы наружу заменяются связями
+//                          внутри группы; обратные ссылки чужих тайлов НЕ
+//                          трогаются — это рвёт симметрию графа и, вероятно,
+//                          вешает инициализацию (ключ --no-nachbarn отключает)
+//     суммы каталога FLDB (+0x20) пересчитываются для всех тронутых записей
 //   общий растр .ras (контейнер XAC): ячейки новой рамки получают номер тайла
+//
+// Ключи: --no-ras (не трогать растр), --zero (сдвиг 0, только соседи),
+//        --no-nachbarn (не трогать соседей).
 //
 // Записи VEKTORBLOCK хранят дельты от опоры — их трогать не нужно. Проверено,
 // что LAYER 1 VERWEISE, ZE-NAMEN, HAUSNUMMERN абсолютных координат не содержат.
@@ -150,7 +155,7 @@ function rewriteConf(srcConf, dstConf, dataPath) {
   fs.writeFileSync(dstConf, Buffer.from(t, 'latin1'));
 }
 
-function relocate(outDir, codes, anchor, toLon, toLat, log, noRas, zero) {
+function relocate(outDir, codes, anchor, toLon, toLat, log, noRas, zero, noNachbarn) {
   const root = dataset.resolveRoot();
   const idxC = findContainer(root, e => /[.]xah$/.test(e.name));
   const xahEntry = idxC.ents.find(e => /[.]xah$/.test(e.name));
@@ -220,6 +225,14 @@ function relocate(outDir, codes, anchor, toLon, toLat, log, noRas, zero) {
   log('.xah: рамок уровней сдвинуто ' + rows);
 
   // ---- .xah: соседи ----
+  // Наша правка переписывает только исходящее направление (VA->IT в VA->VA),
+  // а обратные ссылки IT->VA оставляет — это рвёт симметрию графа соседей и,
+  // по-видимому, вешает инициализацию. Ключ --no-nachbarn оставляет NACHBARN
+  // нетронутым: граф остаётся симметричным, у перенесённого тайла соседи в
+  // исходном месте (дальняя связь, как паромная). Контрольный опыт.
+  if (noNachbarn) {
+    log('.xah: NACHBARN не тронут (--no-nachbarn)');
+  } else {
   const ns = secs.find(x => x.name === 'NACHBARN');
   const inGroup = new Set(group);
   // Правится только направление «изнутри группы наружу»: перенесённый тайл не
@@ -251,6 +264,7 @@ function relocate(outDir, codes, anchor, toLon, toLat, log, noRas, zero) {
   }
   log('.xah: связей соседства переписано ' + swaps +
     (kept ? ', обратных ссылок на группу оставлено ' + kept + ' (как паромные)' : ''));
+  }
 
   // ---- .ras ----
   // В оригинальном наборе 254 тайла из 3777 не имеют ни одной ячейки растра:
@@ -336,7 +350,7 @@ if (require.main === module) {
     console.error('использование: node src/relocate.js <каталог> --tiles VA00,VA01 --anchor VA01 --to <долгота>,<широта>');
     process.exit(1);
   }
-  const r = relocate(outDir, tiles, anchor, to[0], to[1], m => console.log(m), args.includes('--no-ras'), args.includes('--zero'));
+  const r = relocate(outDir, tiles, anchor, to[0], to[1], m => console.log(m), args.includes('--no-ras'), args.includes('--zero'), args.includes('--no-nachbarn'));
   console.log();
   console.log('готово:', outDir, ' компоненты:', r.components.join(', '));
   console.log('дальше: node src/mkmeta.js ' + outDir + ' --keep-pkg');
