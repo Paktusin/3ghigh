@@ -34,6 +34,16 @@ for f in dbglvl 0 g p ; do
   cat "/hbsystem/multicore/navi/$f"          >> "${OUT}/navi_dbglvl.txt" 2>&1
 done
 
+# --- описатель базы и нав-персистентность (флеш, не /mnt/nav — безопасно) ---
+ls -laR /HBpersistence/navi        > "${OUT}/hbp_navi_listing.txt" 2>&1
+mkdir -p "${OUT}/hbp_navi"
+cp -R /HBpersistence/navi/* "${OUT}/hbp_navi/" 2>/dev/null
+for f in /HBpersistence/navi/db/acios_db.ini /HBpersistence/navi/acios_db.ini /mnt/lvm/acios_db.ini /mnt/efs-persist/acios_db.ini ; do
+  [ -f "$f" ] && { echo "=== $f ===" >> "${OUT}/acios_db.txt"; cat "$f" >> "${OUT}/acios_db.txt"; echo >> "${OUT}/acios_db.txt"; }
+done
+[ -f "${OUT}/acios_db.txt" ] || echo "acios_db.ini не найден ни по одному пути" > "${OUT}/acios_db.txt"
+ls -la /mnt/lvm /mnt/efs-persist 2>&1 | head -40 > "${OUT}/lvm_efspersist_listing.txt"
+
 # ---------- ГОТОВО объявляем ЗДЕСЬ, до любых обращений к /mnt/nav ----------
 sync
 echo done > "${SDPATH}/.done"
