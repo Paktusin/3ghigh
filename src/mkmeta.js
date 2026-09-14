@@ -15,37 +15,64 @@ const path = require('path');
 const z = require('zlib');
 const dataset = require('./dataset');
 
-const hex = v => (v >>> 0).toString(16).padStart(8, '0');
+// Штатный инструмент производителя ведущие нули не пишет: в оригинальном
+// metainfo2.txt нет ни одного 8-значного значения, начинающегося с нуля, зато
+// есть семизначные. Дополнение до 8 знаков дало бы строку, не совпадающую с
+// оригинальной записью того же числа.
+const hex = v => (v >>> 0).toString(16);
 const LF = String.fromCharCode(10);
 const CR = String.fromCharCode(13);
 const BS = String.fromCharCode(92);
 const Q = String.fromCharCode(34);
 const CHUNK = 1 << 22;
 
-// Те же правила, что в src/checksum.js: порядок имён без учёта регистра,
-// каждый файл не более limit байт, на обрезанном файле обход кончается.
-function dirSum(dir, limit) {
+// Каталог считается так: файлы по имени без учёта регистра склеиваются встык,
+// склейка режется на куски по CheckSumSize, и КАЖДЫЙ кусок считается отдельным
+// CRC с нуля. Первый кусок пишется в CheckSum, следующие — в CheckSum1,
+// CheckSum2 и далее. Проверено на оригинале: все 11 сумм GDB_ECE (2,1 ГБ,
+// куски по 200 МБ) сошлись точь-в-точь.
+//
+// Прежняя версия применяла лимит к каждому файлу отдельно и обрывалась на
+// первом усечённом. Для каталога вида «один большой файл + мелкий .conf» это
+// случайно совпадало с куском 0, но CheckSum1..N не считались вовсе — а правка
+// в глубине тома попадает именно туда.
+function dirSums(dir, limit) {
   const names = fs.readdirSync(dir).sort((a, b) => (a.toLowerCase() < b.toLowerCase() ? -1 : 1));
-  let crc = 0, total = 0, stopped = false;
-  for (const n of names) {
+  const parts = names.map(n => {
     const p = path.join(dir, n);
-    const size = fs.statSync(p).size;
-    total += size;
-    if (stopped) continue;
-    const take = Math.min(size, limit);
-    const fd = fs.openSync(p, 'r');
-    const buf = Buffer.alloc(Math.min(CHUNK, Math.max(take, 1)));
-    let done = 0;
-    while (done < take) {
-      const k = Math.min(buf.length, take - done);
-      fs.readSync(fd, buf, 0, k, done);
-      crc = z.crc32(buf.subarray(0, k), crc);
-      done += k;
+    return { p, size: fs.statSync(p).size };
+  });
+  const total = parts.reduce((a, b) => a + b.size, 0);
+  const step = (limit && limit !== Infinity) ? limit : Math.max(total, 1);
+  const buf = Buffer.alloc(CHUNK);
+  const crcs = [];
+  for (let from = 0; from < Math.max(total, 1); from += step) {
+    const to = Math.min(total, from + step);
+    let crc = 0, pos = 0;
+    for (const f of parts) {
+      const s = pos, e = pos + f.size; pos = e;
+      if (e <= from || s >= to) continue;
+      const a = Math.max(from, s), b = Math.min(to, e);
+      const fd = fs.openSync(f.p, 'r');
+      let off = a - s, left = b - a;
+      while (left > 0) {
+        const k = fs.readSync(fd, buf, 0, Math.min(buf.length, left), off);
+        if (k <= 0) break;
+        crc = z.crc32(buf.subarray(0, k), crc);
+        off += k; left -= k;
+      }
+      fs.closeSync(fd);
     }
-    fs.closeSync(fd);
-    if (take < size) stopped = true;
+    crcs.push(hex(crc));
+    if (to >= total) break;
   }
-  return { crc: hex(crc), total };
+  return { crcs, crc: crcs[0], total };
+}
+
+// совместимость со старым вызовом: только первый кусок
+function dirSum(dir, limit) {
+  const r = dirSums(dir, limit);
+  return { crc: r.crc, total: r.total };
 }
 
 function fileSum(p, limit) {
@@ -126,6 +153,8 @@ function rewritePkg(text, present) {
   return out.join(LF);
 }
 
+module.exports = { dirSums, dirSum, fileSum };
+
 if (require.main === module) {
   const outDir = process.argv[2];
   if (!outDir) { console.error('использование: node src/mkmeta.js <каталог набора>'); process.exit(1); }
@@ -190,13 +219,26 @@ if (require.main === module) {
     if (!fs.existsSync(p)) { console.log('   ! источник не найден:', relPath); continue; }
     const limit = Number(get('CheckSumSize')) || Infinity;
     const isDir = b.head.endsWith(BS + 'Dir]');
-    const r = isDir ? dirSum(p, limit) : fileSum(p, limit);
+    const r = isDir ? dirSums(p, limit) : fileSum(p, limit);
     const oldCrc = get('CheckSum'), oldSize = get('filesize');
-    if (oldCrc !== r.crc || String(oldSize) !== String(r.total)) {
-      text = text.split('CheckSum = ' + Q + oldCrc + Q).join('CheckSum = ' + Q + r.crc + Q);
-      text = text.split('filesize = ' + Q + oldSize + Q).join('filesize = ' + Q + r.total + Q);
-      console.log('   пересчитан ' + (get('DisplayName') || relPath) + ': ' + oldCrc + ' -> ' + r.crc +
-        ', размер ' + oldSize + ' -> ' + r.total);
+    // У каталога сумм несколько: CheckSum, CheckSum1, CheckSum2 … — по куску
+    // CheckSumSize каждая. Правка в глубине тома меняет не первую из них,
+    // поэтому сверять только CheckSum недостаточно.
+    const crcs = isDir ? r.crcs : [r.crc];
+    const changed = [];
+    for (let i = 0; i < crcs.length; i++) {
+      const key = 'CheckSum' + (i ? i : '');
+      const old = get(key);
+      if (old == null || old === crcs[i]) continue;
+      text = text.split(key + ' = ' + Q + old + Q).join(key + ' = ' + Q + crcs[i] + Q);
+      changed.push(key + ' ' + old + '->' + crcs[i]);
+    }
+    const sizeChanged = String(oldSize) !== String(r.total);
+    if (sizeChanged) text = text.split('filesize = ' + Q + oldSize + Q).join('filesize = ' + Q + r.total + Q);
+    if (changed.length || sizeChanged) {
+      console.log('   пересчитан ' + (get('DisplayName') || relPath) +
+        (changed.length ? ': ' + changed.join(', ') : '') +
+        (sizeChanged ? ', размер ' + oldSize + ' -> ' + r.total : ''));
       fixed++;
     }
   }
