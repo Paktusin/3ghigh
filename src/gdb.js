@@ -263,9 +263,38 @@ function tilePoints(g, off, size, tileCellX, tileCellY) {
   return null;
 }
 
+// Кодирование элемента-ломаной в том же виде, в каком он лежит в карте:
+//   1d <u32 yConst> <u8 N> 8f 00 00 00 00   затем N × u32 (x:u16, y:i16)
+// Счётчик — один байт, поэтому точек не больше 254 (255 = признак расширенного
+// счётчика, он пока не реализован). Обратная операция к `tilePoints`.
+function encodePoints(points, yConst = 0x50) {
+  if (points.length > 254) throw new Error('точек больше 254 — нужен расширенный счётчик');
+  const out = Buffer.alloc(11 + points.length * 4);
+  out[0] = 0x1d;
+  out.writeUInt32BE(yConst, 1);
+  out[5] = points.length;
+  out[6] = 0x8f;
+  out.writeUInt32BE(0, 7);
+  points.forEach((p, i) => {
+    const x = p.x & 0xffff, y = p.y & 0xffff;
+    out.writeUInt32BE((((x << 16) >>> 0) | y) >>> 0, 11 + i * 4);
+  });
+  return out;
+}
+
+// Round-trip: элемент читается и записывается обратно байт-в-байт?
+function roundTrip(g, off, size) {
+  const pr = tilePoints(g, off, size);
+  if (!pr) return null;
+  const th = tileHeader(g, off, size);
+  const orig = read(g, off, size).subarray(pr.at, th.off0);
+  const again = encodePoints(pr.points, 0x50);
+  return { ok: orig.equals(again), bytes: orig.length, count: pr.count };
+}
+
 module.exports = {
   openGdb, read, header, levelHead, locateTable, levelGrid, slotFor, cluster,
-  tileHeader, tilePoints, lonOfCell, latOfCell, CELL_X, CELL_Y,
+  tileHeader, tilePoints, encodePoints, roundTrip, lonOfCell, latOfCell, CELL_X, CELL_Y,
 };
 
 if (require.main === module) {
