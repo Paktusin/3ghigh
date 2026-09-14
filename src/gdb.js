@@ -210,7 +210,23 @@ function cluster(g, h, off, sz) {
   return { tiles, searchStart, searchBytes: sz - searchStart };
 }
 
-module.exports = { openGdb, read, header, levelHead, locateTable, levelGrid, slotFor, cluster };
+// заголовок блоба тайла (подтверждён на 19 499/20 001 тайлах L0):
+//   +0 u16 off0  +2 u16 off1  +4 u16 off2(≈размер)  +6 u16 счётчик
+//   +8 u16 0xE028 (константа-магия)  +14 u16 m_size_daten
+// поток элементов = [16 .. off0); хвостовые секции S1[off0..off1) S2[off1..off2)
+// S3[off2..size) — индекс/порядок отрисовки/имён/строки. Тайл НЕ сжат.
+function tileHeader(g, off, size) {
+  const b = read(g, off, 16);
+  const off0 = b.readUInt16BE(0), off1 = b.readUInt16BE(2), off2 = b.readUInt16BE(4);
+  const count = b.readUInt16BE(6), magic = b.readUInt16BE(8), sizeDaten = b.readUInt16BE(14);
+  return {
+    off0, off1, off2, count, magic, sizeDaten,
+    geo: [16, off0], s1: [off0, off1], s2: [off1, off2], s3: [off2, size],
+    ok: 16 <= off0 && off0 <= off1 && off1 <= off2 && off2 <= size && magic === 0xE028,
+  };
+}
+
+module.exports = { openGdb, read, header, levelHead, locateTable, levelGrid, slotFor, cluster, tileHeader };
 
 if (require.main === module) {
   const args = process.argv.slice(2);
@@ -249,6 +265,24 @@ if (require.main === module) {
         console.log('  тайл (' + t.x + ',' + t.y + ') 2^' + t.lw + '×2^' + t.lh + ' fl=' + t.flag + ' attr=' + t.attr.toString(16) + ' данные @' + t.off + ' (' + t.size + ' б)');
       if (c.tiles.length > 12) console.log('  … ещё ' + (c.tiles.length - 12));
     }
+    process.exit(0);
+  }
+
+  const tileArg = opt('--tile');
+  if (tileArg) {
+    const [offS, szS] = tileArg.split(':');
+    const off = Number(offS), size = Number(szS || 65536);
+    const t = tileHeader(g, off, size);
+    console.log('\n=== тайл @' + off + ' (размер ' + (szS ? size : '?') + ') ===');
+    console.log('заголовок: off0=' + t.off0 + ' off1=' + t.off1 + ' off2=' + t.off2 +
+      ' счётчик=' + t.count + ' магия=0x' + t.magic.toString(16) + ' m_size_daten=' + t.sizeDaten +
+      (t.ok ? '  [ok]' : '  [не сходится]'));
+    console.log('секции: поток[' + t.geo[0] + '..' + t.geo[1] + ')=' + (t.geo[1] - t.geo[0]) + 'б  ' +
+      'S1[' + t.s1[0] + '..' + t.s1[1] + ')=' + (t.s1[1] - t.s1[0]) + '  ' +
+      'S2[' + t.s2[0] + '..' + t.s2[1] + ')=' + (t.s2[1] - t.s2[0]) + '  ' +
+      'S3[' + t.s3[0] + '..' + t.s3[1] + ')=' + (t.s3[1] - t.s3[0]));
+    const b = read(g, off, Math.min(size, 48));
+    console.log('первые байты потока (@+16): ' + b.subarray(16, Math.min(b.length, 48)).toString('hex'));
     process.exit(0);
   }
 
