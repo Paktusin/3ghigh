@@ -517,6 +517,41 @@ y = origin_y + u16BE(p+2) - 0x8000
 отрисовки). Есть и отладочная команда «Dump static GDB tile contents». По этим
 именам и пойдёт разбор содержимого.
 
+### Что уже прочитано из кода `MMI3GApplication`
+
+Ghidra на SH4 не превращает загрузки из пулов литералов в ссылки, поэтому
+функции ищутся вручную: адрес строки → слово-указатель на неё → `mov.l`,
+читающий это слово (не дальше 1020 байт до пула) → первый пуш пролога
+`mov.l rN,@-r15` до него → `createFunction` и декомпиляция.
+
+**Таблица assert'ов** (`0x981ed40…`): тройки `{строка, файл, имя метода}` —
+готовая карта `CGdbCluster.cpp` с номерами строк: `kachel_header_zu_index`
+(120/126), `create_header` (141), `init_nach_laden` (318),
+`such_tabellen_eintrag` (444–484, поисковая таблица), `setze_such_tabellen_eintrag`
+(501–536), `kachel_zu_index` (692), `loadObject` (736),
+`berechne_kachel_bereich` (857–873), `berechne_kachel_indizes` (890–904).
+Рядом — семь указателей на методы `CGdbBlobDirectory`.
+
+**Blob Directory** (из декомпиляции `getBlob`/деструкторов): в памяти таблица
+записей по **40 байт** (`obj+0x24` → таблица, `obj+0x28` → `m_numberOfBlobs`);
+`getBlob(blobnr)` берёт `entry = table + blobnr*40` и читает файл как
+`read(entry[0], 0, entry[1])` — **`entry[0]` = смещение, `entry[1]` = размер**
+блоба. Assert'ы: `m_blobTableHeaderSize <= 640` (16 записей × 40), `blob
+exceeds size of 64k` (блоб ≤ 64 КБ), `blobnr < m_numberOfBlobs`.
+
+**Инварианты из assert'ов:** `(erg >= 0) && (erg < m_anz_kacheln)` — счётчик
+тайлов кластера; `UInt16 CGdbRefTable::getOffsetOfLevelData(ebene)` — у RefTable
+смещения данных по уровням хранятся как u16; `blocknr < m_numberOfRefTables`,
+`blockIndex < m_numberOfLitBlocks`; на верхнем уровне `CGdb::kachel_zu_position`,
+`kachel_id_zu_position`, `cluster_zu_kachel_id` — у тайла есть id и позиция,
+кластер отображается в id тайлов. Помощник `FUN_08caef1c` считает размер как
+`1 << (a + b + уровень)` по `u16` из заголовка — степени двойки в раскладке.
+
+**Отброшено на данных L0** (плотный регион 431 КБ после шапки уровня):
+это не поток 19-байтовых записей, не плоская таблица смещений, не пары
+`(смещение, размер)` и не CIFF-блоки. Слепой перебор структур закончен —
+дальше только по коду.
+
 ### Уровни отображения
 ### Уровни отображения
 
