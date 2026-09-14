@@ -58,7 +58,57 @@ function buildReplacement(g, off, size, newPts, tcx, tcy) {
   return { pr, th, orig, patched, fileOffset: off + pr.at };
 }
 
-module.exports = { degToTile, buildReplacement, checkRange };
+// ── Наращивание тайла ────────────────────────────────────────────────────
+// Правка на месте ограничена числом точек уже лежащей ломаной. Чтобы положить
+// больше, тайл не «раздвигается»: запись тайла в кластере содержит указатель
+//     u32 смещение данных @11   u32 размер данных @15
+// поэтому новый, более крупный блоб дописывается в КОНЕЦ тома, а в кластере
+// правятся только эти 8 байт. Никакие другие смещения не двигаются.
+//
+// Новый блоб = заголовок(16) + [старый поток элементов + наш элемент] + S1+S2+S3,
+// счётчик элементов в заголовке увеличивается на 1, три u16-смещения
+// пересчитываются. Предел — u16: весь блоб не больше 65535 байт.
+function buildGrownTile(g, off, size, newPts) {
+  const th = gm.tileHeader(g, off, size);
+  if (!th.ok) throw new Error('заголовок тайла не распознан');
+  const b = gm.read(g, off, size);
+  const stream = b.subarray(16, th.off0);
+  const s1 = b.subarray(th.off0, th.off1);
+  const s2 = b.subarray(th.off1, th.off2);
+  const s3 = b.subarray(th.off2, size);
+
+  const elem = gm.encodePoints(newPts, 0x50);
+  const newStream = Buffer.concat([stream, elem]);
+  const off0 = 16 + newStream.length;
+  const off1 = off0 + s1.length;
+  const off2 = off1 + s2.length;
+  const total = off2 + s3.length;
+  if (total > 0xffff) throw new Error('блоб не влезает в u16: ' + total + ' б');
+
+  const head = Buffer.from(b.subarray(0, 16));       // копия исходного заголовка
+  head.writeUInt16BE(off0, 0);
+  head.writeUInt16BE(off1, 2);
+  head.writeUInt16BE(off2, 4);
+  head.writeUInt16BE(th.count + 1, 6);               // элементов стало на один больше
+  return { blob: Buffer.concat([head, newStream, s1, s2, s3]), total, elemCount: th.count + 1 };
+}
+
+// найти в кластере запись тайла, указывающую на данный блоб
+function findTileRecord(g, h, gr, tileOff) {
+  for (let i = 0; i < gr.entries.length; i++) {
+    const e = gr.entries[i];
+    if (e.off < h.regionEnd || e.off === gr.emptyOff || e.sz === 0) continue;
+    const c = gm.cluster(g, h, e.off, e.sz);
+    for (let k = 0; k < c.tiles.length; k++) {
+      if (c.tiles[k].off === tileOff) {
+        return { slot: i, clusterOff: e.off, index: k, recordOff: e.off + k * 19, tile: c.tiles[k] };
+      }
+    }
+  }
+  return null;
+}
+
+module.exports = { degToTile, buildReplacement, checkRange, buildGrownTile, findTileRecord };
 
 if (require.main === module) {
   const args = process.argv.slice(2);
@@ -66,11 +116,10 @@ if (require.main === module) {
   const root = dataset.resolveRoot(args.find(a => !a.startsWith('--') && !/^\d/.test(a)));
   const g = gm.openGdb(root);
 
-  const tileArg = opt('--tile');
-  const cellArg = opt('--cell');
-  const roadArg = opt('--road');
+  const tileArg = opt('--tile'), cellArg = opt('--cell'), roadArg = opt('--road');
   if (!tileArg || !cellArg || !roadArg) {
     console.error('нужны --tile <смещение>:<размер> --cell <cx>,<cy> --road "lon,lat lon,lat ..."');
+    console.error('правка на месте: --apply <копия .gdb>   наращивание: --grow <копия .gd2> --gdb <копия .gdb>');
     process.exit(2);
   }
   const [offS, szS] = tileArg.split(':');
@@ -80,40 +129,62 @@ if (require.main === module) {
   const deg = roadArg.trim().split(/\s+/).map(s => s.split(',').map(Number));
   const newPts = deg.map(([lon, lat]) => degToTile(lon, lat, tcx, tcy));
 
-  console.log('=== подмена геометрии в тайле @' + off + ' (' + size + ' б), клетка (' + tcx + ',' + tcy + ') ===');
+  console.log('=== тайл @' + off + ' (' + size + ' б), клетка (' + tcx + ',' + tcy + '), точек на входе: ' + newPts.length + ' ===');
   const bad = checkRange(newPts);
   if (bad.length) { console.error('координаты не влезают:\n  ' + bad.join('\n  ')); process.exit(1); }
 
+  const growTo = opt('--grow');
+  if (growTo) {
+    // Наращивание: новый блоб дописывается в конец .gd2, а в кластере правятся
+    // только 8 байт записи тайла (смещение+размер). Остальное не двигается.
+    const gdb = opt('--gdb');
+    if (!gdb) { console.error('для наращивания нужен ещё --gdb <копия .gdb>'); process.exit(2); }
+    const h = gm.header(g);
+    const gr = gm.levelGrid(g, h, h.levels[0]);
+    const rec = findTileRecord(g, h, gr, off);
+    if (!rec) { console.error('запись тайла в кластере не найдена'); process.exit(1); }
+
+    const { blob, total, elemCount } = buildGrownTile(g, off, size, newPts);
+    const before = fs.statSync(growTo).size;
+    const newOffset = g.s1 + before;          // сквозное смещение: .gd2 продолжает .gdb
+
+    console.log('запись тайла: кластер @' + rec.clusterOff + ', индекс ' + rec.index + ', запись @' + rec.recordOff);
+    console.log('блоб: ' + size + ' → ' + total + ' б; элементов ' + (elemCount - 1) + ' → ' + elemCount);
+    console.log('дописываем в ' + growTo + ' на позицию ' + before + ' (сквозное смещение ' + newOffset + ')');
+
+    let fd = fs.openSync(growTo, 'r+');
+    fs.writeSync(fd, blob, 0, blob.length, before);
+    fs.closeSync(fd);
+
+    const patch = Buffer.alloc(8);
+    patch.writeUInt32BE(newOffset, 0);
+    patch.writeUInt32BE(total, 4);
+    fd = fs.openSync(gdb, 'r+');
+    fs.writeSync(fd, patch, 0, 8, rec.recordOff + 11);
+    fs.closeSync(fd);
+
+    console.log('запись тайла перенацелена: смещение=' + newOffset + ', размер=' + total);
+    console.log('ВНИМАНИЕ: размер .gd2 изменился — в GDB2.conf нужно обновить size=, MD5 и check=qa');
+    process.exit(0);
+  }
+
+  // Правка на месте: число точек должно совпасть, длина элемента не меняется.
   const { pr, orig, patched, fileOffset } = buildReplacement(g, off, size, newPts, tcx, tcy);
   console.log('точек: ' + pr.count + ' (длина элемента ' + orig.length + ' б — не меняется)');
   console.log('смещение правки в томе: ' + fileOffset);
-  console.log('\nбыло (первые 8 точек):');
-  pr.points.slice(0, 8).forEach(p => console.log('  x=' + String(p.x).padStart(6) + ' y=' + String(p.y).padStart(7) +
-    '   ' + p.lon?.toFixed(4) + '°E ' + p.lat?.toFixed(4) + '°N'));
-  console.log('стало (первые 8 точек):');
-  newPts.slice(0, 8).forEach((p, i) => console.log('  x=' + String(p.x).padStart(6) + ' y=' + String(p.y).padStart(7) +
-    '   ' + deg[i][0].toFixed(4) + '°E ' + deg[i][1].toFixed(4) + '°N'));
-
-  // самопроверка: разобрать получившиеся байты обратно
-  const rebuilt = Buffer.concat([Buffer.alloc(0), patched]);
-  const n = rebuilt[5];
-  const back = [];
-  for (let i = 0; i < n; i++) {
-    const v = rebuilt.readUInt32BE(11 + i * 4);
-    back.push({ x: v >>> 16, y: ((v & 0xffff) << 16) >> 16 });
-  }
-  const same = back.every((p, i) => p.x === newPts[i].x && p.y === newPts[i].y);
-  console.log('\nобратный разбор новых байт: ' + (same ? '✓ совпал со входом' : '✗ РАСХОЖДЕНИЕ'));
+  console.log('было (первые 6):');
+  pr.points.slice(0, 6).forEach(p => console.log('  ' + (p.lon != null ? p.lon.toFixed(4) + '°E ' + p.lat.toFixed(4) + '°N' : 'x=' + p.x + ' y=' + p.y)));
+  console.log('стало (первые 6):');
+  deg.slice(0, 6).forEach(d => console.log('  ' + d[0].toFixed(4) + '°E ' + d[1].toFixed(4) + '°N'));
   console.log('изменено байт: ' + orig.reduce((a, b, i) => a + (b !== patched[i] ? 1 : 0), 0) + ' из ' + orig.length);
 
   const applyTo = opt('--apply');
   if (applyTo) {
-    if (!fs.existsSync(applyTo)) { console.error('нет файла для правки: ' + applyTo); process.exit(1); }
     const fd = fs.openSync(applyTo, 'r+');
     fs.writeSync(fd, patched, 0, patched.length, fileOffset);
     fs.closeSync(fd);
-    console.log('\nзаписано в ' + applyTo + ' по смещению ' + fileOffset);
+    console.log('записано в ' + applyTo + ' по смещению ' + fileOffset);
   } else {
-    console.log('\n(ничего не записано — добавьте --apply <копия .gdb>)');
+    console.log('(ничего не записано — добавьте --apply <копия .gdb>)');
   }
 }
