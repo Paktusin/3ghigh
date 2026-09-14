@@ -44,6 +44,14 @@ done
 [ -f "${OUT}/acios_db.txt" ] || echo "acios_db.ini не найден ни по одному пути" > "${OUT}/acios_db.txt"
 ls -la /mnt/lvm /mnt/efs-persist 2>&1 | head -40 > "${OUT}/lvm_efspersist_listing.txt"
 
+# --- кэш checkpoints logvolmgr (собран под оригинальную базу) ---
+for d in /HBpersistence/lvm /HBpersistence/lvm.checkpoints /HBpersistence/lvm/checkpoints ; do
+  echo "=== $d ===" >> "${OUT}/lvm_checkpoints.txt"
+  ls -laR "$d" >> "${OUT}/lvm_checkpoints.txt" 2>&1
+done
+mkdir -p "${OUT}/lvm_copy"
+cp -R /HBpersistence/lvm "${OUT}/lvm_copy/" 2>/dev/null
+
 # ---------- ГОТОВО объявляем ЗДЕСЬ, до любых обращений к /mnt/nav ----------
 sync
 echo done > "${SDPATH}/.done"
