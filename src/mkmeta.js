@@ -25,48 +25,45 @@ const CR = String.fromCharCode(13);
 const BS = String.fromCharCode(92);
 const Q = String.fromCharCode(34);
 const CHUNK = 1 << 22;
-
-// Каталог считается так: файлы по имени без учёта регистра склеиваются встык,
-// склейка режется на куски по CheckSumSize, и КАЖДЫЙ кусок считается отдельным
-// CRC с нуля. Первый кусок пишется в CheckSum, следующие — в CheckSum1,
-// CheckSum2 и далее. Проверено на оригинале: все 11 сумм GDB_ECE (2,1 ГБ,
-// куски по 200 МБ) сошлись точь-в-точь.
+// Суммы каталога. Правило выведено и проверено на нетронутом наборе — сходятся
+// все 18 компонентов и все их куски (от 1 до 11 на компонент):
 //
-// Прежняя версия применяла лимит к каждому файлу отдельно и обрывалась на
-// первом усечённом. Для каталога вида «один большой файл + мелкий .conf» это
-// случайно совпадало с куском 0, но CheckSum1..N не считались вовсе — а правка
-// в глубине тома попадает именно туда.
+//   файлы в порядке имён без учёта регистра читаются ОДНИМ ПОТОКОМ, CRC копится
+//   сквозь них; кусок закрывается, когда от ТЕКУЩЕГО файла прочитано
+//   CheckSumSize байт; конец файла сбрасывает этот счётчик, но кусок не
+//   закрывает. Первый кусок пишется в CheckSum, следующие — в CheckSum1, …
+//
+// Отсюда две неочевидности, на которых ломаются наивные модели:
+//   * у GDB (большой файл первым) .conf попадает в ПОСЛЕДНИЙ кусок, а не в
+//     первый — первый обрывается ровно на 200 МБ образа;
+//   * у SDS (.conf сортируется первым) первый кусок ДЛИННЕЕ лимита: 478 байт
+//     .conf плюс полные 200 МБ образа.
 function dirSums(dir, limit) {
   const names = fs.readdirSync(dir).sort((a, b) => (a.toLowerCase() < b.toLowerCase() ? -1 : 1));
-  const parts = names.map(n => {
-    const p = path.join(dir, n);
-    return { p, size: fs.statSync(p).size };
-  });
-  const total = parts.reduce((a, b) => a + b.size, 0);
-  const step = (limit && limit !== Infinity) ? limit : Math.max(total, 1);
+  const L = (limit === undefined || limit === Infinity || !limit) ? Infinity : limit;
   const buf = Buffer.alloc(CHUNK);
   const crcs = [];
-  for (let from = 0; from < Math.max(total, 1); from += step) {
-    const to = Math.min(total, from + step);
-    let crc = 0, pos = 0;
-    for (const f of parts) {
-      const s = pos, e = pos + f.size; pos = e;
-      if (e <= from || s >= to) continue;
-      const a = Math.max(from, s), b = Math.min(to, e);
-      const fd = fs.openSync(f.p, 'r');
-      let off = a - s, left = b - a;
-      while (left > 0) {
-        const k = fs.readSync(fd, buf, 0, Math.min(buf.length, left), off);
-        if (k <= 0) break;
-        crc = z.crc32(buf.subarray(0, k), crc);
-        off += k; left -= k;
-      }
-      fs.closeSync(fd);
+  let crc = 0, dirty = false, total = 0;
+  for (const n of names) {
+    const p = path.join(dir, n);
+    const size = fs.statSync(p).size;
+    total += size;
+    const fd = fs.openSync(p, 'r');
+    let off = 0;
+    while (off < size) {
+      // читаем не дальше ближайшей границы L, отсчитанной ОТ НАЧАЛА ЭТОГО файла
+      const boundary = (L === Infinity) ? size : Math.min(size, Math.floor(off / L) * L + L);
+      const k = fs.readSync(fd, buf, 0, Math.min(buf.length, boundary - off), off);
+      if (k <= 0) break;
+      crc = z.crc32(buf.subarray(0, k), crc);
+      dirty = true;
+      off += k;
+      if (L !== Infinity && off % L === 0) { crcs.push(crc); crc = 0; dirty = false; }
     }
-    crcs.push(hex(crc));
-    if (to >= total) break;
+    fs.closeSync(fd);
   }
-  return { crcs, crc: crcs[0], total };
+  if (dirty || crcs.length === 0) crcs.push(crc);
+  return { crcs: crcs.map(hex), crc: hex(crcs[0]), total };
 }
 
 // совместимость со старым вызовом: только первый кусок

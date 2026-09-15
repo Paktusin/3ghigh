@@ -41,37 +41,45 @@ function crcFile(p, limit) {
   fs.closeSync(fd);
   return { crc, size, taken: take };
 }
-
-// Каталог: склейка в порядке имён без учёта регистра. Каждый файл читается
-// не более limit байт, и если файл пришлось обрезать — обход на нём кончается.
-// Проверено: у XAC3 и TER2 данные идут первыми и обрезаются на пределе, так что
-// .conf в сумму не попадает; у SDS первым сортируется .conf, он читается целиком,
-// и только потом обрезается образ.
-function crcDir(dir, limit) {
+// Суммы каталога. Правило выведено и проверено на нетронутом наборе — сходятся
+// все 18 компонентов и все их куски (от 1 до 11 на компонент):
+//
+//   файлы в порядке имён без учёта регистра читаются ОДНИМ ПОТОКОМ, CRC копится
+//   сквозь них; кусок закрывается, когда от ТЕКУЩЕГО файла прочитано
+//   CheckSumSize байт; конец файла сбрасывает этот счётчик, но кусок не
+//   закрывает. Первый кусок пишется в CheckSum, следующие — в CheckSum1, …
+//
+// Отсюда две неочевидности, на которых ломаются наивные модели:
+//   * у GDB (большой файл первым) .conf попадает в ПОСЛЕДНИЙ кусок, а не в
+//     первый — первый обрывается ровно на 200 МБ образа;
+//   * у SDS (.conf сортируется первым) первый кусок ДЛИННЕЕ лимита: 478 байт
+//     .conf плюс полные 200 МБ образа.
+function crcDirChunks(dir, limit) {
   const names = fs.readdirSync(dir).sort((a, b) => (a.toLowerCase() < b.toLowerCase() ? -1 : 1));
-  const cap = limit === undefined ? Infinity : limit;
-  let crc = 0, total = 0, stopped = false;
+  const L = (limit === undefined || limit === Infinity || !limit) ? Infinity : limit;
+  const buf = Buffer.alloc(CHUNK);
+  const crcs = [];
+  let crc = 0, dirty = false, total = 0;
   for (const n of names) {
     const p = path.join(dir, n);
     const size = fs.statSync(p).size;
     total += size;
-    if (stopped) continue;
-    // CRC накапливается через все файлы подряд, поэтому читаем здесь,
-    // а не через crcFile: тот всегда начинает с нуля.
-    const take = Math.min(size, cap);
     const fd = fs.openSync(p, 'r');
-    const buf = Buffer.alloc(Math.min(CHUNK, Math.max(take, 1)));
-    let done = 0;
-    while (done < take) {
-      const k = Math.min(buf.length, take - done);
-      fs.readSync(fd, buf, 0, k, done);
+    let off = 0;
+    while (off < size) {
+      // читаем не дальше ближайшей границы L, отсчитанной ОТ НАЧАЛА ЭТОГО файла
+      const boundary = (L === Infinity) ? size : Math.min(size, Math.floor(off / L) * L + L);
+      const k = fs.readSync(fd, buf, 0, Math.min(buf.length, boundary - off), off);
+      if (k <= 0) break;
       crc = z.crc32(buf.subarray(0, k), crc);
-      done += k;
+      dirty = true;
+      off += k;
+      if (L !== Infinity && off % L === 0) { crcs.push(crc); crc = 0; dirty = false; }
     }
     fs.closeSync(fd);
-    if (take < size) stopped = true;   // файл обрезан — дальше не читаем
   }
-  return { crc, total, names };
+  if (dirty || crcs.length === 0) crcs.push(crc);
+  return { crcs, crc: crcs[0], total, names };
 }
 
 // Разбор File- и Dir-записей из metainfo2.txt ветки релиза.
@@ -123,15 +131,26 @@ if (require.main === module) {
     const src = path.join(root, rel);
     if (!fs.existsSync(src)) { console.log('  ' + (c.DisplayName || c.section).padEnd(28) + 'источник не найден'); continue; }
     const limit = Number(c.CheckSumSize) || undefined;
-    const r = c.kind === 'dir' ? crcDir(src, limit) : (() => { const f = crcFile(src, limit); return { crc: f.crc, total: f.size }; })();
+    const r = c.kind === 'dir' ? crcDirChunks(src, limit)
+      : (() => { const f = crcFile(src, limit); return { crcs: [f.crc], crc: f.crc, total: f.size }; })();
     const got = hex(r.crc);
     // в metainfo ведущий ноль иногда опущен, поэтому сравниваем численно
     const want = hex(parseInt(c.CheckSum, 16));
+    // у каталога сумм несколько — по куску CheckSumSize каждая; правка в
+    // глубине тома меняет не первую, так что сверяем все
+    const badChunks = [];
+    r.crcs.forEach((v, i) => {
+      const key = 'CheckSum' + (i ? i : '');
+      if (c[key] === undefined) return;
+      if (hex(v) !== hex(parseInt(c[key], 16))) badChunks.push(key);
+    });
     const sizeOk = String(r.total) === String(c.filesize);
-    const ok = got === want && sizeOk;
+    const ok = !badChunks.length && sizeOk;
     if (!ok) bad++;
     console.log('  ' + (c.DisplayName || c.section).padEnd(28) + want + '   ' + got + '   ' +
-      String(r.total).padStart(12) + (sizeOk ? '' : ' (ожид. ' + c.filesize + ')') + '   ' + (ok ? 'ок' : 'РАСХОЖДЕНИЕ'));
+      String(r.total).padStart(12) + (sizeOk ? '' : ' (ожид. ' + c.filesize + ')') +
+      '   ' + (ok ? 'ок' + (r.crcs.length > 1 ? ' (' + r.crcs.length + ' кусков)' : '')
+                  : 'РАСХОЖДЕНИЕ' + (badChunks.length ? ' в ' + badChunks.join(',') : '')));
     if (fix && !ok) {
       meta = meta.split('CheckSum = "' + c.CheckSum + '"').join('CheckSum = "' + got + '"');
       meta = meta.split('filesize = "' + c.filesize + '"').join('filesize = "' + r.total + '"');
