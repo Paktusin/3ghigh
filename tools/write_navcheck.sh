@@ -20,7 +20,10 @@ sleep 2
 touch "$V/.w" 2>/dev/null || { echo "карта заблокирована (LOCK)"; exit 1; }
 rm -f "$V/.w"
 
-rm -rf "$V/var/nav" "$V/var/ndr" "$V/.started" "$V/.done" "$V/.syslog" "$V"/.step*
+setopt +o nomatch 2>/dev/null || true
+rm -rf "$V/var/nav" "$V/var/ndr" 2>/dev/null || true
+rm -f "$V/.started" "$V/.done" "$V/.syslog" 2>/dev/null || true
+find "$V" -maxdepth 1 -name ".step*" -delete 2>/dev/null || true
 cp tools/navcheck/run.sh "$V/run.sh"
 cp out/ndrprobe/copie_scr.sh "$V/copie_scr.sh"
 ditto --norsrc --noextattr --noacl out/ndrprobe/bin "$V/bin"
