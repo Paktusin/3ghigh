@@ -39,6 +39,22 @@ guard 10 "${OUT}/df.txt"    df -k
 # 6. персистентность навигации и lvm
 guard 15 "${OUT}/hbp_navi.txt" ls -laR /HBpersistence/navi
 guard 10 "${OUT}/lvm.txt"      ls -laR /mnt/lvm /HBpersistence/lvm
+# 7. Отметки установщика по каждому компоненту. Каталог тома, который читает CDM
+#    (acios_db.ini), генерирует LVM при установке, а эти файлы пишет SWDL —
+#    по ним видно, какие компоненты установщик реально трогал и что записал.
+guard 20 "${OUT}/swdl_marks.txt" sh -c '
+  for f in /mnt/nav/db/pkgdb/*.SWDL.version.txt /mnt/nav/db/pkgdb/*.SWDL.compatibility.txt; do
+    [ -f "$f" ] || continue
+    echo "=== $f"; cat "$f"; echo
+  done'
+# 8. Куда реально ведут пути из acios_db.ini: существуют ли файлы и какого размера
+guard 20 "${OUT}/acios_targets.txt" sh -c '
+  ini=/HBpersistence/navi/db/acios_db.ini
+  [ -f "$ini" ] || { echo "нет $ini"; exit 0; }
+  sed -n "s/^[A-Za-z]*: *//p" "$ini" | while read pth; do
+    [ -n "$pth" ] || continue
+    if [ -e "$pth" ]; then ls -la "$pth"; else echo "ОТСУТСТВУЕТ: $pth"; fi
+  done'
 echo done > "${SDPATH}/.done"; sync
 [ -f /tmp/showScreen ] && [ -f "${SDPATH}/lib/done.png" ] && /tmp/showScreen "${SDPATH}/lib/done.png" &
 sleep 5
