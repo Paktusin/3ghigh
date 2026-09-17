@@ -22,6 +22,59 @@ const gw = require('./gdbwrite');
 const dataset = require('./dataset');
 
 const TILE = 32;                                   // тайл L0 — 32 клетки
+
+// --- реестр элементов тайла (секции S1 и S2) -------------------------------
+//
+// Одной геометрии мало: элемент рисуется, только если на него есть запись в S1.
+// Проверено на 4000 тайлах L0 без единого исключения: счётчик в начале S1 равен
+// числу элементов минус один (первый элемент — служебная рамка, записи не имеет).
+// Раньше здесь дописывалась только геометрия, и добавленные дороги отрисовщик
+// просто не видел.
+//
+//   S1: u16 счётчик, 0x02, u16 ноль, затем записи из полей с тегами
+//         16 <u32> <u16 порядковый>   идентификатор
+//         21 <u8>                     необязательное поле
+//         32 <u16>                    номер строки в S2, отсчёт от нуля
+//         f0                          конец записи
+//       98.5% записей — это формы «32», «16+32» и «16+21+32»; минимальная
+//       запись, которой достаточно, — `32 <u16> f0`, четыре байта.
+//
+//   S2: u16 счётчик, u16 ноль, затем строки: байт длины, затем байты.
+//       В байте длины значащими являются младшие 4 бита (все встреченные длины
+//       не больше 15), старшие — признаки продолжения имени.
+//
+// Секция пустого тайла вырождена до двух байт «00 00» — тогда заголовок
+// достраивается целиком.
+
+function parseS1(b) {
+  if (b.length < 5) return { count: b.length >= 2 ? b.readUInt16BE(0) : 0, body: Buffer.alloc(0) };
+  return { count: b.readUInt16BE(0), body: Buffer.from(b.subarray(5)) };
+}
+function buildS1(count, body) {
+  if (count === 0) return Buffer.from([0, 0]);
+  const h = Buffer.alloc(5);
+  h.writeUInt16BE(count, 0); h[2] = 2; h.writeUInt16BE(0, 3);
+  return Buffer.concat([h, body]);
+}
+function s1record(nameIdx) {
+  const r = Buffer.alloc(4);
+  r[0] = 0x32; r.writeUInt16BE(nameIdx, 1); r[3] = 0xf0;
+  return r;
+}
+function parseS2(b) {
+  if (b.length < 4) return { count: b.length >= 2 ? b.readUInt16BE(0) : 0, body: Buffer.alloc(0) };
+  return { count: b.readUInt16BE(0), body: Buffer.from(b.subarray(4)) };
+}
+function buildS2(count, body) {
+  if (count === 0) return Buffer.from([0, 0]);
+  const h = Buffer.alloc(4);
+  h.writeUInt16BE(count, 0); h.writeUInt16BE(0, 2);
+  return Buffer.concat([h, body]);
+}
+function s2string(name) {
+  const s = Buffer.from(name.slice(0, 15), 'latin1');
+  return Buffer.concat([Buffer.from([s.length]), s]);
+}
 const cellX = lon => 11264 + 93.1 * lon;
 const cellY = lat => 934 + 181.8 * lat;
 
@@ -30,9 +83,10 @@ const cellY = lat => 934 + 181.8 * lat;
 function groupByTile(lines) {
   const byTile = new Map();
   for (const ln of lines) {
-    if (ln.length < 2) continue;
-    const tx = Math.floor(cellX(ln[0][0]) / TILE) * TILE;
-    const ty = Math.floor(cellY(ln[0][1]) / TILE) * TILE;
+    const c = Array.isArray(ln) ? ln : ln.pts;
+    if (!c || c.length < 2) continue;
+    const tx = Math.floor(cellX(c[0][0]) / TILE) * TILE;
+    const ty = Math.floor(cellY(c[0][1]) / TILE) * TILE;
     const k = tx + ',' + ty;
     if (!byTile.has(k)) byTile.set(k, { tx, ty, lines: [] });
     byTile.get(k).lines.push(ln);
@@ -41,7 +95,7 @@ function groupByTile(lines) {
 }
 
 // собрать новый блоб тайла со всеми нашими элементами
-function buildTile(g, off, size, lines, tx, ty) {
+function buildTile(g, off, size, lines, tx, ty, name = 'CYP') {
   const th = gm.tileHeader(g, off, size);
   if (!th.ok) throw new Error('заголовок тайла не распознан');
   const b = gm.read(g, off, size);
@@ -51,17 +105,35 @@ function buildTile(g, off, size, lines, tx, ty) {
   const s3 = b.subarray(th.off2, size);
 
   const parts = [stream];
+  const names = [];                               // имена добавленных дорог, по порядку
   let added = 0, skipped = 0;
   for (const ln of lines) {
-    const pts = ln.map(([lon, lat]) => gw.degToTile(lon, lat, tx, ty));
+    const coords = Array.isArray(ln) ? ln : ln.pts;
+    const pts = coords.map(([lon, lat]) => gw.degToTile(lon, lat, tx, ty));
     if (gw.checkRange(pts).length || pts.length > 254) { skipped++; continue; }
     parts.push(gm.encodePoints(pts, 0x50));
+    names.push((Array.isArray(ln) ? null : ln.name) || name);
     added++;
   }
   const newStream = Buffer.concat(parts);
+
+  // реестр: на каждый добавленный элемент — запись в S1; все они ссылаются на
+  // одну новую строку в S2, чтобы не плодить имена
+  const p1 = parseS1(s1), p2 = parseS2(s2);
+  const uniq = [], idxOf = new Map();
+  for (const nm of names) {
+    if (!idxOf.has(nm)) { idxOf.set(nm, p2.count + uniq.length); uniq.push(nm); }
+  }
+  const newS2 = added
+    ? buildS2(p2.count + uniq.length, Buffer.concat([p2.body, ...uniq.map(s2string)]))
+    : s2;
+  const newS1 = added
+    ? buildS1(p1.count + added, Buffer.concat([p1.body, ...names.map(nm => s1record(idxOf.get(nm)))]))
+    : s1;
+
   const off0 = 16 + newStream.length;
-  const off1 = off0 + s1.length;
-  const off2 = off1 + s2.length;
+  const off1 = off0 + newS1.length;
+  const off2 = off1 + newS2.length;
   const total = off2 + s3.length;
   if (total > 0xffff) throw new Error('блоб не влезает в u16: ' + total + ' б');
 
@@ -70,7 +142,11 @@ function buildTile(g, off, size, lines, tx, ty) {
   head.writeUInt16BE(off1, 2);
   head.writeUInt16BE(off2, 4);
   head.writeUInt16BE(th.count + added, 6);
-  return { blob: Buffer.concat([head, newStream, s1, s2, s3]), total, added, skipped, was: size };
+  return {
+    blob: Buffer.concat([head, newStream, newS1, newS2, s3]),
+    total, added, skipped, was: size,
+    s1count: p1.count + added, s2count: p2.count + uniq.length, names: uniq.length,
+  };
 }
 
 module.exports = { groupByTile, buildTile, cellX, cellY, TILE };
@@ -90,8 +166,13 @@ if (require.main === module) {
   if (!dry && (!gdbPath || !gd2Path)) { console.error('нужны --gdb и --gd2 (копии томов) либо --dry'); process.exit(2); }
 
   const j = JSON.parse(fs.readFileSync(roadsFile, 'utf8'));
+  const nameOf = f => {
+    const p = f.properties || {};
+    const s = (p.ref || p.name || '').toString().trim();
+    return s ? s.slice(0, 15) : 'CY';              // пустых имён в исходных данных не встречается
+  };
   const lines = j.features.filter(f => f.geometry.type === 'LineString')
-    .map(f => f.geometry.coordinates.map(c => [c[0] + shift[0], c[1] + shift[1]]));
+    .map(f => ({ name: nameOf(f), pts: f.geometry.coordinates.map(c => [c[0] + shift[0], c[1] + shift[1]]) }));
   console.log('=== укладка дорог в GDB ===');
   console.log('дорог на входе: ' + lines.length + ', сдвиг ' + shift[0] + '°/' + shift[1] + '°');
 
