@@ -180,7 +180,12 @@ if (require.main === module) {
   const byTile = groupByTile(lines);
   console.log('затронуто тайлов: ' + byTile.size + '\n');
 
-  let gd2Size = gd2Path ? fs.statSync(gd2Path).size : g.s2;
+  // Сначала СНИМАЕМ карту целей целиком, и только потом пишем. Иначе после
+  // первой же дозаписи запись тайла указывает за прежний конец тома, а
+  // gm.cluster() обрывает разбор на такой записи (toff >= g.total) — и все
+  // следующие тайлы того же кластера пропадают из виду. В полном томе это
+  // маскировалось порядком обхода, в урезанном — нет.
+  const targets = [];
   for (const { tx, ty, lines: ls } of byTile.values()) {
     const slot = (ty >> gr.head.potY) * gr.W + (tx >> gr.head.potX);
     const e = gr.entries[slot];
@@ -188,10 +193,12 @@ if (require.main === module) {
     const c = gm.cluster(g, h, e.off, e.sz);
     const idx = c.tiles.findIndex(t => t.x === tx && t.y === ty);
     if (idx < 0) { console.log('  тайл (' + tx + ',' + ty + '): записи в кластере нет — пропуск'); continue; }
-    const t = c.tiles[idx];
+    targets.push({ tx, ty, ls, slot, t: c.tiles[idx], recordOff: e.off + idx * 19 });
+  }
 
+  let gd2Size = gd2Path ? fs.statSync(gd2Path).size : g.s2;
+  for (const { tx, ty, ls, slot, t, recordOff } of targets) {
     const r = buildTile(g, t.off, t.size, ls, tx, ty);
-    const recordOff = e.off + idx * 19;
     console.log('  тайл (' + tx + ',' + ty + ') слот ' + slot + ': дорог ' + r.added +
       (r.skipped ? ' (пропущено ' + r.skipped + ')' : '') +
       ', блоб ' + r.was + ' → ' + r.total + ' б, запись @' + recordOff);
