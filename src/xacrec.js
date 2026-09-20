@@ -102,27 +102,29 @@ function record(s, at, attr, touch) {
   // Скорость. Признак берётся не из записи, а из шапки блока: FUN_08277f7c
   // кладёт в поле +0x48 разряды 9..10 из (байт 0x39 блока >> 1) & 3, а условие
   // чтения — «этот признак не равен единице».
-  // Само значение: (слово & 0x0fff) << ((слово & 0x7000) >> 11) — мантисса со
-  // сдвигом. Скоростей две, по одной на направление (поля +0x58 и +0x5c).
-  const speed = (w) => (w & 0x0fff) << ((w & 0x7000) >> 11);
+  // (слово & 0x0fff) << ((слово & 0x7000) >> 11) — мантисса со сдвигом.
+  // Это ДЛИНА в метрах, а не скорость: обходчик маршрута FUN_082b3638 берёт
+  // это поле (структура вектора +0x58) и суммирует его в «Gesamt %ldm».
+  // Значений два, поля +0x58 и +0x5c.
+  const metres = (w) => (w & 0x0fff) << ((w & 0x7000) >> 11);
   let spd = [0, 0];
   const mode = (s[0x39] >> 1) & 3;
   if (mode !== 1) {
     let w = u16(p);
     if (w === null) return null;
     touch(p, p + 2); p += 2;
-    spd[0] = speed(w);
+    spd[0] = metres(w);
     const ver = s.readUInt16BE(0x14);
     if (ver === 2 || (ver > 2 && (s[0x3d] & 0x80))) {
       w = u16(p);
       if (w === null) return null;
       touch(p, p + 2); p += 2;
-      spd[1] = speed(w);
+      spd[1] = metres(w);
     }
   }
   return {
     node: w0 & NODE, idx: w1 & IDX, attr: a, cross: !!cross, end: p,
-    level: a & 7, flags: fl, extra: extra, speed: spd,
+    level: a & 7, flags: fl, extra: extra, length: spd, speed: spd,
   };
 }
 
