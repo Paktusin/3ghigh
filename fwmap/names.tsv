@@ -26,3 +26,4 @@
 0x08cdf1e8	poitile_check_type	проверка ISLit_POITile == 0x23
 0x08cf473e	xac_scan_sections	обход разделов тайла XAC, шаг size + 0x14
 0x08cf4a54	xac_get_component	поиск раздела по номеру блока
+0x082b2efc	nav_options_violation_mask	сборка маски нарушенных опций маршрута, 14 строк-имён

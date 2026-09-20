@@ -64,8 +64,20 @@ function record(s, at, attr, touch) {
   fl = (fl & ~0x00200000) | (((hi >> 4) & 1) << 21);
   fl = (fl & ~0x00100000) | (((cross & 1)) << 20);
 
-  if (fl & 0x40000000) { if (u16(p + 2) === null) return null; touch(p, p + 4); p += 4; }
-  if (fl & 0x10000000) { if (u16(p + 2) === null) return null; touch(p, p + 4); p += 4; }
+  // Поля +0x40 и +0x44 структуры вектора: ещё два слова атрибутов по 32 бита,
+  // каждое необязательно, при отсутствии равно нулю. После чтения прошивка
+  // гасит в них биты 31 и 15 — те же, что служили признаком удлинения.
+  const extra = [0, 0];
+  if (fl & 0x40000000) {
+    if (u16(p + 2) === null) return null;
+    extra[0] = s.readUInt32BE(p) & 0x7fffffff & 0xffff7fff;
+    touch(p, p + 4); p += 4;
+  }
+  if (fl & 0x10000000) {
+    if (u16(p + 2) === null) return null;
+    extra[1] = s.readUInt32BE(p) & 0x7fffffff & 0xffff7fff;
+    touch(p, p + 4); p += 4;
+  }
 
   if (fl & 0x20000000) {                               // цепочка: пока бит 6 старшего байта
     let w = u16(p);
@@ -90,17 +102,28 @@ function record(s, at, attr, touch) {
   // Скорость. Признак берётся не из записи, а из шапки блока: FUN_08277f7c
   // кладёт в поле +0x48 разряды 9..10 из (байт 0x39 блока >> 1) & 3, а условие
   // чтения — «этот признак не равен единице».
+  // Само значение: (слово & 0x0fff) << ((слово & 0x7000) >> 11) — мантисса со
+  // сдвигом. Скоростей две, по одной на направление (поля +0x58 и +0x5c).
+  const speed = (w) => (w & 0x0fff) << ((w & 0x7000) >> 11);
+  let spd = [0, 0];
   const mode = (s[0x39] >> 1) & 3;
   if (mode !== 1) {
-    if (u16(p) === null) return null;
+    let w = u16(p);
+    if (w === null) return null;
     touch(p, p + 2); p += 2;
+    spd[0] = speed(w);
     const ver = s.readUInt16BE(0x14);
     if (ver === 2 || (ver > 2 && (s[0x3d] & 0x80))) {
-      if (u16(p) === null) return null;
+      w = u16(p);
+      if (w === null) return null;
       touch(p, p + 2); p += 2;
+      spd[1] = speed(w);
     }
   }
-  return { node: w0 & NODE, idx: w1 & IDX, attr: a, cross: !!cross, end: p };
+  return {
+    node: w0 & NODE, idx: w1 & IDX, attr: a, cross: !!cross, end: p,
+    level: a & 7, flags: fl, extra: extra, speed: spd,
+  };
 }
 
 // Пройти все векторы блока и отметить затронутые байты.
