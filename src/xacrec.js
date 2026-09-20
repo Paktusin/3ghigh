@@ -158,33 +158,68 @@ function record(s, at, attr, touch, opt) {
   };
 }
 
-// Пройти все векторы блока и отметить затронутые байты.
+// Блок v5 целиком: шапка, область узлов, таблица векторов, байты шагов.
+//
+// Область узлов — это подряд идущие узлы. Узел устроен так:
+//
+//     [координата][список элементов]
+//
+// Элементы списка различаются меткой старших двух бит слова:
+//   0xc000 — полная запись вектора (разбирается record),
+//   0x4000 — обратная ссылка, два байта,
+//   0x8000 или 0x0000 — это уже НЕ элемент, а координата следующего узла.
+//
+// Таблица индексирует не все узлы: на 12 тайлах из 270 329 её записей узлы
+// находятся все, но в области лежит ещё 251 267 узлов, до которых добираешься
+// только последовательным проходом. Байт шага говорит, на сколько слов назад
+// от смещения из таблицы начинается узел.
+function coordLen(s, p) {
+  const w = s.readUInt16BE(p);
+  if ((w & 0xc000) === 0x8000) return ((s[p] >> 5) & 1) ? 8 : 6;
+  return 4;
+}
+
+// Пройти блок и отметить затронутые байты.
 function blockSpan(s, attr) {
   if (s.length < 0x74 || s.readUInt16BE(0x72) !== 1) return null;
   const tab = s.readUInt32BE(0x6c), cnt = s.readUInt16BE(0x70);
-  if (!(tab > 0 && tab + cnt * 2 <= s.length && cnt > 0)) return null;
+  if (!(tab > 0 && tab + cnt * 2 + 2 + cnt <= s.length && cnt > 0)) return null;
   const mark = new Uint8Array(s.length);
   const touch = (a, b) => { for (let k = Math.max(0, a); k < Math.min(b, s.length); k++) mark[k] = 1; };
   touch(0, 0x74);                                      // шапка блока
-  touch(tab, tab + cnt * 2 + 2 + cnt);                 // таблица векторов и шаги
-  // координаты узлов: длина зависит от формы (четыре, шесть или восемь байт)
-  const coord = (o) => {
-    if (o <= 0 || o + 4 > s.length) return;
-    const w = s.readUInt16BE(o);
-    if ((w & 0xc000) === 0xc000) return;
-    if ((w & 0xc000) === 0x8000) touch(o, o + (((s[o] >> 5) & 1) ? 8 : 6));
-    else touch(o, o + 4);
-  };
-  let ok = 0, fail = 0;
+  touch(tab, tab + cnt * 2 + 2 + cnt);                 // таблица и байты шагов
+
+  const starts = [];
   for (let i = 0; i < cnt; i++) {
-    const p = s.readUInt16BE(tab + i * 2) * 2;
-    const r = record(s, p, attr, touch);
-    if (r) { ok++; coord(xv.nodeOffset(s, tab, cnt, i)); coord(xv.nodeOffset(s, tab, cnt, r.node)); }
-    else fail++;
+    const o = xv.nodeOffset(s, tab, cnt, i);
+    if (o > 0) starts.push(o);
+  }
+  starts.sort((a, b) => a - b);
+
+  let vectors = 0, backrefs = 0, nodes = 0, fail = 0;
+  for (let k = 0; k < starts.length; k++) {
+    const lim = Math.min(k + 1 < starts.length ? starts[k + 1] : s.length, s.length);
+    let p = starts[k];
+    if (p + 2 > lim) continue;
+    let n = coordLen(s, p); touch(p, p + n); p += n; nodes++;
+    let guard = 0;
+    while (p + 2 <= lim && ++guard < 4096) {
+      const t = (s.readUInt16BE(p) & 0xc000) >>> 14;
+      if (t === 3) {
+        const r = record(s, p, attr, touch);
+        if (!r) { fail++; break; }
+        vectors++;
+        p = Math.max(r.end, p + 4);
+      } else if (t === 1) {
+        backrefs++; touch(p, p + 2); p += 2;
+      } else {
+        n = coordLen(s, p); touch(p, p + n); p += n; nodes++;
+      }
+    }
   }
   let seen = 0;
   for (const m of mark) if (m) seen++;
-  return { ok, fail, seen, total: s.length };
+  return { ok: vectors, fail, backrefs, nodes, seen, total: s.length };
 }
 
 module.exports = { attributes, record, blockSpan };
@@ -195,7 +230,7 @@ if (require.main === module) {
   const attr = attributes(fldb.read(db, list.find((x) => /\.xah$/i.test(x.name))));
   console.log('таблица ATTRIBUTE: %d записей', attr.length);
   const tiles = list.filter((x) => /\.xac$/i.test(x.name)).slice(0, Number(process.argv[3] || 40));
-  let ok = 0, fail = 0, seen = 0, total = 0, blocks = 0;
+  let ok = 0, fail = 0, seen = 0, total = 0, blocks = 0, nodes = 0, backrefs = 0;
   for (const e of tiles) {
     const buf = fldb.read(db, e);
     for (const b of xac.vectorBlocks(buf)) {
@@ -203,8 +238,10 @@ if (require.main === module) {
       const r = blockSpan(buf.subarray(b.offset, b.offset + b.size), attr);
       if (!r) continue;
       blocks++; ok += r.ok; fail += r.fail; seen += r.seen; total += r.total;
+      nodes += r.nodes; backrefs += r.backrefs;
     }
   }
-  console.log('блоков v5 %d, записей разобрано %d, не разобрано %d', blocks, ok, fail);
+  console.log('блоков v5 %d, узлов %d, векторов %d, обратных ссылок %d, сбоев %d',
+    blocks, nodes, ok, backrefs, fail);
   console.log('байт объяснено %d из %d  (%s%%)', seen, total, (100 * seen / total).toFixed(1));
 }
