@@ -27,10 +27,15 @@
 
 const SKIP = 0x8000, REWIND = 0x2000, ADD = 0x1000, COND = 0x0800, INV = 0x0400;
 
-// Естественная маска разрядности чтения — из FUN_08cd0798 (local_34).
+// Маска разрядности (local_34 в FUN_08cd0798). Важно: она сбрасывается в ноль
+// на КАЖДОЙ записи, и задаёт её сам код операции. Нулевая маска означает, что
+// запись в регистр не меняет ничего.
 const MASK = {
+  0x10: 0xffffffff,
   0x20: 0xffffffff, 0x21: 0xff, 0x22: 0xffff, 0x23: 0xffffff, 0x24: 0xffffffff,
   0x25: 0xffffffff, 0x26: 0xff, 0x27: 0xffff, 0x28: 0xffffff, 0x29: 0xffffffff,
+  0x60: 0xff, 0x61: 0xffff, 0x62: 0xffffffff, 0x63: 0xffff, 0x64: 0xffff,
+  0x80: 0xffffffff,
 };
 
 function run(schema, data, startRule, opt) {
@@ -143,11 +148,10 @@ function run(schema, data, startRule, opt) {
         // Переход по w4 ведёт к началу цикла записей — запоминаем его как дом.
         if (tgt) { home = idxOfWord(tgt); pc = home; continue; }
         // Под-грамматики вызываются переходом 0xc0, а не вызовом, поэтому
-        // возвращаться некуда: конец записи — это возврат к началу цикла.
-        // Виток цикла записей обязан съедать байты — иначе разбор крутится
-        // вхолостую и плодит пустые записи.
-        if (home >= 0 && p < data.length && p > lastHome) { lastHome = p; pc = home; continue; }
-        return fin(home >= 0 && p <= lastHome ? 'виток без продвижения' : 'конец');
+        // Без цели и на нулевом уровне прошивка возвращает -4, а итератор на
+        // нём останавливается (уровень < 1 и код < -1). Значит это конец
+        // разбора, а не возврат к началу цикла записей.
+        return fin('конец (0x11 без цели)');
       }
       case 0x20: val = varint(true); break;
       case 0x21: val = s(1); break;
@@ -256,7 +260,10 @@ function run(schema, data, startRule, opt) {
 
     if (p > data.length) return fin('чтение за концом блока');
     if (val !== null) {
-      store(w1, val, w0, MASK[op] !== undefined ? MASK[op] : 0xffffffff);
+      // у 0x81 маска своя: (1 << w5) - 1, если w5 меньше 32
+      const mask = op === 0x81 ? (k < 32 ? ((1 << k) - 1) >>> 0 : 0xffffffff)
+                               : (MASK[op] !== undefined ? MASK[op] : 0);
+      store(w1, val, w0, mask);
       if (type === 0x5b) code = (w0 & ADD) ? (code + (val & 0xff)) & 0xffff : (val & 0xff);
       else if (type && rec) rec[type] = val;
     }
