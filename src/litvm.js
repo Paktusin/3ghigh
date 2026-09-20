@@ -193,9 +193,9 @@ function run(schema, data, startRule, opt) {
       }
       case 0x43: p += fr.len; break;
       case 0x44: {
-        const n = fr.len, txt = data.subarray(p, p + n); p += n;
+        const n = fr.len, at = p, txt = data.subarray(p, p + n); p += n;
         if (type === 0x5d) codes.set(code, txt);
-        else if (rec) rec[type] = txt;
+        else if (rec) { rec[type] = txt; rec['@'] = at; }
         break;
       }
       case 0xa0: case 0xa2: {
