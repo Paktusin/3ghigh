@@ -138,7 +138,10 @@ function run(schema, data, startRule, opt) {
     }
 
     const p0 = p;                                     // для бита 13 — «подсмотреть»
-    let val = null;
+    // Состояние дельта-кодека ДО шага — нужно обратному проходу (src/litenc.js),
+    // чтобы понять, какой переход X/Y записан в байтах.
+    const pX = X, pY = Y, pBase = baseX;
+    let val = null, pair = null;
     switch (op) {
       case 0x10:
         if (rec && Object.keys(rec).length) records.push(rec);
@@ -213,6 +216,7 @@ function run(schema, data, startRule, opt) {
         else if (wid === 24) { x = u(3); y = u(3); }
         else { x = 0; y = 0; }                        // прочие ширины байт не читают
         if (rec) { rec['xy'] = [x, y]; if (type) rec[type] = [x, y]; }
+        pair = [x, y];
         break;
       }
       case 0x41: {                                    // дельта-кодек координат
@@ -293,6 +297,12 @@ function run(schema, data, startRule, opt) {
     }
 
     if (p > data.length) return fin('чтение за концом блока');
+    // Отвод для обратного прохода: по одному вызову на каждый код, который
+    // действительно съел байты. Поведение машины он не меняет.
+    if (o.tap && p !== p0) o.tap({ op: op, at: p0, end: p, w0: w0, type: type,
+                                   wid: wid, val: val, pair: pair,
+                                   x: X, y: Y, px: pX, py: pY, base: pBase,
+                                   len: fr.len, f38: fr.f38, rule: pc });
     if (val !== null) {
       // у 0x81 маска своя: (1 << w5) - 1, если w5 меньше 32
       const mask = op === 0x81 ? (k < 32 ? ((1 << k) - 1) >>> 0 : 0xffffffff)
