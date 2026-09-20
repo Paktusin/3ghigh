@@ -27,3 +27,4 @@
 0x08cf473e	xac_scan_sections	обход разделов тайла XAC, шаг size + 0x14
 0x08cf4a54	xac_get_component	поиск раздела по номеру блока
 0x082b2efc	nav_options_violation_mask	сборка маски нарушенных опций маршрута, 14 строк-имён
+0x082b3638	nav_route_scan_violations	обход маршрута, счёт метров по категориям Maut/Tunnel/Motorway
