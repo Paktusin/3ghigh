@@ -44,7 +44,7 @@ function run(schema, data, startRule, opt) {
   let fr = newFrame();
 
   let pc = startRule, p = 0, code = 0, steps = 0, wid = 12;
-  let X = 0, Y = 0, baseX = 0, mark = 0, home = -1;
+  let X = 0, Y = 0, baseX = 0, mark = 0, home = -1, lastHome = -1;
   const codes = new Map(), loops = [], calls = [], records = [];
   let rec = null;
 
@@ -93,6 +93,7 @@ function run(schema, data, startRule, opt) {
       if (!hit) { pc++; continue; }
     }
 
+    const p0 = p;                                     // для бита 13 — «подсмотреть»
     let val = null;
     switch (op) {
       case 0x10: if (rec && Object.keys(rec).length) records.push(rec); rec = {}; mark = p; break;
@@ -103,8 +104,10 @@ function run(schema, data, startRule, opt) {
         if (tgt) { home = idxOfWord(tgt); pc = home; continue; }
         // Под-грамматики вызываются переходом 0xc0, а не вызовом, поэтому
         // возвращаться некуда: конец записи — это возврат к началу цикла.
-        if (home >= 0 && p < data.length) { pc = home; continue; }
-        return fin('конец');
+        // Виток цикла записей обязан съедать байты — иначе разбор крутится
+        // вхолостую и плодит пустые записи.
+        if (home >= 0 && p < data.length && p > lastHome) { lastHome = p; pc = home; continue; }
+        return fin(home >= 0 && p <= lastHome ? 'виток без продвижения' : 'конец');
       case 0x20: val = varint(true); break;
       case 0x21: val = s(1); break;
       case 0x22: val = s(2); break;
@@ -129,7 +132,9 @@ function run(schema, data, startRule, opt) {
         let x, y;
         if (wid === 12) { const a = u(1), b = u(1), c = u(1); x = a + (c & 0x0f) * 256; y = b + (c >> 4) * 256; }
         else if (wid === 8) { x = u(1); y = u(1); }
-        else { x = u(2); y = u(2); }
+        else if (wid === 16) { x = u(2); y = u(2); }
+        else if (wid === 24) { x = u(3); y = u(3); }
+        else { x = 0; y = 0; }                        // прочие ширины байт не читают
         if (rec) rec['xy'] = [x, y];
         break;
       }
@@ -154,6 +159,11 @@ function run(schema, data, startRule, opt) {
         if ((fl >> 2) & 1) Y = (b << 8) | data[p++];
         else Y += (b > 127 ? b - 256 : b);
         if (rec) rec['xy'] = [X, Y];
+        break;
+      }
+      case 0x42: {                                    // блок длиной из поля 2
+        const n = fr.f38, txt = data.subarray(p, p + n); p += n;
+        if (rec && type) rec[type] = txt;
         break;
       }
       case 0x43: p += fr.len; break;
@@ -196,7 +206,7 @@ function run(schema, data, startRule, opt) {
       if (type === 0x5b) code = (w0 & ADD) ? (code + (val & 0xff)) & 0xffff : (val & 0xff);
       else if (type && rec) rec[type] = val;
     }
-    if (w0 & REWIND) p = mark;                        // бит 13 — вернуть курсор
+    if (w0 & REWIND) p = p0;                          // бит 13 — прочитать, не съедая
     pc++;
   }
   return fin(steps >= limit ? 'предел шагов' : 'данные кончились');
