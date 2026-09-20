@@ -93,7 +93,7 @@ function run(schema, data, startRule, opt) {
   while (p < data.length && steps++ < limit) {
     if (pc < 0 || first + pc * stride + stride > words.length) return fin('схема кончилась');
     const w0 = wordAt(pc, 0), op = w0 & 0xff;
-    if (trace) { trace.push([pc, op, p]); if (trace.length > 40) trace.shift(); }
+    if (trace) { trace.push([pc, op, p]); if (trace.length > 400) trace.shift(); }
     const w1 = wordAt(pc, 1), type = wordAt(pc, 2);
     const tgt = wordAt(pc, 4), k = wordAt(pc, 5);
 
