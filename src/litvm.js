@@ -47,7 +47,7 @@ function run(schema, data, startRule, opt) {
   let lvl = 0, fr = F[0];
 
   let pc = startRule, p = 0, code = 0, steps = 0, wid = 12;
-  let X = 0, Y = 0, baseX = 0, mark = 0, home = -1, lastHome = -1;
+  let X = 0, Y = 0, baseX = 0, mark = 0, home = -1, lastHome = -1, byGoto = false;
   const codes = new Map(), loops = [], calls = [], records = [];
   let rec = null;
 
@@ -99,7 +99,20 @@ function run(schema, data, startRule, opt) {
     const p0 = p;                                     // для бита 13 — «подсмотреть»
     let val = null;
     switch (op) {
-      case 0x10: if (rec && Object.keys(rec).length) records.push(rec); rec = {}; mark = p; break;
+      case 0x10:
+        if (rec && Object.keys(rec).length) records.push(rec);
+        rec = {}; mark = p;
+        // Придя сюда переходом 0xc0, прошивка пропускает подряд идущие записи
+        // со взведённым битом 14 — это продолжения предыдущей ветки.
+        if (byGoto) {
+          while (first + (pc + 1) * stride < words.length &&
+                 (words[first + (pc + 1) * stride] & 0x4000)) pc++;
+          byGoto = false;
+        }
+        fr.cnt2 = 0;                                  // 0x10 сбрасывает счётчики кадра
+        while (loops.length && loops[loops.length - 1].op === 0xa2) loops.pop();
+        if (type) val = type;                         // тип структуры — это и значение
+        break;
       case 0xc3:                                      // выход из под-грамматики
       case 0x11: {
         // 0x11 — это конец цикла 0xa2: сперва проверяем, остались ли витки.
@@ -202,7 +215,7 @@ function run(schema, data, startRule, opt) {
         loops.pop();
         break;
       }
-      case 0xc0: pc = idxOfWord(tgt); continue;
+      case 0xc0: byGoto = true; pc = idxOfWord(tgt); continue;
       case 0xc1: case 0xc2: {
         if (lvl >= 3) break;                          // глубже трёх прошивка просто не вызывает
         // У 0xc2 аргумент — поле регистра: сдвиг вправо на (w5 >> 8),
