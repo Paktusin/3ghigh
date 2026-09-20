@@ -40,8 +40,11 @@ function run(schema, data, startRule, opt) {
   const wordAt = (i, k) => words[first + i * stride + k];
   const idxOfWord = (w) => (w - first) / stride;
 
+  // Кадры постоянны: в прошивке это четыре области по уровню (this+156), и
+  // вызов НЕ обнуляет их — он только кладёт аргумент. Уровней не больше трёх.
   const newFrame = () => ({ reg: 0, cnt0: 0, f38: 0, cnt2: 0, len: 0, arg: 0 });
-  let fr = newFrame();
+  const F = [newFrame(), newFrame(), newFrame(), newFrame()];
+  let lvl = 0, fr = F[0];
 
   let pc = startRule, p = 0, code = 0, steps = 0, wid = 12;
   let X = 0, Y = 0, baseX = 0, mark = 0, home = -1, lastHome = -1;
@@ -107,7 +110,7 @@ function run(schema, data, startRule, opt) {
           if (--Lp.left > 0) { pc = Lp.back; continue; }
           loops.pop();
         }
-        if (calls.length) { const c = calls.pop(); fr = c.fr; pc = c.back; continue; }
+        if (calls.length) { pc = calls.pop(); if (lvl > 0) fr = F[--lvl]; continue; }
         // Переход по w4 ведёт к началу цикла записей — запоминаем его как дом.
         if (tgt) { home = idxOfWord(tgt); pc = home; continue; }
         // Под-грамматики вызываются переходом 0xc0, а не вызовом, поэтому
@@ -201,9 +204,15 @@ function run(schema, data, startRule, opt) {
       }
       case 0xc0: pc = idxOfWord(tgt); continue;
       case 0xc1: case 0xc2: {
-        const a = op === 0xc2 ? ((fr.reg >>> 0) & (k < 32 ? (1 << k) - 1 : 0xffffffff)) : k;
-        calls.push({ back: pc + 1, fr });
-        fr = newFrame(); fr.arg = a;
+        if (lvl >= 3) break;                          // глубже трёх прошивка просто не вызывает
+        // У 0xc2 аргумент — поле регистра: сдвиг вправо на (w5 >> 8),
+        // ширина (w5 & 0x1f). У 0xc1 аргумент равен самому w5.
+        const a = op === 0xc2
+          ? ((fr.reg >>> ((k >> 8) & 0x1f)) & ((1 << (k & 0x1f)) - 1)) >>> 0
+          : k;
+        calls.push(pc + 1);
+        fr = F[++lvl];
+        fr.arg = a;                                   // остальные поля кадра сохраняются
         pc = idxOfWord(tgt); continue;
       }
       default: return fin('неизвестный код 0x' + op.toString(16) + ' в записи ' + pc);
