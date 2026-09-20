@@ -1,0 +1,28 @@
+# Имена функций прошивки MMI3GApplication (SH-4, VA = смещение в файле + 0x08040000).
+# Проект Ghidra лежит в fw/ и в git не попадает (1.4 ГБ), поэтому имена храним здесь.
+# Применить к свежему проекту: fwmap/scripts/ApplyNames.java
+#
+# адрес	имя	чем опознана
+0x0807a0b8	fldb_checksum	сумма каталога FLDB, CRC 0x04C11DB7 с шагом 0xC7
+0x08272350	xac_find_node	поиск узла вперёд по блоку, шаги 6 и 9 слов
+0x08272410	xac_node_offset	ссылка на узел -> смещение; признак конца 0xff, под-блок +0x16
+0x08272548	xac_node_other_block	узел в соседнем блоке
+0x082727e8	xac_decode_coord	три формы координаты: 4, 6 и 8 байт
+0x08272938	xac_read_vector_v5	разбор записи вектора v5 целиком
+0x08277f7c	xac_fill_speed_mode	поле +0x48 из шапки блока: (байт 0x39 >> 1) & 3
+0x08c9e3b8	lit_get_detail_line	строка записи POI по однобайтовому тегу, до 254 байт
+0x08cb20f0	gdb_read_header	шапка GDB: версия, id, 12 уровней, таблица 32 пар
+0x08cc4f58	lit_open	открытие Lit\x02: заголовок и каталог блоков
+0x08cc7b3c	lit_reset_struct	сброс состояния под тип структуры
+0x08cc79bc	lit_read_element	сбор элемента: шаг до падения уровня
+0x08cc8800	lit_iterator_next	шаг итератора, коды возврата -1..-5
+0x08ccaf60	lit_get_text	ленивый доступ к тексту записи
+0x08ccf84c	lit_parse_dispatch	раскладка прочитанного по полям объекта
+0x08ccfcc0	lit_expand_dict	развёртка словаря: длина и смещение по коду
+0x08cd0798	lit_parse_step	машина грамматики TTD, 24 кода операций
+0x08cd070c	lit_iter_init	инициализация итератора, проверка *param_2 == 0x10
+0x08cddfec	poitiledb_get_tile	получение тайла POI
+0x08cdeee4	poitile_ctor	обход элементов тайла POI, тип записи 0x24
+0x08cdf1e8	poitile_check_type	проверка ISLit_POITile == 0x23
+0x08cf473e	xac_scan_sections	обход разделов тайла XAC, шаг size + 0x14
+0x08cf4a54	xac_get_component	поиск раздела по номеру блока
