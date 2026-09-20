@@ -72,6 +72,7 @@ function record(s, at, attr, touch) {
     while (w !== null) { touch(p, p + 2); p += 2; if (!((w >> 14) & 1)) break; w = u16(p); }
   }
   if (save >= 0) p = save;
+
   if (fl & 0x08000000) {                               // цепочка с вложенностью
     let w = u16(p);
     while (w !== null && ((w >> 14) & 1)) {
@@ -83,6 +84,20 @@ function record(s, at, attr, touch) {
         if ((w2 >> 14) & 1) { touch(p, p + 2); p += 2; }
       }
       w = u16(p);
+    }
+  }
+
+  // Скорость. Признак берётся не из записи, а из шапки блока: FUN_08277f7c
+  // кладёт в поле +0x48 разряды 9..10 из (байт 0x39 блока >> 1) & 3, а условие
+  // чтения — «этот признак не равен единице».
+  const mode = (s[0x39] >> 1) & 3;
+  if (mode !== 1) {
+    if (u16(p) === null) return null;
+    touch(p, p + 2); p += 2;
+    const ver = s.readUInt16BE(0x14);
+    if (ver === 2 || (ver > 2 && (s[0x3d] & 0x80))) {
+      if (u16(p) === null) return null;
+      touch(p, p + 2); p += 2;
     }
   }
   return { node: w0 & NODE, idx: w1 & IDX, attr: a, cross: !!cross, end: p };
