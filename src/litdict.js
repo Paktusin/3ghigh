@@ -44,8 +44,11 @@ function dict(block) {
 
 // Раскрытие перечитывается заново — код может раскрываться в другие коды
 // (так устроен и сам декодер в прошивке), поэтому проход повторяется.
-function expand(codes, buf, limit) {
+function expand(codes, buf, limit, cap) {
   const max = limit || 16;
+  // Словарь бывает с циклом (код раскрывается сам в себя через другой код),
+  // поэтому рост ограничен: иначе развёртка уходит в бесконечность.
+  const top = cap || Math.max(4096, buf.length * 64);
   let cur = buf;
   for (let k = 0; k < max; k++) {
     const out = [];
@@ -54,6 +57,7 @@ function expand(codes, buf, limit) {
       const e = codes.get(b);
       if (e) { hit = true; for (const x of e) out.push(x); }
       else out.push(b);
+      if (out.length > top) return Buffer.from(out.slice(0, top));
     }
     cur = Buffer.from(out);
     if (!hit) break;

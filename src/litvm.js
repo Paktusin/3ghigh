@@ -98,7 +98,15 @@ function run(schema, data, startRule, opt) {
     switch (op) {
       case 0x10: if (rec && Object.keys(rec).length) records.push(rec); rec = {}; mark = p; break;
       case 0xc3:                                      // выход из под-грамматики
-      case 0x11:
+      case 0x11: {
+        // 0x11 — это конец цикла 0xa2: сперва проверяем, остались ли витки.
+        // В прошивке это счётчик кадра +56 против предела в кадре +40.
+        const Lp = loops[loops.length - 1];
+        if (Lp && Lp.op === 0xa2) {
+          Lp.done++;
+          if (--Lp.left > 0) { pc = Lp.back; continue; }
+          loops.pop();
+        }
         if (calls.length) { const c = calls.pop(); fr = c.fr; pc = c.back; continue; }
         // Переход по w4 ведёт к началу цикла записей — запоминаем его как дом.
         if (tgt) { home = idxOfWord(tgt); pc = home; continue; }
@@ -108,6 +116,7 @@ function run(schema, data, startRule, opt) {
         // вхолостую и плодит пустые записи.
         if (home >= 0 && p < data.length && p > lastHome) { lastHome = p; pc = home; continue; }
         return fin(home >= 0 && p <= lastHome ? 'виток без продвижения' : 'конец');
+      }
       case 0x20: val = varint(true); break;
       case 0x21: val = s(1); break;
       case 0x22: val = s(2); break;
