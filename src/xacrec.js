@@ -29,7 +29,8 @@ function attributes(xahBuf) {
 
 // Разбор одной записи. Возвращает, какие байты блока она затронула.
 // touch(a, b) вызывается на каждый прочитанный кусок [a, b).
-function record(s, at, attr, touch) {
+function record(s, at, attr, touch, opt) {
+  opt = opt || {};
   const u16 = (o) => (o + 2 <= s.length && o >= 0 ? s.readUInt16BE(o) : null);
   const w0 = u16(at);
   if (w0 === null || (w0 & HERE) !== HERE) return null;
@@ -40,23 +41,46 @@ function record(s, at, attr, touch) {
   const hi = w1 >> 8;                                  // старший байт слова 1
   const cross = (hi >> 6) & 1;                         // ссылка в другой блок
   let save = -1;                                       // «вернуться сюда потом»
-  if ((hi >> 3) & 1) save = cross ? at + 6 : at + 4;
+  if ((w1 >> 11) & 1) save = cross ? at + 6 : at + 4;
   if (cross) touch(at + 4, at + 6);                    // слово 2 — номер блока
 
-  // отход назад к слову атрибута
-  let p = (at + 4) - ((w1 & IDX) * 2 + 2);
-  let aw = u16(p);
-  if (aw === null) return null;
-  touch(p, p + 2);
-  p += 2;
+  // Отход назад к слову атрибута делается ТОЛЬКО при бите 11 слова 1. В
+  // дизассемблере это видно прямо: `bt/s 0x08272b76` при нулевом бите 11
+  // перепрыгивает и вычитание `sub r1,r9`, и чтение слова. Тогда индексом
+  // служит само слово 1, а чтение продолжается по телу записи с at+4.
+  let p, aw;
+  if ((w1 >> 11) & 1) {
+    p = (at + 4) - ((w1 & IDX) * 2 + 2);
+    aw = u16(p);
+    if (aw === null) return null;
+    touch(p, p + 2);
+    p += 2;
+  } else {
+    aw = w1;
+    p = at + 4;
+  }
 
   if ((aw >> 14) & 1) { touch(p, p + 2); p += 2; }     // бит 14 — пропустить слово
 
   const a = attr[aw & IDX];
   if (a === undefined) return null;
-  let v = a;
-  if (v & 0x80000000) { if (u16(p) === null) return null; touch(p, p + 2); p += 2; }
-  if ((v >> 15) & 1) { if (u16(p) === null) return null; touch(p, p + 2); p += 2; }
+  // Значение из таблицы — заготовка: бит 31 означает «старшую половину взять из
+  // потока», бит 15 — «младшую». Прошивка их ПОДСТАВЛЯЕТ, а не просто
+  // пропускает слово, поэтому от подстановки зависят и биты 30, 29, 28, 27,
+  // которые решают, сколько ещё слов лежит в записи.
+  let v = a >>> 0;
+  if (v & 0x80000000) {
+    const w = u16(p);
+    if (w === null) return null;
+    v = (((w << 16) >>> 0) | (v & 0x0000ffff)) >>> 0;
+    touch(p, p + 2); p += 2;
+  }
+  if ((v >>> 15) & 1) {
+    const w = u16(p);
+    if (w === null) return null;
+    v = ((v & 0xffff0000) | w) >>> 0;
+    touch(p, p + 2); p += 2;
+  }
 
   // флаги записи: разряды 20..22 берутся из битов 4, 5, 6 старшего байта слова 1
   let fl = v;
@@ -85,9 +109,15 @@ function record(s, at, attr, touch) {
   }
   if (save >= 0) p = save;
 
-  if (fl & 0x08000000) {                               // цепочка с вложенностью
+  // Цепочка с вложенностью. Первое слово прошивка съедает БЕЗУСЛОВНО
+  // (psVar8 = psVar9 + 1 стоит до проверки), и только потом смотрит бит 14.
+  if (fl & 0x08000000) {
     let w = u16(p);
+    if (w === null) return null;
+    touch(p, p + 2); p += 2;
     while (w !== null && ((w >> 14) & 1)) {
+      w = u16(p);
+      if (w === null) break;
       touch(p, p + 2); p += 2;
       if ((w >> 13) & 1) {
         const w2 = u16(p);
@@ -95,7 +125,6 @@ function record(s, at, attr, touch) {
         touch(p, p + 2); p += 2;
         if ((w2 >> 14) & 1) { touch(p, p + 2); p += 2; }
       }
-      w = u16(p);
     }
   }
 
@@ -124,7 +153,8 @@ function record(s, at, attr, touch) {
   }
   return {
     node: w0 & NODE, idx: w1 & IDX, attr: a, cross: !!cross, end: p,
-    level: a & 7, flags: fl, extra: extra, length: spd, speed: spd,
+    level: v & 7, flags: fl, extra: extra, length: spd, speed: spd,
+    saved: save >= 0,
   };
 }
 
