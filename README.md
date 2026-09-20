@@ -3029,6 +3029,90 @@ NDL» ниже). Ближайший к этому подозреваемый —
 они все были частичными установками. Вывод прошлой фазы, будто `ndr` не может
 согласовать индексы XAC и GDB, к делу отношения не имел.
 
+## Карта читателей в прошивке — по всем форматам
+
+Тот же приём, что вскрыл XAC: искать не по маскам, а по путям к исходникам.
+Ниже полная карта модулей. Она ценна не сама по себе — по именам классов видно,
+из каких сущностей состоит формат, и это **независимая проверка** того, что мы
+вывели из данных.
+
+### `common\isdb\` — общая библиотека баз (ISDB)
+
+Версии из бинаря: `isdb_base 1.0.5c`, `isdb_heap 1.2.15`,
+`isdb_access 1.12.0`, `isdb_gdb 1.10.4g`, `gdb_main 52.01` (10.05.2011).
+
+```
+isdb\base\    CBlockIterator
+isdb\heap\    CHeapManagement, CHeapJobQueue, CHeapMemoryHeap — память и задания
+isdb\gdb\     формат GDB          (см. ниже)
+isdb\atlas\   формат ATLAS        (наши CTY и TER)
+isdb\orion\   COrionDatabase      — обёртка над Orion
+```
+
+Сюда же относится сообщение `IsDb layer does not accept loaded data`,
+встречавшееся при разборе инициализации NDL.
+
+### GDB: имена классов совпали с нашей моделью
+
+```
+isdb\gdb\main\      CGdb, CGdbLevel, CGdbCluster, CGdbTile, CGdbBlob,
+                    CGdbBlobDirectory, CGdbTileElementBag, CGdbTileElementIterator,
+                    CGdbRefTable, CGdbRefTableDirectory, CGdbRefTableMainDirectory,
+                    CGdbRefTableCache, CGdbRefCache, CGdbRefFinder, CGdbLineRef,
+                    CGdbCoordinateRectSet, CGdbTileSetIterator
+isdb\gdb\content\   CGdbTileContent, CGdbTileContentElement, CGdbTileBagContent,
+                    CGdbContentNamingIterator, CGdbRawRouteContent
+isdb\gdb\access\    CGdbTileAccessor, CGdbRouteTileAccessor
+isdb\gdb\route\     CGdbRouteTile, CGdbRouteMatcher, CGdbRawRoute, CGdbConvRoute,
+                    CGdbMrdWay, CGdbMrdRoot, CGdbMrdObject, CGdbMrdTrip,
+                    CGdbRoutePosition, CGdbRouteKnotKiller
+```
+
+**Сопоставление с тем, что мы вывели из данных сами:**
+
+| Наше название | Класс в прошивке |
+|---|---|
+| двенадцать уровней | `CGdbLevel` |
+| сетка кластеров | `CGdbCluster` |
+| 19-байтные записи тайлов | `CGdbTile` |
+| блобы, дописываемые в `.gd2` | `CGdbBlob`, `CGdbBlobDirectory` |
+| поток элементов | `CGdbTileElementBag`, `CGdbTileElementIterator` |
+| реестр S1 | семейство `CGdbRefTable*`, `CGdbLineRef` |
+| таблица имён S2 | `CGdbContentNamingIterator` |
+
+Совпадение полное — наша модель GDB описывает те же сущности, что и код.
+
+### ATLAS (компоненты CTY и TER)
+
+```
+isdb\atlas\main\    CAtlasSurfaceModule, CAtlasSurfaceLevel, CAtlasSurfaceTileObject,
+                    CAtlasSoarTerrainModule
+isdb\atlas\access\  CAtlasSurfaceAccessor, CAtlasSoarTerrainAccessor,
+                    CAtlasSceneryAccessor, CAtlasImageAccessor
+заголовки:          CAtlasBaseContainer.h, CAtlasSurfaceContainer.h,
+                    CAtlasSoarTerrainContainer.h
+```
+
+Видно, что у ATLAS **две разные сущности**: `Surface` (поверхности — то, что
+рисуется зелёным) и `SoarTerrain` (рельеф). Плюс отдельные читатели сцен и
+изображений. Это объясняет, почему у нас два семейства компонентов: `CTY`
+(города, поверхности) и `TER` (рельеф).
+
+### XAC — разобран
+
+```
+NavCore\xaclib\private\   xac_vect, xac_vect_iter, xac_vtre, xac_fe, xac_glob,
+                          xac_korr, xac_dbm, xac_name, xac_basic_name,
+                          xac_search_name, xac_string, xac_country, xac_language,
+                          xac_build_infos, xac_neighbour, xac_poi, xac_tmc
+```
+
+### Чего по-прежнему не видно
+
+Читатели `LIT` и `PIT` отдельными модулями не нашлись. Учитывая, что диспетчер
+NDL раскладывает `.LIT`/`.LI2`…`.LI9` вместе с `.GDB`/`.GD2`, вероятнее всего
+они читаются тем же `isdb\gdb` — но подтверждения нет.
+
 ## Кто в прошивке читает какой файл
 
 Собрано через GhidraMCP по путям к исходникам. Это опора для проверки
