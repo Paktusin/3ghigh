@@ -1,38 +1,56 @@
 // Машина, исполняющая грамматику LIT из блока TTD.
 //
-// Грамматика — таблица записей по 10 слов (src/litschema.js). Разбор идёт по
-// ней: числовые коды читают значения из потока данных, управляющие ходят по
-// самой таблице. Семантика выведена из FUN_08cd0798 (чтение записи) и
-// FUN_08ccf84c (раскладка прочитанного по полям).
+// Грамматика — таблица записей по 10 слов (src/litschema.js). Числовые коды
+// читают значения из потока, управляющие ходят по самой таблице. Семантика
+// выведена из FUN_08cd0798 (чтение записи и раскладка по полям) и
+// FUN_08ccf84c (раскладка по типам).
 //
-// Проверенные соответствия:
-//   0x81  значение = (последнее >> w4) & маска(w5)   — записи 10 и 12 дают
-//         старший и младший полубайты, что и подтвердилось на данных
-//   условие: (последнее & w7) == w9, бит 10 флагов инвертирует
-//   бит 12 флагов у типа '[' выбирает «прибавить» вместо «задать»
+// Ключ ко всему — switch(puVar23[1]) в хвосте FUN_08cd0798: слово w1 записи
+// схемы задаёт, КУДА положить прочитанное значение. Отсюда и счётчики циклов,
+// и длина строки, и регистр, по которому проверяются условия:
+//
+//   w1 = 0   никуда (значение только уходит в поле по типу)
+//   w1 = 1   счётчик цикла 0xa0            (кадр +36, short)
+//   w1 = 2   кадр +38, short
+//   w1 = 3   ширина координат для 0x40     (поле схемы)
+//   w1 = 4   регистр кадра, байт 0         (кадр +32, uint)
+//   w1 = 5   тот же регистр, сдвиг 8
+//   w1 = 6   тот же регистр, сдвиг 16
+//   w1 = 7   тот же регистр, сдвиг 24
+//   w1 = 8   счётчик цикла 0xa2            (кадр +40, short)
+//   w1 = 9   длина строки для 0x44 и 0x43  (кадр +42, short)
+//
+// Бит 12 флагов у любого из них означает «прибавить» вместо «задать».
+// Условия и код 0x81 смотрят на регистр (w1 = 4..7), а не на «последнее
+// значение вообще»: пока это было не так, словарь набирал 67 кодов из 212.
 'use strict';
 
-const SKIP = 0x8000, COND = 0x0800, INV = 0x0400, ADD = 0x1000;
+const SKIP = 0x8000, REWIND = 0x2000, ADD = 0x1000, COND = 0x0800, INV = 0x0400;
+
+// Естественная маска разрядности чтения — из FUN_08cd0798 (local_34).
+const MASK = {
+  0x20: 0xffffffff, 0x21: 0xff, 0x22: 0xffff, 0x23: 0xffffff, 0x24: 0xffffffff,
+  0x25: 0xffffffff, 0x26: 0xff, 0x27: 0xffff, 0x28: 0xffffff, 0x29: 0xffffffff,
+};
 
 function run(schema, data, startRule, opt) {
   const o = opt || {};
-  const limit = o.limit || 200000;
+  const limit = o.limit || 500000;
   const words = schema.words, stride = schema.stride, first = schema.first;
-  const ruleOf = (i) => words.slice(first + i * stride, first + i * stride + stride);
+  const wordAt = (i, k) => words[first + i * stride + k];
   const idxOfWord = (w) => (w - first) / stride;
 
-  // reg — последнее значение, ПРОЧИТАННОЕ ИЗ ПОТОКА. Условия и код 0x81
-  // смотрят именно на него, а не на результат предыдущей выборки полубайта:
-  // в прошивке это отдельный регистр кадра, а не «последнее значение вообще».
-  let pc = startRule, p = 0, reg = 0, code = 0, steps = 0, wid = 12;
-  let X = 0, Y = 0, baseX = 0;                       // состояние дельта-кодека координат
-  const slot = {}, field = {}, codes = new Map();
-  const loops = [], calls = [], records = [];
+  const newFrame = () => ({ reg: 0, cnt0: 0, f38: 0, cnt2: 0, len: 0, arg: 0 });
+  let fr = newFrame();
+
+  let pc = startRule, p = 0, code = 0, steps = 0, wid = 12;
+  let X = 0, Y = 0, baseX = 0, mark = 0, home = -1;
+  const codes = new Map(), loops = [], calls = [], records = [];
   let rec = null;
 
   const u = (n) => { let v = 0; for (let i = 0; i < n; i++) v = v * 256 + data[p++]; return v; };
   const s = (n) => { const v = u(n), top = Math.pow(2, n * 8); return v >= top / 2 ? v - top : v; };
-  const varint = (signed) => {                       // 252/253/254 — длиннее
+  const varint = (signed) => {
     const b = data[p];
     if (b === 252) { p++; return signed ? s(2) : u(2); }
     if (b === 253) { p++; return signed ? s(3) : u(3); }
@@ -40,24 +58,52 @@ function run(schema, data, startRule, opt) {
     p++; return signed && b > 127 ? b - 256 : b;
   };
 
+  // Положить значение в поле кадра — это и есть switch(w1) из прошивки.
+  function store(w1, v, w0, mask) {
+    const add = (w0 & ADD) !== 0;
+    const put = (cur) => ((add ? cur + v : v) << 16) >> 16;
+    switch (w1) {
+      case 1: fr.cnt0 = put(fr.cnt0); return;
+      case 2: fr.f38 = put(fr.f38); return;
+      case 3: wid = add ? wid + v : v; return;
+      case 4: case 5: case 6: case 7: {
+        const sh = (w1 - 4) * 8, m = (mask << sh) >>> 0;
+        const cur = fr.reg;
+        fr.reg = add ? (((cur & ~m) | ((cur + ((v << sh) >>> 0)) & m)) >>> 0)
+                     : (((cur & ~m) | (((v << sh) >>> 0) & m)) >>> 0);
+        return;
+      }
+      case 8: fr.cnt2 = put(fr.cnt2); return;
+      case 9: fr.len = put(fr.len); return;
+      default: return;
+    }
+  }
+
   while (p < data.length && steps++ < limit) {
     if (pc < 0 || first + pc * stride + stride > words.length) return fin('схема кончилась');
-    const r = ruleOf(pc), w0 = r[0], op = w0 & 0xff;
-    const arg = r[1], type = r[2], tgt = r[4], k = r[5];
+    const w0 = wordAt(pc, 0), op = w0 & 0xff;
+    const w1 = wordAt(pc, 1), type = wordAt(pc, 2);
+    const tgt = wordAt(pc, 4), k = wordAt(pc, 5);
 
     if (w0 & SKIP) { pc++; continue; }
-    if (w0 & COND) {                                  // условие по последнему значению
-      let hit = (reg & r[7]) === r[9] && ((reg >>> 16) & r[6]) === r[8];
+    if (w0 & COND) {
+      let hit = ((fr.reg & wordAt(pc, 7)) === wordAt(pc, 9)) &&
+                (((fr.reg >>> 16) & wordAt(pc, 6)) === wordAt(pc, 8));
       if (w0 & INV) hit = !hit;
       if (!hit) { pc++; continue; }
     }
 
     let val = null;
     switch (op) {
-      case 0x10: if (rec && Object.keys(rec).length) records.push(rec); rec = {}; break;
+      case 0x10: if (rec && Object.keys(rec).length) records.push(rec); rec = {}; mark = p; break;
+      case 0xc3:                                      // выход из под-грамматики
       case 0x11:
-        if (calls.length) { pc = calls.pop(); continue; }
-        if (tgt) { pc = idxOfWord(tgt); continue; }
+        if (calls.length) { const c = calls.pop(); fr = c.fr; pc = c.back; continue; }
+        // Переход по w4 ведёт к началу цикла записей — запоминаем его как дом.
+        if (tgt) { home = idxOfWord(tgt); pc = home; continue; }
+        // Под-грамматики вызываются переходом 0xc0, а не вызовом, поэтому
+        // возвращаться некуда: конец записи — это возврат к началу цикла.
+        if (home >= 0 && p < data.length) { pc = home; continue; }
         return fin('конец');
       case 0x20: val = varint(true); break;
       case 0x21: val = s(1); break;
@@ -69,84 +115,100 @@ function run(schema, data, startRule, opt) {
       case 0x27: val = u(2); break;
       case 0x28: val = u(3); break;
       case 0x29: val = u(4); break;
-      case 0x80: val = (tgt << 16) | k; break;
-      case 0x81: val = (reg >>> tgt) & ((1 << k) - 1); break;
+      case 0x60: val = fr.arg & 0xff; break;          // читают аргумент вызова
+      case 0x61: val = fr.arg & 0xffff; break;
+      case 0x62: val = fr.arg; break;
+      case 0x63: val = loops.length ? loops[loops.length - 1].done : 0; break;  // номер витка
+      case 0x64: val = loops.length ? loops[loops.length - 1].done : 0; break;
+      case 0x65:                                      // следующий элемент: данные не читает
+        if (rec && Object.keys(rec).length) { records.push(rec); rec = {}; }
+        break;
+      case 0x80: val = ((tgt << 16) | k) >>> 0; break;
+      case 0x81: val = (fr.reg >>> tgt) & (k < 32 ? (1 << k) - 1 : 0xffffffff); break;
       case 0x40: {                                    // упакованная пара координат
         let x, y;
         if (wid === 12) { const a = u(1), b = u(1), c = u(1); x = a + (c & 0x0f) * 256; y = b + (c >> 4) * 256; }
         else if (wid === 8) { x = u(1); y = u(1); }
         else { x = u(2); y = u(2); }
-        if (rec) rec[type || 'xy'] = [x, y];
+        if (rec) rec['xy'] = [x, y];
         break;
       }
       case 0x41: {                                    // дельта-кодек координат
         const st0 = p;
         let b = data[p++];
         if (b === 0xff) { X = -1; Y = -1; break; }
-        if ((b & 0x80) === 0) { Y += b; if (rec) rec[type || 'xy'] = [X, Y]; break; }
+        if ((b & 0x80) === 0) { Y += b; if (rec) rec['xy'] = [X, Y]; break; }
         const m = b & 0x60;
-        if (m === 0x40) {                             // 12 бит со знаком
-          let d = ((b & 0x0f) << 8) | data[p++];
-          if (b & 0x08) d -= 0x1000;
-          X += d;
-        } else if (m === 0x00) { X += b & 0x0f; }
-        else if (m === 0x20) { X -= b & 0x0f; }
-        else {                                        // 0x60 — перезадать X
+        if (m === 0x40) { let d = ((b & 0x0f) << 8) | data[p++]; if (b & 0x08) d -= 0x1000; X += d; }
+        else if (m === 0x00) X += b & 0x0f;
+        else if (m === 0x20) X -= b & 0x0f;
+        else {
           const v = b & 0x0f;
           if (v === 0x0d) { const t = data[p++]; X = baseX + (t > 127 ? t - 256 : t); }
-          else if (v === 0x0c) { X = baseX; }
-          else if (v === 0x0e) { p = st0 + 4; }
+          else if (v === 0x0c) X = baseX;
+          else if (v === 0x0e) p = st0 + 4;
           else { X = (v << 16) | (data[st0 + 1] << 8) | data[st0 + 2]; p = st0 + 3; }
         }
-        const fl = b >> 2;                            // хвост задаёт Y
+        const fl = b >> 2;
         b = data[p++];
         if ((fl >> 2) & 1) Y = (b << 8) | data[p++];
         else Y += (b > 127 ? b - 256 : b);
-        if (rec) rec[type || 'xy'] = [X, Y];
+        if (rec) rec['xy'] = [X, Y];
         break;
       }
-      case 0x43: p += slot[9] | 0; break;             // пропустить блок известной длины
-      case 0x44: {                                    // строка длиной из поля 9
-        const n = slot[9] | 0, txt = data.subarray(p, p + n); p += n;
-        if (type === 0x5d) codes.set(code, txt);       // ']' — запись словаря
+      case 0x43: p += fr.len; break;
+      case 0x44: {
+        const n = fr.len, txt = data.subarray(p, p + n); p += n;
+        if (type === 0x5d) codes.set(code, txt);
         else if (rec) rec[type] = txt;
         break;
       }
       case 0xa0: case 0xa2: {
-        const n = op === 0xa0 ? (slot[1] | 0) : (slot[10] | 0);
-        if (n <= 0) { pc = skipTo(pc, 0xa1); continue; }
-        loops.push({ back: pc + 1, left: n });
+        const n = op === 0xa0 ? fr.cnt0 : fr.cnt2;
+        if (n <= 0) {
+          const t = skipTo(pc, op === 0xa0 ? 0xa1 : 0x11);
+          if (t < 0) return fin('цикл без конца');
+          pc = t; continue;
+        }
+        loops.push({ back: pc + 1, left: n, op, done: 0 });
         break;
       }
       case 0xa1: {
         const L = loops[loops.length - 1];
+        if (L) L.done++;
         if (L && --L.left > 0) { pc = L.back; continue; }
         loops.pop();
         break;
       }
-      case 0xc0: pc = idxOfWord(tgt); continue;       // переход
-      case 0xc1: case 0xc2: calls.push(pc + 1); pc = idxOfWord(tgt); continue;
+      case 0xc0: pc = idxOfWord(tgt); continue;
+      case 0xc1: case 0xc2: {
+        const a = op === 0xc2 ? ((fr.reg >>> 0) & (k < 32 ? (1 << k) - 1 : 0xffffffff)) : k;
+        calls.push({ back: pc + 1, fr });
+        fr = newFrame(); fr.arg = a;
+        pc = idxOfWord(tgt); continue;
+      }
       default: return fin('неизвестный код 0x' + op.toString(16) + ' в записи ' + pc);
     }
 
+    if (p > data.length) return fin('чтение за концом блока');
     if (val !== null) {
-      if (op >= 0x20 && op <= 0x29) reg = val;        // только чтения из потока
-      if (arg) slot[arg] = val;
-      if (type === 0x5b) code = (w0 & ADD) ? code + (val & 0xff) : (val & 0xff);
+      store(w1, val, w0, MASK[op] !== undefined ? MASK[op] : 0xffffffff);
+      if (type === 0x5b) code = (w0 & ADD) ? (code + (val & 0xff)) & 0xffff : (val & 0xff);
       else if (type && rec) rec[type] = val;
     }
+    if (w0 & REWIND) p = mark;                        // бит 13 — вернуть курсор
     pc++;
   }
   return fin(steps >= limit ? 'предел шагов' : 'данные кончились');
 
-  function skipTo(from, want) {                        // вперёд до нужного кода
+  function skipTo(from, want) {
     for (let i = from + 1; first + i * stride < words.length; i++)
       if ((words[first + i * stride] & 0xff) === want) return i;
     return -1;
   }
   function fin(why) {
     if (rec && Object.keys(rec).length) records.push(rec);
-    return { why, pos: p, codes, records, slot, field, steps };
+    return { why, pos: p, codes, records, steps };
   }
 }
 
@@ -162,7 +224,7 @@ if (require.main === module) {
   const i = Number(process.argv[2] || 0);
   const b = L.block(L.catalog()[i]);
   const r = run(schema, b, 0);
-  console.log('блок %d: остановка «%s» на байте %d из %d, шагов %d',
-              i, r.why, r.pos, b.length, r.steps);
+  console.log('блок %d: «%s» на байте %d из %d (%d%%), шагов %d',
+              i, r.why, r.pos, b.length, Math.round(100 * r.pos / b.length), r.steps);
   console.log('кодов словаря: %d, записей: %d', r.codes.size, r.records.length);
 }
