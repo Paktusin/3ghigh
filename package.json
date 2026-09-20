@@ -5,5 +5,7 @@
   "license": "ISC",
   "author": "",
   "type": "commonjs",
-  "scripts": {}
+  "scripts": {
+    "test": "node --test \"src/*.test.js\""
+  }
 }

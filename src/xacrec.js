@@ -28,7 +28,8 @@ function attributes(xahBuf) {
 }
 
 // Разбор одной записи. Возвращает, какие байты блока она затронула.
-// touch(a, b) вызывается на каждый прочитанный кусок [a, b).
+// touch(a, b, role) вызывается на каждый прочитанный кусок [a, b);
+// role называет поле — по нему обратный проход в xacwrite собирает байты заново.
 function record(s, at, attr, touch, opt) {
   opt = opt || {};
   const u16 = (o) => (o + 2 <= s.length && o >= 0 ? s.readUInt16BE(o) : null);
@@ -36,13 +37,13 @@ function record(s, at, attr, touch, opt) {
   if (w0 === null || (w0 & HERE) !== HERE) return null;
   const w1 = u16(at + 2);
   if (w1 === null) return null;
-  touch(at, at + 4);
+  touch(at, at + 4, 'head');
 
   const hi = w1 >> 8;                                  // старший байт слова 1
   const cross = (hi >> 6) & 1;                         // ссылка в другой блок
   let save = -1;                                       // «вернуться сюда потом»
   if ((w1 >> 11) & 1) save = cross ? at + 6 : at + 4;
-  if (cross) touch(at + 4, at + 6);                    // слово 2 — номер блока
+  if (cross) touch(at + 4, at + 6, 'cross');           // слово 2 — номер блока
 
   // Отход назад к слову атрибута делается ТОЛЬКО при бите 11 слова 1. В
   // дизассемблере это видно прямо: `bt/s 0x08272b76` при нулевом бите 11
@@ -53,14 +54,14 @@ function record(s, at, attr, touch, opt) {
     p = (at + 4) - ((w1 & IDX) * 2 + 2);
     aw = u16(p);
     if (aw === null) return null;
-    touch(p, p + 2);
+    touch(p, p + 2, 'pool');
     p += 2;
   } else {
     aw = w1;
     p = at + 4;
   }
 
-  if ((aw >> 14) & 1) { touch(p, p + 2); p += 2; }     // бит 14 — пропустить слово
+  if ((aw >> 14) & 1) { touch(p, p + 2, 'skip'); p += 2; }  // бит 14 — пропустить слово
 
   const a = attr[aw & IDX];
   if (a === undefined) return null;
@@ -73,13 +74,13 @@ function record(s, at, attr, touch, opt) {
     const w = u16(p);
     if (w === null) return null;
     v = (((w << 16) >>> 0) | (v & 0x0000ffff)) >>> 0;
-    touch(p, p + 2); p += 2;
+    touch(p, p + 2, 'subhi'); p += 2;
   }
   if ((v >>> 15) & 1) {
     const w = u16(p);
     if (w === null) return null;
     v = ((v & 0xffff0000) | w) >>> 0;
-    touch(p, p + 2); p += 2;
+    touch(p, p + 2, 'sublo'); p += 2;
   }
 
   // флаги записи: разряды 20..22 берутся из битов 4, 5, 6 старшего байта слова 1
@@ -95,17 +96,17 @@ function record(s, at, attr, touch, opt) {
   if (fl & 0x40000000) {
     if (u16(p + 2) === null) return null;
     extra[0] = s.readUInt32BE(p) & 0x7fffffff & 0xffff7fff;
-    touch(p, p + 4); p += 4;
+    touch(p, p + 4, 'extra0'); p += 4;
   }
   if (fl & 0x10000000) {
     if (u16(p + 2) === null) return null;
     extra[1] = s.readUInt32BE(p) & 0x7fffffff & 0xffff7fff;
-    touch(p, p + 4); p += 4;
+    touch(p, p + 4, 'extra1'); p += 4;
   }
 
   if (fl & 0x20000000) {                               // цепочка: пока бит 6 старшего байта
     let w = u16(p);
-    while (w !== null) { touch(p, p + 2); p += 2; if (!((w >> 14) & 1)) break; w = u16(p); }
+    while (w !== null) { touch(p, p + 2, 'chain'); p += 2; if (!((w >> 14) & 1)) break; w = u16(p); }
   }
   if (save >= 0) p = save;
 
@@ -114,16 +115,16 @@ function record(s, at, attr, touch, opt) {
   if (fl & 0x08000000) {
     let w = u16(p);
     if (w === null) return null;
-    touch(p, p + 2); p += 2;
+    touch(p, p + 2, 'nest'); p += 2;
     while (w !== null && ((w >> 14) & 1)) {
       w = u16(p);
       if (w === null) break;
-      touch(p, p + 2); p += 2;
+      touch(p, p + 2, 'nest'); p += 2;
       if ((w >> 13) & 1) {
         const w2 = u16(p);
         if (w2 === null) break;
-        touch(p, p + 2); p += 2;
-        if ((w2 >> 14) & 1) { touch(p, p + 2); p += 2; }
+        touch(p, p + 2, 'nest'); p += 2;
+        if ((w2 >> 14) & 1) { touch(p, p + 2, 'nest'); p += 2; }
       }
     }
   }
@@ -141,13 +142,13 @@ function record(s, at, attr, touch, opt) {
   if (mode !== 1) {
     let w = u16(p);
     if (w === null) return null;
-    touch(p, p + 2); p += 2;
+    touch(p, p + 2, 'len0'); p += 2;
     spd[0] = metres(w);
     const ver = s.readUInt16BE(0x14);
     if (ver === 2 || (ver > 2 && (s[0x3d] & 0x80))) {
       w = u16(p);
       if (w === null) return null;
-      touch(p, p + 2); p += 2;
+      touch(p, p + 2, 'len1'); p += 2;
       spd[1] = metres(w);
     }
   }
@@ -167,12 +168,23 @@ function record(s, at, attr, touch, opt) {
 // Элементы списка различаются меткой старших двух бит слова:
 //   0xc000 — полная запись вектора (разбирается record),
 //   0x4000 — обратная ссылка, два байта,
-//   0x8000 или 0x0000 — это уже НЕ элемент, а координата следующего узла.
+//   0x8000 — координата следующего узла, длинная форма.
 //
-// Таблица индексирует не все узлы: на 12 тайлах из 270 329 её записей узлы
-// находятся все, но в области лежит ещё 251 267 узлов, до которых добираешься
-// только последовательным проходом. Байт шага говорит, на сколько слов назад
-// от смещения из таблицы начинается узел.
+// ВАЖНАЯ ОГОВОРКА. Метка 0x0000 и метка 0x4000 у координаты одна и та же с
+// точностью до знака: первое слово компактной формы равно (dx + 16384) & 0x7fff,
+// и при dx >= 0 бит 14 поднят, то есть слово неотличимо от обратной ссылки.
+// Проверено: из 448 280 узлов, заверенных таблицей, 138 045 (30.8 %) при
+// разборе «по меткам» попадали в обратные ссылки. Поэтому начала узлов берутся
+// из таблицы, а не угадываются по меткам.
+//
+// Таблица индексирует не все узлы: в области лежат ещё узлы, до которых
+// добираешься только последовательным проходом. Байт шага говорит, на сколько
+// слов назад от смещения из таблицы начинается узел.
+//
+// Здесь мерится ПОКРЫТИЕ БАЙТ, поэтому оговорка выше не исправляется: внутри
+// пролёта между двумя заверенными узлами лежат незаверенные, и их компактные
+// координаты попадают в счёт обратных ссылок. Счёт обратных ссылок тут —
+// оценка сверху; разбор по существу делает readBlock в src/xacwrite.js.
 function coordLen(s, p) {
   const w = s.readUInt16BE(p);
   if ((w & 0xc000) === 0x8000) return ((s[p] >> 5) & 1) ? 8 : 6;

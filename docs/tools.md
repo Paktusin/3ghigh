@@ -16,6 +16,9 @@ src/probe.js      покрытие по неполному файлу — хва
 src/countries.js  таблица стран европейского набора
 src/tmc.js        реестр таблиц локаций TMC
 src/xac.js        разделы тайла, заголовки блоков, проекция
+src/xacvec.js     дорожная сеть блоков v5: таблица, узлы, координаты
+src/xacrec.js     запись вектора по FUN_08272938, покрытие байт блока
+src/xacwrite.js   блок v5: чтение в модель, обратная сборка байт, генерация
 src/nodes.js      узлы и связи из блоков v3/v4/v5, выгрузка в GeoJSON
 src/harvest.js    поиск абсолютных координат перебором
 src/gjcheck.js    проверка GeoJSON и рисунок сети в терминале
@@ -26,6 +29,8 @@ tools/extract_ndr.sh  найти ifs-root.ifs в fw/, распаковать о�
 Пример:
 
 ```
+npm test                                   # тесты разборщиков и сборщиков
+node src/xacwrite.js maps/pkgdb/XAC/kN221EUx01_0.db 40   # отчёт обратного прохода
 node src/coverage.js                       # набор найдётся сам
 node src/coverage.js /путь/к/другому/набору
 node src/nodes.js maps/pkgdb/.../EJ211_MO00_1.xac out/MO00.geojson
