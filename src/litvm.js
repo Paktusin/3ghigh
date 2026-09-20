@@ -45,10 +45,15 @@ function run(schema, data, startRule, opt) {
   const wordAt = (i, k) => words[first + i * stride + k];
   const idxOfWord = (w) => (w - first) / stride;
 
-  // Кадры постоянны: в прошивке это четыре области по уровню (this+156), и
-  // вызов НЕ обнуляет их — он только кладёт аргумент. Уровней не больше трёх.
+  // Кадр — область по уровню (уровень лежит в this+156, уровней не больше трёх).
   // iter0/iter2 — счётчики витков циклов 0xa0 и 0xa2, ptr0/ptr2 — сохранённые
   // правила. В прошивке это поля кадра (+58, +56, +52, +48), а не стек.
+  //
+  // Кадр НЕ постоянен: `FUN_08cd066c` чистит его целиком — регистр, оба
+  // счётчика, длину, указатели циклов, а итераторы ставит в -1. Аргумент
+  // (+0x10) она намеренно не трогает, его кладут следом за ней. Вызывается она
+  // ровно из двух мест `FUN_08cd0798`: при вызове 0xc1/0xc2 — по новому кадру,
+  // и при переходе 0x11 по w4 — по текущему. См. reset() ниже.
   const newFrame = () => ({ reg: 0, cnt0: 0, f38: 0, cnt2: 0, len: 0, arg: 0,
                             iter0: -1, iter2: -1, ptr0: 0, ptr2: 0 });
   const F = [newFrame(), newFrame(), newFrame(), newFrame()];
@@ -144,9 +149,13 @@ function run(schema, data, startRule, opt) {
           fr.iter2 += 1; pc = fr.ptr2 + 1; continue;
         }
         fr.iter2 = -1;
+        // Порядок важен: прошивка смотрит w4 РАНЬШЕ уровня. Непустой w4 —
+        // это переход, а не возврат из подпрограммы, и он идёт по цели даже
+        // изнутри вызова. Перед переходом кадр чистится целиком (тот же
+        // FUN_08cd066c, что и при вызове), поэтому регистр и состояние циклов
+        // не перетекают из записи в запись.
+        if (tgt) { reset(fr); byGoto = false; home = idxOfWord(tgt); pc = home; continue; }
         if (calls.length) { pc = calls.pop(); if (lvl > 0) fr = F[--lvl]; continue; }
-        // Переход по w4 ведёт к началу цикла записей — запоминаем его как дом.
-        if (tgt) { home = idxOfWord(tgt); pc = home; continue; }
         // Под-грамматики вызываются переходом 0xc0, а не вызовом, поэтому
         // Без цели и на нулевом уровне прошивка возвращает -4, а итератор на
         // нём останавливается (уровень < 1 и код < -1). Значит это конец
@@ -228,11 +237,12 @@ function run(schema, data, startRule, opt) {
       case 0xa0: case 0xa2: {
         const n = op === 0xa0 ? fr.cnt0 : fr.cnt2;
         if (n === 0) {
-          // Прошивка ищет закрывающую запись и продолжает СО СЛЕДУЮЩЕЙ за ней:
-          // puVar12 = puVar23, а правило берётся как puVar12 + stride.
+          // Для 0xa0 прошивка ищет саму 0xa1 и продолжает после неё.
+          // Для 0xa2 она проверяет СЛЕДУЮЩЕЕ правило (puVar23[stride]):
+          // останавливается перед 0x11, чтобы исполнить её переход/возврат.
           const t = skipTo(pc, op === 0xa0 ? 0xa1 : 0x11);
           if (t < 0) return fin('цикл без конца');
-          pc = t + 1; continue;
+          pc = op === 0xa2 ? t : t + 1; continue;
         }
         if (op === 0xa0) { if (fr.iter0 >= 0) return fin('повторный вход в цикл 0xa0');
                            fr.iter0 = 0; fr.ptr0 = pc; }
@@ -256,7 +266,8 @@ function run(schema, data, startRule, opt) {
           : k;
         calls.push(pc + 1);
         fr = F[++lvl];
-        fr.arg = a;                                   // остальные поля кадра сохраняются
+        reset(fr);                                    // FUN_08cd066c чистит кадр вызываемого
+        fr.arg = a;                                   // и только потом кладут аргумент
         pc = idxOfWord(tgt); continue;
       }
       default: return fin('неизвестный код 0x' + op.toString(16) + ' в записи ' + pc);
@@ -275,6 +286,14 @@ function run(schema, data, startRule, opt) {
     pc++;
   }
   return fin(steps >= limit ? 'предел шагов' : 'данные кончились');
+
+  // FUN_08cd066c. Поля кадра относительно его начала (слово уровень*8+7):
+  // +0 указатель схемы, +4 регистр, +8 cnt0, +10 f38, +12 cnt2, +14 len,
+  // +16 аргумент (НЕ трогается), +20 ptr2, +24 ptr0, +28 iter2, +30 iter0.
+  function reset(f) {
+    f.reg = 0; f.cnt0 = 0; f.f38 = 0; f.cnt2 = 0; f.len = 0;
+    f.ptr0 = 0; f.ptr2 = 0; f.iter0 = -1; f.iter2 = -1;
+  }
 
   function skipTo(from, want) {
     for (let i = from + 1; first + i * stride < words.length; i++)
