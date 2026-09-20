@@ -49,6 +49,9 @@ function run(schema, data, startRule, opt) {
   let pc = startRule, p = 0, code = 0, steps = 0, wid = 12;
   let X = 0, Y = 0, baseX = 0, mark = 0, home = -1, lastHome = -1, byGoto = false;
   const codes = new Map(), loops = [], calls = [], records = [];
+  // Строки собираются ещё и отдельным потоком: внутри одной структуры бывает
+  // цикл, и второе имя затирало бы первое в rec[тип].
+  const strings = [];
   let rec = null;
 
   const u = (n) => { let v = 0; for (let i = 0; i < n; i++) v = v * 256 + data[p++]; return v; };
@@ -195,7 +198,10 @@ function run(schema, data, startRule, opt) {
       case 0x44: {
         const n = fr.len, at = p, txt = data.subarray(p, p + n); p += n;
         if (type === 0x5d) codes.set(code, txt);
-        else if (rec) { rec[type] = txt; rec['@'] = at; }
+        else {
+          strings.push({ type, at, txt, pre: fr.reg >>> 21 & 7 });
+          if (rec) { rec[type] = txt; rec['@'] = at; }
+        }
         break;
       }
       case 0xa0: case 0xa2: {
@@ -249,7 +255,7 @@ function run(schema, data, startRule, opt) {
   }
   function fin(why) {
     if (rec && Object.keys(rec).length) records.push(rec);
-    return { why, pos: p, codes, records, steps };
+    return { why, pos: p, codes, records, strings, steps };
   }
 }
 
