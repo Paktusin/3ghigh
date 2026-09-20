@@ -42,7 +42,10 @@ function run(schema, data, startRule, opt) {
 
   // Кадры постоянны: в прошивке это четыре области по уровню (this+156), и
   // вызов НЕ обнуляет их — он только кладёт аргумент. Уровней не больше трёх.
-  const newFrame = () => ({ reg: 0, cnt0: 0, f38: 0, cnt2: 0, len: 0, arg: 0 });
+  // iter0/iter2 — счётчики витков циклов 0xa0 и 0xa2, ptr0/ptr2 — сохранённые
+  // правила. В прошивке это поля кадра (+58, +56, +52, +48), а не стек.
+  const newFrame = () => ({ reg: 0, cnt0: 0, f38: 0, cnt2: 0, len: 0, arg: 0,
+                            iter0: -1, iter2: -1, ptr0: 0, ptr2: 0 });
   const F = [newFrame(), newFrame(), newFrame(), newFrame()];
   let lvl = 0, fr = F[0];
 
@@ -119,8 +122,8 @@ function run(schema, data, startRule, opt) {
           byGoto = false;
         }
         if (type) { curStruct = type; curRule = pc; }
-        fr.cnt2 = 0;                                  // 0x10 сбрасывает счётчики кадра
-        while (loops.length && loops[loops.length - 1].op === 0xa2) loops.pop();
+        fr.cnt2 = 0;                                  // 0x10 сбрасывает состояние циклов
+        fr.iter0 = -1; fr.iter2 = -1; fr.ptr0 = 0; fr.ptr2 = 0;
         if (type) val = type;                         // тип структуры — это и значение
         break;
       // 0xc3 в прошивке не выставляет код возврата, и тот остаётся -5 — это
@@ -131,12 +134,11 @@ function run(schema, data, startRule, opt) {
       case 0x11: {
         // 0x11 — это конец цикла 0xa2: сперва проверяем, остались ли витки.
         // В прошивке это счётчик кадра +56 против предела в кадре +40.
-        const Lp = loops[loops.length - 1];
-        if (Lp && Lp.op === 0xa2) {
-          Lp.done++;
-          if (--Lp.left > 0) { pc = Lp.back; continue; }
-          loops.pop();
+        // 0x11 — это ещё и конец цикла 0xa2: пока витки есть, возврат назад.
+        if (fr.iter2 >= 0 && fr.ptr2 !== 0 && fr.cnt2 > fr.iter2 + 1) {
+          fr.iter2 += 1; pc = fr.ptr2 + 1; continue;
         }
+        fr.iter2 = -1;
         if (calls.length) { pc = calls.pop(); if (lvl > 0) fr = F[--lvl]; continue; }
         // Переход по w4 ведёт к началу цикла записей — запоминаем его как дом.
         if (tgt) { home = idxOfWord(tgt); pc = home; continue; }
@@ -160,8 +162,8 @@ function run(schema, data, startRule, opt) {
       case 0x60: val = fr.arg & 0xff; break;          // читают аргумент вызова
       case 0x61: val = fr.arg & 0xffff; break;
       case 0x62: val = fr.arg; break;
-      case 0x63: val = loops.length ? loops[loops.length - 1].done : 0; break;  // номер витка
-      case 0x64: val = loops.length ? loops[loops.length - 1].done : 0; break;
+      case 0x63: val = fr.iter2; break;                // номер витка цикла 0xa2
+      case 0x64: val = fr.iter0; break;                // номер витка цикла 0xa0
       case 0x65:                                      // следующий элемент: данные не читает
         if (rec && Object.keys(rec).length) { records.push(rec); rec = {}; }
         break;
@@ -217,20 +219,24 @@ function run(schema, data, startRule, opt) {
       }
       case 0xa0: case 0xa2: {
         const n = op === 0xa0 ? fr.cnt0 : fr.cnt2;
-        if (n <= 0) {
+        if (n === 0) {
+          // Прошивка ищет закрывающую запись и продолжает СО СЛЕДУЮЩЕЙ за ней:
+          // puVar12 = puVar23, а правило берётся как puVar12 + stride.
           const t = skipTo(pc, op === 0xa0 ? 0xa1 : 0x11);
           if (t < 0) return fin('цикл без конца');
-          pc = t; continue;
+          pc = t + 1; continue;
         }
-        loops.push({ back: pc + 1, left: n, op, done: 0 });
+        if (op === 0xa0) { if (fr.iter0 >= 0) return fin('повторный вход в цикл 0xa0');
+                           fr.iter0 = 0; fr.ptr0 = pc; }
+        else             { if (fr.iter2 >= 0) return fin('повторный вход в цикл 0xa2');
+                           fr.iter2 = 0; fr.ptr2 = pc; }
         break;
       }
       case 0xa1: {
-        const L = loops[loops.length - 1];
-        if (L) L.done++;
-        if (L && --L.left > 0) { pc = L.back; continue; }
-        loops.pop();
-        break;
+        if (fr.cnt0 === 0 || fr.iter0 < 0 || fr.ptr0 === 0) return fin('цикл 0xa0 без начала');
+        fr.iter0 += 1;
+        if (fr.cnt0 <= fr.iter0) { fr.iter0 = -1; break; }   // выход: дальше за 0xa1
+        pc = fr.ptr0 + 1; continue;                          // виток: за 0xa0
       }
       case 0xc0: byGoto = true; pc = idxOfWord(tgt); continue;
       case 0xc1: case 0xc2: {
