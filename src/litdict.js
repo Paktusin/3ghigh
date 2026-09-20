@@ -65,7 +65,79 @@ function expand(codes, buf, limit, cap) {
   return cur;
 }
 
-module.exports = { dict, expand };
+// --- построение словаря -----------------------------------------------------
+//
+// Обратная задача к dict(): по набору имён собрать словарь. Устройство подсказали
+// сами данные — почти все записи длиной 2 (`0x12` = «код +1, текст 2 байта»),
+// то есть это кодирование пар байт (BPE): новый код заменяет самую частую
+// соседнюю пару, и пара может состоять из уже введённых кодов. Отсюда и
+// рекурсивность раскрытия.
+//
+// Коды берутся из байт, которых НЕТ в самих именах: в живых блоках множества
+// кодов и литералов не пересекаются, и это условие однозначности — иначе
+// literal-байт не отличить от кода.
+
+// Свободные коды: 1..255 минус всё, что встречается в текстах. Ноль не берём,
+// его в живых словарях нет.
+function freeCodes(texts) {
+  const used = new Set();
+  for (const t of texts) for (const b of t) used.add(b);
+  const out = [];
+  for (let c = 1; c <= 255; c++) if (!used.has(c)) out.push(c);
+  return out;
+}
+
+// Построение. Возвращает Map код -> Buffer с телом записи (байты тела могут
+// сами быть кодами). limit ограничивает число кодов сверху.
+function build(texts, limit) {
+  const free = freeCodes(texts);
+  const max = Math.min(limit === undefined ? free.length : limit, free.length);
+  const seqs = texts.map((t) => Array.from(t));
+  const codes = new Map();
+  for (let n = 0; n < max; n++) {
+    const cnt = new Map();
+    for (const s of seqs)
+      for (let i = 0; i + 1 < s.length; i++) {
+        const k = s[i] * 256 + s[i + 1];
+        cnt.set(k, (cnt.get(k) || 0) + 1);
+      }
+    let best = -1, bestN = 1;               // пара должна встречаться хотя бы дважды
+    for (const [k, v] of cnt) if (v > bestN) { bestN = v; best = k; }
+    if (best < 0) break;
+    const a = best >> 8, b = best & 0xff, code = free[n];
+    codes.set(code, Buffer.from([a, b]));
+    for (const s of seqs) {                 // заменить вхождения, без нахлёстов
+      let w = 0;
+      for (let i = 0; i < s.length; i++) {
+        if (i + 1 < s.length && s[i] === a && s[i + 1] === b) { s[w++] = code; i++; }
+        else s[w++] = s[i];
+      }
+      s.length = w;
+    }
+  }
+  return codes;
+}
+
+// Запись словаря байтами — ровно в том виде, который читает dict().
+// Коды идут по возрастанию: тогда номер задаётся полубайтом-прибавкой, а
+// абсолютная форма нужна лишь когда прибавка не влезает в 15.
+function serialize(codes) {
+  const out = [];
+  let prev = 0;
+  for (const code of [...codes.keys()].sort((a, b) => a - b)) {
+    const body = codes.get(code), d = code - prev;
+    const hi = d >= 1 && d <= 15 ? d : 0;
+    const lo = body.length >= 1 && body.length <= 15 ? body.length : 0;
+    out.push((hi << 4) | lo);
+    if (hi === 0) out.push(code);
+    if (lo === 0) out.push(body.length);
+    for (const b of body) out.push(b);
+    prev = code;
+  }
+  return Buffer.from(out);
+}
+
+module.exports = { dict, expand, freeCodes, build, serialize };
 
 if (require.main === module) {
   const lit = require('./lit');
