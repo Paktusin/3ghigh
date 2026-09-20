@@ -2542,6 +2542,69 @@ NDL» ниже). Ближайший к этому подозреваемый —
 они все были частичными установками. Вывод прошлой фазы, будто `ndr` не может
 согласовать индексы XAC и GDB, к делу отношения не имел.
 
+## Кто в прошивке читает какой файл
+
+Собрано через GhidraMCP по путям к исходникам. Это опора для проверки
+генерации: чтобы сверять наши файлы, надо знать, каким кодом они разбираются.
+
+| Наш компонент | Формат | Модуль-читатель в прошивке |
+|---|---|---|
+| XAC, XAC2, XAC3, `.xah` | FLDB + VEKTORBLOCK | `NavCore\xaclib\private\` — 17 файлов |
+| GDB, GD2 | контейнер `DEADBEEF`, тайлы | `devctrl\collect\hydra\server\src\gdb\private\` (управление) + декодер геометрии `FUN_092526f0` |
+| CTY, TER (`.ATLAS`) | Orion | `common\isdb\orion\main\private\COrionDatabase.cpp` |
+| TMC | | `NavCore\tmc\private\t_daten.cpp`, `xaclib\xac_tmc.cpp` |
+| контейнеры, каталог | FLDB | `NavCore\cdm\private\` |
+| открытие базы | | `NavCore\dbm\private\dbm_opendb.cpp` |
+| загрузка в движок | | `NavCore\ndl\private\` — `XacInterface.cpp`, `Loader.cpp`, `CDMLoader.cpp` |
+| маршрутизация | | `NavCore\scout\private\scout509\` — `_KOSTEN`, `_SCOUT`, `_TW`, `_SW`, `Vias` |
+
+Модуль `isdb` объясняет и сообщение `IsDb layer does not accept loaded data`,
+которое встречалось при разборе инициализации NDL: это слой Orion-баз.
+
+Читатели `LIT` и `PIT` по строкам не нашлись — поиск по `.LIT`, `lit` и
+`Orion` их не дал. Возможно, они разбираются тем же `isdb` или лежат в модуле
+без характерных строк.
+
+### `xaclib` покрывает все разделы `.xah`
+
+Имена файлов ложатся на разделы один в один, что подтверждает разбор `.xah`:
+
+```
+xac_string.cpp      -> STRING          xac_country.cpp     -> COUNTRY
+xac_basic_name.cpp  -> BASIC NAME      xac_language.cpp    -> LANGUAGE
+xac_build_infos.cpp -> BUILD INFOS     xac_neighbour.cpp   -> NACHBARN
+xac_poi.cpp         -> POI             xac_name.cpp        -> имена
+xac_vect.cpp, xac_vect_iter.cpp, xac_vtre.cpp  -> векторные блоки
+xac_fe.cpp (Fahrbahnelement), xac_glob.cpp, xac_korr.cpp, xac_dbm.cpp
+```
+
+### Кодирование точек в тайле GDB — из `FUN_092526f0`
+
+Декодер геометрии найден по строке проверки `Illegal tile coordinate width!`.
+Что из него читается:
+
+**Ширина координаты тайла** — только `8, 12, 16, 24, 32` бита, иначе
+срабатывает проверка. Это подтверждает прежнее наблюдение про бит-упаковку.
+
+**Головной байт элемента** раскладывается так:
+
+```
+бит 7      признак полигона   (проверки «Polygon flag set» / «not set»)
+биты 6..5  формат упаковки 0/1/2   (иначе «Illegal bitpack format»)
+биты 4..0  разрядность дельты
+```
+
+Остальные проверки называют ограничения формата прямо:
+
+* `illegal use of 2 point encoding` — формат 2 допустим только при ровно двух точках;
+* `Point has illegal number of coordinates` — у точечного объекта координат ровно одна;
+* `Point has z coordinates` и `Polygon has z coordinates` — поле `zCoordFormat` должно быть нулевым;
+* `Default case in switch statement` — иных типов объектов нет.
+
+Наш `encodePoints` реализует один из этих вариантов (тот, что round-trip
+проходит побайтно на 809 тайлах). Теперь видно, какие ещё варианты существуют и
+чего они требуют.
+
 ## Инициализация NDL: автомат разобран по бинарю
 
 Разобрана `MMI3GApplication` (SH-4 LE, 27 МБ кода, Ghidra). Код инициализации
