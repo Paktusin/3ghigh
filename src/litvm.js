@@ -51,6 +51,7 @@ function run(schema, data, startRule, opt) {
   let curStruct = 0, curRule = -1;                  // какая структура сейчас разбирается
   // Словарь можно передать снаружи: при пересинхронизации внутри буфера он
   // уже набран и заново в данных не встретится.
+  const trace = o.trace ? [] : null;
   const codes = o.codes || new Map();
   const loops = [], calls = [], records = [];
   // Строки собираются ещё и отдельным потоком: внутри одной структуры бывает
@@ -92,6 +93,7 @@ function run(schema, data, startRule, opt) {
   while (p < data.length && steps++ < limit) {
     if (pc < 0 || first + pc * stride + stride > words.length) return fin('схема кончилась');
     const w0 = wordAt(pc, 0), op = w0 & 0xff;
+    if (trace) { trace.push([pc, op, p]); if (trace.length > 40) trace.shift(); }
     const w1 = wordAt(pc, 1), type = wordAt(pc, 2);
     const tgt = wordAt(pc, 4), k = wordAt(pc, 5);
 
@@ -264,7 +266,7 @@ function run(schema, data, startRule, opt) {
   }
   function fin(why) {
     if (rec && Object.keys(rec).length) records.push(rec);
-    return { why, pos: p, codes, records, strings, steps };
+    return { why, pos: p, codes, records, strings, steps, trace };
   }
 }
 
