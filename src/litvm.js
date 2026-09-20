@@ -126,7 +126,7 @@ function run(schema, data, startRule, opt) {
                  (words[first + (pc + 1) * stride] & 0x4000)) pc++;
           byGoto = false;
         }
-        if (type) { curStruct = type; curRule = pc; }
+        if (type) { curStruct = type; curRule = pc; if (rec) rec['#'] = type; }
         fr.cnt2 = 0;                                  // 0x10 сбрасывает состояние циклов
         fr.iter0 = -1; fr.iter2 = -1; fr.ptr0 = 0; fr.ptr2 = 0;
         if (type) val = type;                         // тип структуры — это и значение
