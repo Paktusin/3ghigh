@@ -31,22 +31,60 @@ function schemaOf(file) {
 
 // Названия одного блока, в файловом порядке.
 function namesOf(schema, block, opt) {
-  const r = V.run(schema, block, 0, Object.assign({ limit: 2000000 }, opt));
-  const items = r.strings.filter((s) => s.type === NAME).sort((a, b) => a.at - b.at);
+  // Машина иногда встаёт посреди буфера. Словарь при этом уже набран, поэтому
+  // разбор продолжается с места остановки с тем же словарём — так склейка
+  // блоков не теряет имена, которые даёт поблочное чтение.
+  const base = Object.assign({ limit: 2000000 }, opt);
+  const items = [];
+  let codes = null, at = 0, guard = 0;
+  while (at < block.length && guard++ < 64) {
+    const r = V.run(schema, block, 0, Object.assign({}, base, { from: at, codes }));
+    codes = r.codes;
+    for (const s of r.strings) if (s.type === NAME) items.push(s);
+    const next = Math.max(r.pos, at + 1);
+    if (next <= at || next >= block.length) break;
+    at = next;
+  }
+  items.sort((a, b) => a.at - b.at);
   const out = [];
   let prev = Buffer.alloc(0);
   for (const it of items) {
     const raw = Buffer.concat([prev.subarray(0, Math.min(it.pre, prev.length)), it.txt]);
-    out.push(D.expand(r.codes, raw).toString('utf8'));
+    out.push(D.expand(codes, raw).toString('utf8'));
     prev = raw;
   }
   return out;
 }
 
+// Структура может занимать несколько блоков каталога: свой заголовок со
+// словарём есть только у первого, остальные — продолжения. Читать их надо
+// вместе, иначе продолжения разбираются с пустым словарём. На участках, где
+// заголовки редки, склейка даёт вдвое больше имён.
+function hasHeader(block) { return !!D.dict(block); }
+
+function groups(L, from, count) {
+  const cat = L.catalog();
+  const out = [];
+  let cur = null;
+  const to = Math.min(cat.length, from + count);
+  for (let i = from; i < to; i++) {
+    const b = L.block(cat[i]);
+    if (!b.length) continue;
+    if (hasHeader(b)) { if (cur) out.push(cur); cur = [b]; }
+    else if (cur) cur.push(b);
+  }
+  if (cur) out.push(cur);
+  return out.map((g) => Buffer.concat(g));
+}
+
 function open(dirs) {
   const L = lit.open(dirs);
   const schema = schemaOf(L.vols[0].file);
-  return { lit: L, schema, names: (e) => namesOf(schema, L.block(e)) };
+  return {
+    lit: L, schema,
+    names: (e) => namesOf(schema, L.block(e)),
+    groups: (from, count) => groups(L, from, count),
+  };
 }
 
 module.exports = { open, namesOf, schemaOf, NAME };
@@ -61,9 +99,11 @@ if (require.main === module) {
   const step = Math.max(1, Math.floor(cat.length / want));
   const seen = new Set();
   for (let i = 0; i < cat.length; i += step) {
-    for (const nm of N.names(cat[i])) {
+    for (const buf of N.groups(i, Math.min(step, 64))) {
+    for (const nm of namesOf(N.schema, buf)) {
       const t = nm.replace(/[\x00-\x1f]/g, '').trim();
       if (t.length >= 3 && !seen.has(t)) { seen.add(t); console.log(t); }
+    }
     }
   }
   console.error('разных названий: %d (блоков просмотрено %d)', seen.size, Math.ceil(cat.length / step));

@@ -46,9 +46,12 @@ function run(schema, data, startRule, opt) {
   const F = [newFrame(), newFrame(), newFrame(), newFrame()];
   let lvl = 0, fr = F[0];
 
-  let pc = startRule, p = 0, code = 0, steps = 0, wid = 12;
+  let pc = startRule, p = o.from || 0, code = 0, steps = 0, wid = 12;
   let X = 0, Y = 0, baseX = 0, mark = 0, home = -1, lastHome = -1, byGoto = false;
-  const codes = new Map(), loops = [], calls = [], records = [];
+  // Словарь можно передать снаружи: при пересинхронизации внутри буфера он
+  // уже набран и заново в данных не встретится.
+  const codes = o.codes || new Map();
+  const loops = [], calls = [], records = [];
   // Строки собираются ещё и отдельным потоком: внутри одной структуры бывает
   // цикл, и второе имя затирало бы первое в rec[тип].
   const strings = [];
