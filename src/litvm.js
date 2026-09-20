@@ -173,6 +173,10 @@ function run(schema, data, startRule, opt) {
         break;
       case 0x80: val = ((tgt << 16) | k) >>> 0; break;
       case 0x81: val = (fr.reg >>> tgt) & (k < 32 ? (1 << k) - 1 : 0xffffffff); break;
+      // Координата кладётся в поле СВОЕГО типа, как и числа. Раньше все пары
+      // писались в один ключ 'xy' и затирали друг друга: у структуры 0x22 семь
+      // координатных полей, и выживало только последнее — узел дерева выглядел
+      // пустым. Ключ 'xy' сохранён как «последняя прочитанная пара».
       case 0x40: {                                    // упакованная пара координат
         let x, y;
         if (wid === 12) { const a = u(1), b = u(1), c = u(1); x = a + (c & 0x0f) * 256; y = b + (c >> 4) * 256; }
@@ -180,14 +184,14 @@ function run(schema, data, startRule, opt) {
         else if (wid === 16) { x = u(2); y = u(2); }
         else if (wid === 24) { x = u(3); y = u(3); }
         else { x = 0; y = 0; }                        // прочие ширины байт не читают
-        if (rec) rec['xy'] = [x, y];
+        if (rec) { rec['xy'] = [x, y]; if (type) rec[type] = [x, y]; }
         break;
       }
       case 0x41: {                                    // дельта-кодек координат
         const st0 = p;
         let b = data[p++];
         if (b === 0xff) { X = -1; Y = -1; break; }
-        if ((b & 0x80) === 0) { Y += b; if (rec) rec['xy'] = [X, Y]; break; }
+        if ((b & 0x80) === 0) { Y += b; if (rec) { rec['xy'] = [X, Y]; if (type) rec[type] = [X, Y]; } break; }
         const m = b & 0x60;
         if (m === 0x40) { let d = ((b & 0x0f) << 8) | data[p++]; if (b & 0x08) d -= 0x1000; X += d; }
         else if (m === 0x00) X += b & 0x0f;
@@ -203,7 +207,7 @@ function run(schema, data, startRule, opt) {
         b = data[p++];
         if ((fl >> 2) & 1) Y = (b << 8) | data[p++];
         else Y += (b > 127 ? b - 256 : b);
-        if (rec) rec['xy'] = [X, Y];
+        if (rec) { rec['xy'] = [X, Y]; if (type) rec[type] = [X, Y]; }
         break;
       }
       case 0x42: {                                    // блок длиной из поля 2
