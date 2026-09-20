@@ -31,26 +31,17 @@ function schemaOf(file) {
 
 // Названия одного блока, в файловом порядке.
 function namesOf(schema, block, opt) {
-  // Машина иногда встаёт посреди буфера. Словарь при этом уже набран, поэтому
-  // разбор продолжается с места остановки с тем же словарём — так склейка
-  // блоков не теряет имена, которые даёт поблочное чтение.
-  const base = Object.assign({ limit: 2000000 }, opt);
-  const items = [];
-  let codes = null, at = 0, guard = 0;
-  while (at < block.length && guard++ < 64) {
-    const r = V.run(schema, block, 0, Object.assign({}, base, { from: at, codes }));
-    codes = r.codes;
-    for (const s of r.strings) if (s.type === NAME) items.push(s);
-    const next = Math.max(r.pos, at + 1);
-    if (next <= at || next >= block.length) break;
-    at = next;
-  }
-  items.sort((a, b) => a.at - b.at);
+  // Пересинхронизация (перезапуск с места остановки) проверена и отвергнута:
+  // она добавляет 128 тысяч испорченных названий и ни одного чистого — число
+  // чистых во всех режимах одинаково, около 105 тысяч. Значит потолок задаёт
+  // сама машина, а не число проходов.
+  const r = V.run(schema, block, 0, Object.assign({ limit: 4000000 }, opt));
+  const items = r.strings.filter((s) => s.type === NAME).sort((a, b) => a.at - b.at);
   const out = [];
   let prev = Buffer.alloc(0);
   for (const it of items) {
     const raw = Buffer.concat([prev.subarray(0, Math.min(it.pre, prev.length)), it.txt]);
-    out.push(D.expand(codes, raw).toString('utf8'));
+    out.push(D.expand(r.codes, raw).toString('utf8'));
     prev = raw;
   }
   return out;

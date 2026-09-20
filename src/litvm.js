@@ -48,6 +48,7 @@ function run(schema, data, startRule, opt) {
 
   let pc = startRule, p = o.from || 0, code = 0, steps = 0, wid = 12;
   let X = 0, Y = 0, baseX = 0, mark = 0, home = -1, lastHome = -1, byGoto = false;
+  let curStruct = 0, curRule = -1;                  // какая структура сейчас разбирается
   // Словарь можно передать снаружи: при пересинхронизации внутри буфера он
   // уже набран и заново в данных не встретится.
   const codes = o.codes || new Map();
@@ -115,6 +116,7 @@ function run(schema, data, startRule, opt) {
                  (words[first + (pc + 1) * stride] & 0x4000)) pc++;
           byGoto = false;
         }
+        curStruct = type; curRule = pc;
         fr.cnt2 = 0;                                  // 0x10 сбрасывает счётчики кадра
         while (loops.length && loops[loops.length - 1].op === 0xa2) loops.pop();
         if (type) val = type;                         // тип структуры — это и значение
@@ -202,7 +204,7 @@ function run(schema, data, startRule, opt) {
         const n = fr.len, at = p, txt = data.subarray(p, p + n); p += n;
         if (type === 0x5d) codes.set(code, txt);
         else {
-          strings.push({ type, at, txt, pre: fr.reg >>> 21 & 7 });
+          strings.push({ type, at, txt, pre: fr.reg >>> 21 & 7, st: curStruct, sr: curRule, rule: pc });
           if (rec) { rec[type] = txt; rec['@'] = at; }
         }
         break;
