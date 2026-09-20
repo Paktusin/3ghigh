@@ -54,7 +54,7 @@ function run(schema, data, startRule, opt) {
   const F = [newFrame(), newFrame(), newFrame(), newFrame()];
   let lvl = 0, fr = F[0];
 
-  let pc = startRule, p = o.from || 0, code = 0, steps = 0, wid = 12;
+  let pc = startRule, p = o.from || 0, code = 0, steps = 0, wid = o.wid || 12;
   let X = 0, Y = 0, baseX = 0, mark = 0, home = -1, lastHome = -1, byGoto = false;
   let curStruct = 0, curRule = -1;                  // какая структура сейчас разбирается
   // Словарь можно передать снаружи: при пересинхронизации внутри буфера он
