@@ -14,6 +14,7 @@ Automotive). Всё получено чтением файлов; оригина
 
 | файл | о чём |
 |---|---|
+| [docs/components.md](docs/components.md) | **перепись всех 23 компонентов образа: что это и насколько разобрано формирование** |
 | [docs/dataset.md](docs/dataset.md) | устройство набора, что за что отвечает, покрытие, минимальная конфигурация |
 | [docs/formats/fldb.md](docs/formats/fldb.md) | контейнер FLDB и его контрольные суммы |
 | [docs/formats/xac.md](docs/formats/xac.md) | дорожный тайл `.xac`, векторы, узлы, читатель `src/xacvec.js` |
