@@ -116,12 +116,16 @@ function run(schema, data, startRule, opt) {
                  (words[first + (pc + 1) * stride] & 0x4000)) pc++;
           byGoto = false;
         }
-        curStruct = type; curRule = pc;
+        if (type) { curStruct = type; curRule = pc; }
         fr.cnt2 = 0;                                  // 0x10 сбрасывает счётчики кадра
         while (loops.length && loops[loops.length - 1].op === 0xa2) loops.pop();
         if (type) val = type;                         // тип структуры — это и значение
         break;
-      case 0xc3:                                      // выход из под-грамматики
+      // 0xc3 в прошивке не выставляет код возврата, и тот остаётся -5 — это
+      // ошибка, а не выход: у FUN_08ccf84c нет обработчика для -5. Значит в
+      // исправных данных такой код не встречается, и попадание в него означает
+      // потерю синхронизации.
+      case 0xc3: return fin('рассинхронизация после 0x' + curStruct.toString(16) + ' (запись ' + curRule + ')');
       case 0x11: {
         // 0x11 — это конец цикла 0xa2: сперва проверяем, остались ли витки.
         // В прошивке это счётчик кадра +56 против предела в кадре +40.
