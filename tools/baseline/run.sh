@@ -12,11 +12,16 @@ echo started > "${SDPATH}/.started"; sync
   cp "${SDPATH}/bin/showScreen" /tmp/showScreen 2>/dev/null; chmod +x /tmp/showScreen 2>/dev/null
   [ -f "${SDPATH}/lib/running.png" ] && { /tmp/showScreen "${SDPATH}/lib/running.png" & }
 }
+# На устройстве НЕТ ни grep, ни sed — только оболочка. Поэтому признак
+# нормального завершения — отдельный файл-маркер, а не поиск строки в выводе.
 guard() { s=$1; f=$2; shift 2
-  ( "$@" > "$f" 2>&1 ; echo "__ЗАВЕРШЕНО__" >> "$f" ; sync ) & p=$!; n=0
+  rm -f "${f}.ok"
+  ( "$@" > "$f" 2>&1 ; echo ok > "${f}.ok" ; sync ) & p=$!; n=0
   while [ $n -lt $s ]; do kill -0 $p 2>/dev/null || break; sleep 1; n=$((n+1)); done
   kill -9 $p 2>/dev/null; sleep 1
-  grep -q "__ЗАВЕРШЕНО__" "$f" 2>/dev/null || echo "__ЗАВИСЛО ${s}с__" >> "$f"; sync; }
+  if [ -f "${f}.ok" ]; then echo "__ЗАВЕРШЕНО__" >> "$f"; rm -f "${f}.ok"
+  else echo "__ЗАВИСЛО ${s}с__" >> "$f"; fi
+  sync; }
 
 # 1. Полный журнал — здесь и лежит завершение NDL Initialisation
 guard 20 "${OUT}/syslog_full.txt" sloginfo
@@ -51,10 +56,11 @@ guard 20 "${OUT}/swdl_marks.txt" sh -c '
 guard 20 "${OUT}/acios_targets.txt" sh -c '
   ini=/HBpersistence/navi/db/acios_db.ini
   [ -f "$ini" ] || { echo "нет $ini"; exit 0; }
-  sed -n "s/^[A-Za-z]*: *//p" "$ini" | while read pth; do
+  while read tag pth rest; do
+    case "$tag" in \#*|"") continue;; esac
     [ -n "$pth" ] || continue
     if [ -e "$pth" ]; then ls -la "$pth"; else echo "ОТСУТСТВУЕТ: $pth"; fi
-  done'
+  done < "$ini"'
 echo done > "${SDPATH}/.done"; sync
 [ -f /tmp/showScreen ] && [ -f "${SDPATH}/lib/done.png" ] && /tmp/showScreen "${SDPATH}/lib/done.png" &
 sleep 5
