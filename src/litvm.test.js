@@ -98,3 +98,14 @@ test('переход 0x11 по w4 чистит регистр текущего �
   assert.equal(r.records.find((x) => 1 in x)[1], 0);
   assert.equal(r.records.find((x) => 2 in x)[2], 7);
 });
+
+test('длина читается без знака: 0xffff это 65535, а не -1', () => {
+  // w1 = 9 кладёт длину, 0x43 её пропускает. 0x27 читает 0xffff.
+  const s = schema([
+    rule(0x10), rule(0x27, 9), rule(0x43), rule(0x26, 0, 1),
+  ]);
+  const r = run(s, Buffer.concat([Buffer.from([0xff, 0xff]), Buffer.alloc(8)]), 0);
+  // 2 байта длины + пропуск 65535 уводит за конец буфера, но ВПЕРЁД
+  assert.equal(r.why, 'чтение за концом блока');
+  assert.ok(r.pos > 0, 'указатель не должен уезжать назад, получено ' + r.pos);
+});

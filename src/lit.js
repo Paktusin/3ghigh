@@ -38,6 +38,8 @@ function readHeader(fd) {
 }
 
 // Тома LIT — один сквозной адрес: L1 .. L4 подряд, как .gdb + .gd2 у GDB.
+// Но в адресное пространство входит НЕ весь том: файл добит нулями до кратности
+// 2048, и добивка адресов не занимает. См. fixSeams.
 function openVolumes(dirs, skip) {
   let acc = 0;
   return dirs.map((d) => {
@@ -46,10 +48,47 @@ function openVolumes(dirs, skip) {
     const fd = fs.openSync(file, 'r');
     // данные тома начинаются там же, где заголовок первого (обёртка FLDB; у PIT её нет)
     const len = fs.statSync(file).size - skip;
-    const v = { file, fd, skip, start: acc, end: acc + len };
+    const v = { file, fd, skip, start: acc, end: acc + len, size: len };
     acc += len;
     return v;
   });
+}
+
+// Точные швы между томами.
+//
+// Наивная склейка «размер файла минус обёртка» ошибается на добивку: у тома 1
+// это 1436 нулевых байт, и блок 53404 попадал ровно в них, а за швом лежал
+// нетронутый заголовок блока. Разошлось всё, что дальше, — 191 тысяча блоков
+// из 245 518, и это выглядело как «другой формат без заголовка».
+//
+// Шов вычисляется из самого каталога, гадать не нужно. Блок физически лежит
+// в одном файле, значит шов обязан совпасть с началом какого-то блока. А
+// добивка меньше 2048, значит шов лежит в окне последних 2048 адресов тома.
+// На всех трёх швах в это окно попадает ровно по одному началу блока —
+// проверка сходится сама с собой, добивки выходят 1436, 962 и 1690 байт.
+function fixSeams(vols, cat) {
+  const offs = cat.map((e) => e.off);              // каталог монотонен, без разрывов
+  const startsIn = (lo, hi) => {                   // начала блоков в (lo, hi]
+    let a = 0, b = offs.length - 1, p = offs.length;
+    while (a <= b) { const m = (a + b) >> 1; if (offs[m] > lo) { p = m; b = m - 1; } else a = m + 1; }
+    const out = [];
+    for (let i = p; i < offs.length && offs[i] <= hi; i++) out.push(offs[i]);
+    return out;
+  };
+  let acc = 0;
+  for (let k = 0; k < vols.length; k++) {
+    vols[k].start = acc;
+    let len = vols[k].size;                        // последний том обрезать не по чему
+    if (k < vols.length - 1) {
+      const c = startsIn(acc + len - 2048, acc + len);
+      if (c.length !== 1) throw new Error('шов тома ' + (k + 1) + ': кандидатов ' + c.length);
+      len = c[0] - acc;
+    }
+    vols[k].end = acc + len;
+    vols[k].pad = vols[k].size - len;
+    acc += len;
+  }
+  return vols;
 }
 
 function makeReader(vols) {
@@ -89,7 +128,11 @@ function open(dirs) {
   probe.forEach((v) => fs.closeSync(v.fd));
   const vols = openVolumes(dirs, h.at);
   const read = makeReader(vols);
-  return { header: h, vols, read, catalog: () => readCatalog(read, h),
+  // Каталог целиком лежит в первом томе (до 1 726 890 при томе на 2 ГБ),
+  // поэтому читается ещё по наивным границам, а потом уточняет их сам.
+  const cat = readCatalog(read, h);
+  if (vols.length > 1) fixSeams(vols, cat);
+  return { header: h, vols, read, catalog: () => cat,
            block: (e) => read(e.off, e.size) };
 }
 
