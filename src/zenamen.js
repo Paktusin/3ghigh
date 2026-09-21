@@ -109,7 +109,73 @@ function checkKeys(d) {
            strideOk: h.keys === Math.ceil(h.index.names / STRIDE) };
 }
 
-module.exports = { header, tokens, keys, perName, nameAt, checkKeys, REC, KEY, TOK, STRIDE };
+// ---------------------------------------------------------------------------
+// Раздел ZE-NAMEN-MMI: адресная иерархия имён.
+//
+//   +0x14 u32   версия, всегда 0x00020000
+//   +0x18 u32   число имён — то же, что в ZE-NAMEN
+//   +0x1c u32   смещение первой области, всегда 60
+//   +0x20 u32   её длина, ровно «имён × 3»
+//   +0x24 u32   смещение второй области: конец первой, выровненный на 4
+//   +0x28 u32   счётчик второй области, всегда 4
+//   +0x2c u32   её длина
+//   +0x30 u32   смещение третьей области, всегда вторая плюс 4
+//   +0x34 u32   её длина, равна длине второй
+//   +0x38 u32   смещение четвёртой области, она идёт до конца раздела
+//
+// Первая область — по ТРИ байта на имя: байт флагов и u16 номер РОДИТЕЛЬСКОГО
+// имени в том же разделе ZE-NAMEN; 0xFFFF значит «корень». Получается дерево
+// адресного ввода: страна -> область -> район -> город -> улица.
+//
+// Проверено по всей базе (3512 тайлов с разделом, 17 072 680 записей):
+// ссылок вне диапазона имён 0, циклов 0, глубина не больше 6, корень ровно
+// один на тайл (исключение — BE0P с двумя). Смысл подтверждён текстами: в
+// тайле AB01 улицы «RRUGA ABAZ SHEHU», «RRUGA DOGANES» и деревни «MORAVE»,
+// «VELAGOSHT» указывают на «BERAT», а сам «BERAT» — на одноимённый район.
+//
+// Байт флагов разобран частично: бит 7 стоит только у листьев (у имён с
+// потомками — 0,0 % против 81,1 % у бездетных), а биты 2…5 почти исключительно
+// у родителей (например, бит 2: 65,5 % против 0,3 %). Что именно кодируют
+// биты 0…6, не установлено; значение растёт вместе с числом потомков
+// (0x14 — в среднем 2 потомка, 0x24 — 5, 0x74 — 40, 0x7c — 169).
+const MMI_REC = 3;
+
+function mmiHeader(d) {
+  if (d.length < 0x3c) return null;
+  const u = (o) => d.readUInt32BE(o);
+  return {
+    version: u(0x14), names: u(0x18),
+    tree: { off: u(0x1c), len: u(0x20) },
+    b: { off: u(0x24), count: u(0x28), len: u(0x2c) },
+    c: { off: u(0x30), len: u(0x34) },
+    d: { off: u(0x38), len: d.length - u(0x38) },
+  };
+}
+
+// Дерево: для каждого имени — байт флагов и номер родителя (null у корня).
+function mmiTree(d, h) {
+  h = h || mmiHeader(d);
+  const out = [];
+  for (let i = 0; i < h.names; i++) {
+    const o = h.tree.off + i * MMI_REC;
+    const parent = d.readUInt16BE(o + 1);
+    out.push({ flags: d[o], parent: parent === 0xffff ? null : parent, leaf: (d[o] & 0x80) !== 0 });
+  }
+  return out;
+}
+
+// Собрать первую область обратно в байты — для генерации своего тайла.
+function mmiBuildTree(rows) {
+  const out = Buffer.alloc(rows.length * MMI_REC);
+  rows.forEach((r, i) => {
+    out[i * MMI_REC] = r.flags & 0xff;
+    out.writeUInt16BE(r.parent === null || r.parent === undefined ? 0xffff : r.parent, i * MMI_REC + 1);
+  });
+  return out;
+}
+
+module.exports = { header, tokens, keys, perName, nameAt, checkKeys,
+  mmiHeader, mmiTree, mmiBuildTree, REC, KEY, TOK, STRIDE, MMI_REC };
 
 if (require.main === module) {
   const fldb = require('./fldb');
