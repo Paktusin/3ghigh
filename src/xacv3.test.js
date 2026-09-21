@@ -210,3 +210,33 @@ test('сборка блока: пределы формата проверяют�
   for (let i = 0; i < 9000; i++) many.nodes.push({ x: ox + i, y: oy, vectors: [] });
   assert.throws(() => v3.buildBlock(many), /32 766/);
 });
+
+// У v4 шапка длиннее и за узлами лежит хвостовая область: её начало в 0x60,
+// длина в 0x64, и сумма даёт размер блока. Без этого предела обход уходит
+// в чужие байты — так и рассыпались наши первые прогоны по v4.
+test('блок v4: область узлов кончается на хвостовой области', () => {
+  const ox = X(33.0), oy = Y(35.0);
+  const HDR = 0x6c, node = HDR, area = HDR + 6, size = area + 8;
+  const s = Buffer.alloc(size);
+  s.write('VEKTORBLOCK     ', 0, 16, 'ascii');
+  s.writeUInt32BE(size - 20, 0x10);
+  s.writeUInt16BE(4, 0x14);
+  s.writeInt32BE(ox - 9000, 0x18); s.writeInt32BE(oy - 9000, 0x1c);
+  s.writeInt32BE(ox + 9000, 0x20); s.writeInt32BE(oy + 9000, 0x24);
+  s.writeInt32BE(ox, 0x28); s.writeInt32BE(oy, 0x2c);
+  s.writeUInt16BE(0, 0x30); s.writeUInt16BE(1, 0x32);
+  s.writeUInt16BE(HDR, 0x40);
+  s.writeUInt32BE(1, 0x5c); s.writeUInt32BE(area, 0x60); s.writeUInt32BE(size - area, 0x64);
+  coord4(ox + 100, oy - 100, ox, oy).copy(s, node);
+  s.writeUInt16BE(node / 2, node + 4);           // терминатор
+  s.writeUInt32BE(0, area); s.writeUInt32BE(0x01040000, area + 4);   // каталог и запись
+
+  const b = v3.readBlock(s);
+  assert.equal(b.version, 4);
+  assert.equal(b.fail, 0);
+  assert.equal(b.nodes.length, 1);
+  assert.equal(b.nodes.length, b.count.nodes);
+  assert.equal(b.nodes[0].self, b.nodes[0].at);
+  assert.equal(b.limit, area);                   // в хвостовую область не заходим
+  assert.equal(b.tail, 0);
+});

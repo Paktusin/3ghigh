@@ -1,8 +1,10 @@
 'use strict';
-// Чтение блоков VEKTORBLOCK версии 3 — тех, из которых состоят разреженные
-// тайлы и уровни 3 и 4. В отличие от версии 5 таблицы векторов здесь нет:
-// прошивка при версии ≤ 4 обнуляет указатель на неё (u_gvi, 0x08272a26), и
-// смещение вектора приходит прямо из ссылки.
+// Чтение блоков VEKTORBLOCK версий 3 и 4 — тех, из которых состоят разреженные
+// тайлы и уровни 3 и 4. В прошивке у них общая ветка: при версии ≤ 4 указатель
+// на таблицу векторов обнуляется (u_gvi, 0x08272a26), и смещение вектора
+// приходит прямо из ссылки. Модель одна и та же, отличий два: у v4 шапка 0x6c
+// байт против 0x4c и есть хвостовая область (поля 0x60 и 0x64, как у v5),
+// на которой область узлов кончается.
 //
 // Модель снята с машинного кода, а не угадана по статистике:
 //
@@ -15,7 +17,7 @@
 //
 // Устройство блока:
 //
-//   шапка 0x4c байт (размер лежит в поле 0x40)
+//   шапка 0x4c байт у v3 и 0x6c у v4 (размер лежит в поле 0x40)
 //   заголовки под-блоков по 20 байт: [0xc000|знач][знач][4 × i32 рамка]
 //   узлы подряд: [голова][элементы][терминатор]
 //
@@ -93,13 +95,19 @@ function isSubHeader(s, p, bb) {
 
 // Блок целиком. Возвращает узлы с координатами и списками элементов.
 function readBlock(s) {
-  if (s.length < 0x4c || s.readUInt16BE(0x14) !== 3) return null;
+  if (s.length < 0x4c) return null;
+  const version = s.readUInt16BE(0x14);
+  if (version !== 3 && version !== 4) return null;
   const bounds = [0x18, 0x1c, 0x20, 0x24].map((o) => s.readInt32BE(o));
   const origin = [s.readInt32BE(0x28), s.readInt32BE(0x2c)];
   const hdr = s.readUInt16BE(0x40);
+  // у v4 за узлами лежит хвостовая область: её начало в 0x60, длина в 0x64,
+  // и сумма даёт размер блока. У v3 шапка короче, и узлы идут до конца.
+  let limit = s.length;
+  if (hdr >= 0x64) { const t = s.readUInt32BE(0x60); if (t > hdr && t <= s.length) limit = t; }
   const nodes = [], subs = [];
   let p = hdr, fail = 0;
-  for (let guard = 0; p + 4 <= s.length && guard < 1e6; guard++) {
+  for (let guard = 0; p + 4 <= limit && guard < 1e6; guard++) {
     const w = s.readUInt16BE(p);
     if ((w & 0xc000) === 0xc000 && isSubHeader(s, p, bounds)) { subs.push(p); p += 20; continue; }
     const n = readNode(s, p);
@@ -110,8 +118,8 @@ function readBlock(s) {
     p = n.end;
   }
   return {
-    version: 3, bounds, origin, header: hdr, subs, nodes, fail,
-    tail: s.length - p,
+    version, bounds, origin, header: hdr, subs, nodes, fail, limit,
+    tail: limit - p,
     count: { vectors: s.readUInt16BE(0x30), nodes: s.readUInt16BE(0x32) },
     block: s.readUInt16BE(0x34), first: s.readUInt16BE(0x36), country: s.readUInt16BE(0x3a),
   };
@@ -152,7 +160,7 @@ function blockEdges(s, opts) {
 function fileEdges(buf, opts) {
   const res = [];
   for (const v of xac.vectorBlocks(buf)) {
-    if (v.version !== 3) continue;
+    if (v.version !== 3 && v.version !== 4) continue;
     res.push(...blockEdges(buf.subarray(v.offset, v.offset + v.size), opts));
   }
   return res;
@@ -337,7 +345,7 @@ if (require.main === module) {
   const buf = fs.readFileSync(src);
   let nodes = 0, vecs = 0, bad = 0, blocks = 0;
   for (const v of xac.vectorBlocks(buf)) {
-    if (v.version !== 3) continue;
+    if (v.version !== 3 && v.version !== 4) continue;
     const s = buf.subarray(v.offset, v.offset + v.size);
     const b = readBlock(s);
     if (!b) continue;
@@ -345,12 +353,12 @@ if (require.main === module) {
     const vec = b.nodes.reduce((a, n) => a + n.els.filter((e) => e.mark === 3).length, 0);
     const self = b.nodes.filter((n) => n.self !== n.at).length;
     nodes += b.nodes.length; vecs += vec; bad += self + b.fail;
-    console.log('блок @%d: узлов %d (в шапке %d), векторов %d (в шапке %d), под-блоков %d, хвост %d б%s',
-      v.offset, b.nodes.length, b.count.nodes, vec, b.count.vectors, b.subs.length, b.tail,
+    console.log('блок @%d v%d: узлов %d (в шапке %d), векторов %d (в шапке %d), под-блоков %d, хвост %d б%s',
+      v.offset, b.version, b.nodes.length, b.count.nodes, vec, b.count.vectors, b.subs.length, b.tail,
       self ? ', самоиндекс разошёлся у ' + self : '');
   }
   const edges = fileEdges(buf);
-  console.log('блоков v3 %d; узлов %d; векторов %d; рёбер локальных %d; сбоев %d',
+  console.log('блоков v3 и v4 %d; узлов %d; векторов %d; рёбер локальных %d; сбоев %d',
     blocks, nodes, vecs, edges.length, bad);
   if (dst) {
     fs.writeFileSync(dst, JSON.stringify(xv.toGeoJSON(edges.map((e, i) => ({ idx: i, type: e.idx, a: e.a, b: e.b })))));
