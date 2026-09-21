@@ -32,3 +32,13 @@
 0x08cddd1c	lit_poi_layer_entry	вход в слой: позиция из массива слоёв, тип записи обязан быть 0x21
 0x0822c434	lit_seek_pos	разбор шестибайтовой позиции: u32 номер блока, u16 ключ записи
 0x08cceb48	lit_seek_record	переход: загрузить блок по номеру, шагать записями до ключа
+0x08cf5520	CXacFe_init_nach_laden	разбор записи XAC-STRUKTUR в объект тайла: код, 4 границы, пары разделов, ещё 2 границы
+0x08cf58d8	CXacFe_getVectorBlock	блок по номеру: обход разделов подряд с кешем пар «смещение, размер» по 16 байт
+0x08cf5ebc	CXacFe_getZfnBlock_layer2	слой 1: имя файла %s_%.4s_2.xac, смещение и размер из поуровневой записи
+0x08cf20ac	CXacDb_getFe	тайл по номеру, проверка feNum < mNumberOfFes
+0x08cf2170	CXacDb_getBlockInfoOfFeLayer	по (тайл, слой): число блоков u16 +0 и номер первого u16 +2, запись слоя 28 байт
+0x08cf2230	CXacDb_getFeNumberAndLayerOfBlockNumber	по сквозному номеру блока: тайл из таблицы u16 и перебор слоёв 0..3
+0x08cf22fc	CXacDb_getFeGroupOfFe	группа тайла: поле +0x84 записи FE-таблицы (шаг 144 байта)
+0x08cf31f8	CXacDb_initFeTable	сборка FE-таблицы из XAC-STRUKTUR L1..L4
+0x08cf541c	CXacDb_allocFeTable	выделение памяти под FE-таблицу: 4 слоя, у каждого u16 число блоков, по 16 байт на блок
+0x080b615c	isdb_read_u32be	чтение u32 BE из потока с продвижением указателя
