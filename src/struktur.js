@@ -79,7 +79,8 @@ function parse(xahBuf) {
 //   заголовок раздела: +0x10 u32 длина, +0x14 u32 номер уровня (0x00010001..4)
 //   записи с 24, по 44 байта:
 //     +0x00..0x0C  рамка: xmin, ymin, xmax, ymax; 0x7FFFFFFF если данных нет
-//     +0x10        назначение не установлено
+//     +0x10 u16    число блоков VEKTORBLOCK на этом уровне
+//     +0x12 u16    номер первого блока в сквозной нумерации базы
 //     +0x14        смещение области VEKTORBLOCK в файле уровня
 //     +0x18        суммарный размер этой области
 //     +0x1C        размер раздела XAC HEADER
@@ -89,6 +90,14 @@ function parse(xahBuf) {
 // Уровень 1 — файл тайла <П>_<код>_1.xac, уровень 2 — <П>_<код>_2.xac.
 // Уровни 3 и 4 лежат кусками внутри укрупнённых <П>_<регион>_3.b и _4.b.
 // Сверка L1 и L2 с настоящими файлами: 120 из 120 тайлов без расхождений.
+// Сплошная сверка L2 с файлами _2 по всем 3777 тайлам: размеры XAC HEADER,
+// ZF-NAMEN, смещение и размер области VEKTORBLOCK, число блоков — 3777 из 3777.
+//
+// Сквозная нумерация блоков: счёт идёт тайл за тайлом, внутри тайла уровни
+// 1, 2, 3, 4, накопительно. Проверено на всех 15108 записях четырёх уровней:
+// firstBlock равен сумме blockCount всех предыдущих (тайл, уровень) — 15108
+// из 15108. Значит новый тайл дешевле дописывать в конец реестра: вставка в
+// середину сдвигает номера у всех последующих тайлов.
 
 const LEVEL_REC = 44;
 const LEVEL_START = 24;
@@ -107,6 +116,7 @@ function parseLevels(xahBuf) {
       rows.push({
         bbox: [u(0), u(4), u(8), u(12)],
         empty: u(0) === NO_DATA,
+        blockCount: b.readUInt16BE(o + 0x10), firstBlock: b.readUInt16BE(o + 0x12),
         vektorOffset: u(0x14), vektorSize: u(0x18),
         headerSize: u(0x1c), zfNamenSize: u(0x20), totalSize: u(0x24),
       });
@@ -190,10 +200,15 @@ if (require.main === module) {
   for (const n of [1, 2, 3, 4]) {
     const r = levels[n] && levels[n].rows[li];
     if (!r) continue;
-    if (r.empty) { console.log('   L' + n + '  данных нет'); continue; }
+    if (r.empty) {
+      console.log('   L' + n + '  данных нет, блоков ' + r.blockCount +
+        ', разделы файла: XAC HEADER ' + r.headerSize + ' б, ZF-NAMEN ' + r.zfNamenSize + ' б');
+      continue;
+    }
     console.log('   L' + n +
       '  рамка ' + (r.bbox[1] / LAT).toFixed(4) + '..' + (r.bbox[3] / LAT).toFixed(4) + ' с.ш., ' +
       (r.bbox[0] / 72000).toFixed(4) + '..' + (r.bbox[2] / 72000).toFixed(4) + ' в.д.' +
+      '   блоков ' + r.blockCount + ' с номера ' + r.firstBlock +
       '   VEKTORBLOCK @' + r.vektorOffset + ', ' + r.vektorSize + ' б');
   }
 
