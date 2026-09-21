@@ -65,27 +65,27 @@ function buildReplacement(g, off, size, newPts, tcx, tcy) {
 // поэтому новый, более крупный блоб дописывается в КОНЕЦ тома, а в кластере
 // правятся только эти 8 байт. Никакие другие смещения не двигаются.
 //
-// Новый блоб = заголовок(16) + [старый поток элементов + наш элемент] + S1+S2+S3,
+// Новый блоб = заголовок(10) + [старый поток элементов + наш элемент] + S1+S2+S3,
 // счётчик элементов в заголовке увеличивается на 1, три u16-смещения
 // пересчитываются. Предел — u16: весь блоб не больше 65535 байт.
 function buildGrownTile(g, off, size, newPts) {
   const th = gm.tileHeader(g, off, size);
   if (!th.ok) throw new Error('заголовок тайла не распознан');
   const b = gm.read(g, off, size);
-  const stream = b.subarray(16, th.off0);
+  const stream = b.subarray(gm.TILE_HEAD, th.off0);
   const s1 = b.subarray(th.off0, th.off1);
   const s2 = b.subarray(th.off1, th.off2);
   const s3 = b.subarray(th.off2, size);
 
   const elem = gm.encodePoints(newPts, 0x50);
   const newStream = Buffer.concat([stream, elem]);
-  const off0 = 16 + newStream.length;
+  const off0 = gm.TILE_HEAD + newStream.length;
   const off1 = off0 + s1.length;
   const off2 = off1 + s2.length;
   const total = off2 + s3.length;
   if (total > 0xffff) throw new Error('блоб не влезает в u16: ' + total + ' б');
 
-  const head = Buffer.from(b.subarray(0, 16));       // копия исходного заголовка
+  const head = Buffer.from(b.subarray(0, gm.TILE_HEAD));   // копия исходного заголовка
   head.writeUInt16BE(off0, 0);
   head.writeUInt16BE(off1, 2);
   head.writeUInt16BE(off2, 4);

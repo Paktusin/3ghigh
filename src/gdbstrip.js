@@ -33,6 +33,15 @@ function strip(root, outDir, lon, lat, radius) {
   // область уровней — как есть
   const region = gm.read(g, 0, regionEnd);
 
+  // За областью уровней в оригинале лежит каталог блобов (44 747 пар) и 318 МБ
+  // самих блобов; урезанный том их не несёт, а поля шапки на них указывают —
+  // и указывали бы в наши же кластеры. Обнуляем: пусть каталог будет пустым,
+  // а не ложным. Поле «начало данных» (+589) остаётся верным: область уровней
+  // копируется целиком и её конец не двигается.
+  region.writeUInt32BE(0, 577);      // число записей каталога
+  region.writeUInt32BE(0, 581);      // смещение каталога
+  region.writeUInt32BE(0, 585);      // его размер
+
   const chunks = [region];
   let pos = regionEnd;
   const put = buf => { const at = pos; chunks.push(buf); pos += buf.length; return at; };
@@ -42,38 +51,60 @@ function strip(root, outDir, lon, lat, radius) {
     const gr = gm.levelGrid(g, h, L);
     if (!gr) { report.push('L' + L.i + ': таблица не найдена — пропущен'); continue; }
 
-    // общий пустой кластер переносим один раз на уровень
-    const emptyBlob = gm.read(g, gr.emptyOff, gr.entries.find(e => e.off === gr.emptyOff).sz);
-    const emptyAt = put(emptyBlob);
+    // Общий пустой кластер переносим один раз на уровень. У части уровней его
+    // нет вовсе (ни один указатель не повторяется) — тогда незанятые слоты
+    // получают обычный пустой маркер {0, 0}.
+    const emptyEntry = gr.entries.find(e => e.off === gr.emptyOff && e.sz > 0);
+    const emptyBlob = emptyEntry ? gm.read(g, gr.emptyOff, emptyEntry.sz) : null;
+    const emptyRef = emptyBlob ? { off: put(emptyBlob), sz: emptyBlob.length } : { off: 0, sz: 0 };
 
-    // какие кластеры сохраняем: окно вокруг точки (только там, где сетка выверена)
+    // какие кластеры сохраняем: окно вокруг точки (только там, где сетка выверена).
+    // Калибровка поуровневая: ячейка у каждого уровня своя, а мировая единица
+    // общая — см. gm.cellOfLon/cellOfLat.
     const keep = new Set();
     if (!gr.table.lowGrid && gr.W) {
-      const cx = Math.round((11264 + 93.1 * lon) / (1 << gr.head.potX));
-      const cy = Math.round((934 + 181.8 * lat) / (1 << gr.head.potY));
-      for (let dy = -radius; dy <= radius; dy++)
-        for (let dx = -radius; dx <= radius; dx++) {
+      const cx = Math.floor(gm.cellOfLon(lon, gr.head.cellX)) >> gr.head.potX;
+      const cy = Math.floor(gm.cellOfLat(lat, gr.head.cellY)) >> gr.head.potY;
+      // радиус задаётся в кластерах L0; на грубых уровнях кластер крупнее, и
+      // тот же счёт кластеров захватил бы пол-Европы — пересчитываем окно в
+      // градусы и берём столько кластеров, сколько их в этих градусах.
+      const degX0 = (789 << 7) / gm.UNITS_PER_LON;          // кластер L0 в градусах
+      const degY0 = (546 << 7) / gm.UNITS_PER_LAT;
+      const degX = (gr.head.cellX << gr.head.potX) / gm.UNITS_PER_LON;
+      const degY = (gr.head.cellY << gr.head.potY) / gm.UNITS_PER_LAT;
+      const rx = Math.max(1, Math.round(radius * degX0 / degX));
+      const ry = Math.max(1, Math.round(radius * degY0 / degY));
+      for (let dy = -ry; dy <= ry; dy++)
+        for (let dx = -rx; dx <= rx; dx++) {
           const s = (cy + dy) * gr.W + (cx + dx);
           if (s >= 0 && s < gr.entries.length) keep.add(s);
         }
     }
 
     // переносим сохраняемые кластеры вместе с их тайлами
-    const newEntries = gr.entries.map(e => ({ off: emptyAt, sz: emptyBlob.length }));
+    const newEntries = gr.entries.map(() => ({ off: emptyRef.off, sz: emptyRef.sz }));
+    const moved = new Map();                     // блоб тайла → его новое место
     let kept = 0, tiles = 0;
     for (const slot of keep) {
       const e = gr.entries[slot];
       if (!e || e.off < regionEnd || e.off === gr.emptyOff || e.sz === 0) continue;
       const blob = Buffer.from(gm.read(g, e.off, e.sz));
       const c = gm.cluster(g, h, e.off, e.sz);
-      // сначала кладём тайлы, потом правим записи в копии блоба кластера
+      // Сначала кладём тайлы, потом правим записи в копии блоба кластера.
+      // Один и тот же блоб переносим один раз: в кластере до пятнадцати записей
+      // из шестнадцати смотрят на общий пустой тайл, и копировать его столько же
+      // раз — и расход, и потеря структуры оригинала.
       for (let k = 0; k < c.tiles.length; k++) {
         const t = c.tiles[k];
         if (t.off === 0 || t.size === 0) continue;
-        const tileAt = put(Buffer.from(gm.read(g, t.off, t.size)));
+        let tileAt = moved.get(t.off + ':' + t.size);
+        if (tileAt === undefined) {
+          tileAt = put(Buffer.from(gm.read(g, t.off, t.size)));
+          moved.set(t.off + ':' + t.size, tileAt);
+          tiles++;
+        }
         blob.writeUInt32BE(tileAt, k * 19 + 11);
         blob.writeUInt32BE(t.size, k * 19 + 15);
-        tiles++;
       }
       newEntries[slot] = { off: put(blob), sz: e.sz };
       kept++;
@@ -88,6 +119,7 @@ function strip(root, outDir, lon, lat, radius) {
     report.push('L' + String(L.i).padStart(2) + ': кластеров ' + gr.entries.length +
       ', сохранено ' + kept + ', тайлов перенесено ' + tiles +
       (gr.table.lowGrid ? '  (сетка не выверена — всё пусто)' : ''));
+    if (!gr.table.lowGrid && kept === 0) report.push('        (в окне вокруг точки данных нет)');
   }
 
   const outGdb = path.join(outDir, 'pkgdb', 'GDB');
@@ -119,5 +151,6 @@ if (require.main === module) {
   const r = strip(root, outDir, lon, lat, radius);
   r.report.forEach(l => console.log('  ' + l));
   console.log('\nитог: ' + r.file + ' — ' + r.size + ' б (' + (r.size / 1048576).toFixed(2) + ' МБ)');
+  console.log('каталог блобов обнулён: 318 МБ блобов оригинала в урезанный том не переносятся');
   console.log('.gd2 записан нулевой длины; .conf скопированы — перед установкой обновить size/MD5/check=qa');
 }

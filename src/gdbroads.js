@@ -99,7 +99,7 @@ function buildTile(g, off, size, lines, tx, ty, name = 'CYP') {
   const th = gm.tileHeader(g, off, size);
   if (!th.ok) throw new Error('заголовок тайла не распознан');
   const b = gm.read(g, off, size);
-  const stream = b.subarray(16, th.off0);
+  const stream = b.subarray(gm.TILE_HEAD, th.off0);
   const s1 = b.subarray(th.off0, th.off1);
   const s2 = b.subarray(th.off1, th.off2);
   const s3 = b.subarray(th.off2, size);
@@ -131,13 +131,13 @@ function buildTile(g, off, size, lines, tx, ty, name = 'CYP') {
     ? buildS1(p1.count + added, Buffer.concat([p1.body, ...names.map(nm => s1record(idxOf.get(nm)))]))
     : s1;
 
-  const off0 = 16 + newStream.length;
+  const off0 = gm.TILE_HEAD + newStream.length;
   const off1 = off0 + newS1.length;
   const off2 = off1 + newS2.length;
   const total = off2 + s3.length;
   if (total > 0xffff) throw new Error('блоб не влезает в u16: ' + total + ' б');
 
-  const head = Buffer.from(b.subarray(0, 16));
+  const head = Buffer.from(b.subarray(0, gm.TILE_HEAD));
   head.writeUInt16BE(off0, 0);
   head.writeUInt16BE(off1, 2);
   head.writeUInt16BE(off2, 4);

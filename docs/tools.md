@@ -20,6 +20,11 @@ src/xacvec.js     дорожная сеть блоков v5: таблица, у�
 src/xacrec.js     запись вектора по FUN_08272938, покрытие байт блока
 src/xacwrite.js   блок v5: чтение в модель, обратная сборка байт, генерация
 src/zfnamen.js    раздел ZF-NAMEN: словарь токенов, разбор и сборка имён
+src/gdb.js        контейнер GDB: шапка, уровни, сетка кластеров, тайлы, точки
+src/gdbwrite.js   ломаная в тайле: правка на месте и наращивание через .gd2
+src/gdbroads.js   набор дорог в тайлы GDB вместе с записями реестра S1/S2
+src/gdbstrip.js   урезанный том GDB: все уровни, но только вокруг заданной точки
+src/gdbgen.js     сборка тома GDB с нуля (--demo или --roads <geojson>)
 src/nodes.js      узлы и связи из блоков v3/v4/v5, выгрузка в GeoJSON
 src/harvest.js    поиск абсолютных координат перебором
 src/gjcheck.js    проверка GeoJSON и рисунок сети в терминале
@@ -36,6 +41,8 @@ node src/coverage.js                       # набор найдётся сам
 node src/coverage.js /путь/к/другому/набору
 node src/nodes.js maps/pkgdb/.../EJ211_MO00_1.xac out/MO00.geojson
 node src/gjcheck.js out/MO00.geojson
+node src/gdb.js maps                       # шапка, уровни, сетки кластеров
+node src/gdbgen.js --demo --out out/gdbgen # том GDB, собранный с нуля
 ```
 
 Результат проверяется перетаскиванием `.geojson` на geojson.io.

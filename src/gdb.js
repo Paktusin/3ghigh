@@ -50,6 +50,13 @@ const fs = require('fs');
 const path = require('path');
 const dataset = require('./dataset');
 
+// Тот же читатель поверх буферов в памяти: «том» не обязан лежать на диске —
+// так его читают сборщик (self-check) и тесты.
+function openBuffer(b1, b2) {
+  const s1 = b1.length, s2 = b2 ? b2.length : 0;
+  return { p1: '<память>', p2: b2 ? '<память>' : null, s1, s2, total: s1 + s2, b1, b2: b2 || null };
+}
+
 function openGdb(root) {
   const dir = path.join(root, 'pkgdb');
   const v1 = fs.readdirSync(path.join(dir, 'GDB')).find(f => /[.]gdb$/i.test(f));
@@ -63,17 +70,24 @@ function openGdb(root) {
 
 // чтение по сквозному смещению, с переходом через границу .gdb → .gd2
 function read(g, off, len) {
+  if (off < 0 || off + len > g.total) {
+    throw new Error('чтение [' + off + ', ' + (off + len) + ') за концом тома (' + g.total + ')');
+  }
   const out = Buffer.alloc(len);
   let done = 0;
   while (done < len) {
     const at = off + done;
     if (at < g.s1) {
       const n = Math.min(len - done, g.s1 - at);
-      fs.readSync(g.fd1, out, done, n, at); done += n;
+      if (g.b1) g.b1.copy(out, done, at, at + n);
+      else fs.readSync(g.fd1, out, done, n, at);
+      done += n;
     } else {
-      if (!g.fd2) throw new Error('смещение ' + at + ' за концом .gdb, а .gd2 нет');
+      if (!g.fd2 && !g.b2) throw new Error('смещение ' + at + ' за концом .gdb, а .gd2 нет');
       const n = len - done;
-      fs.readSync(g.fd2, out, done, n, at - g.s1); done += n;
+      if (g.b2) g.b2.copy(out, done, at - g.s1, at - g.s1 + n);
+      else fs.readSync(g.fd2, out, done, n, at - g.s1);
+      done += n;
     }
   }
   return out;
@@ -109,22 +123,26 @@ function cleanEntry(off, sz, regionEnd, total) {
 
 // вывести ширину сетки W из ключей реальных кластеров и долю согласия
 // slot == cy*W + cx. Возвращает {W, ok, n}. Пустые/общий тайл пропускаются.
-function gridScore(g, h, b, start, count, potX, potY, sampleMax) {
+function gridScore(g, h, b, start, count, potX, potY, sampleMax, forceW, origin) {
+  const { x0, y0 } = origin || { x0: 0, y0: 0 };
   const pts = [];
   const share = new Map();
   for (let i = 0; i < count; i++) {
     const off = b.readUInt32BE(start + i * 6);
-    if (off >= h.regionEnd) share.set(off, (share.get(off) || 0) + 1);
+    if (off >= h.regionEnd && off < g.total) share.set(off, (share.get(off) || 0) + 1);
   }
+  // «общий пустой» — самый многократно повторённый указатель. Одиночный
+  // указатель пустым не считается: в разреженном (собранном) томе настоящий
+  // кластер может быть единственным, и его нельзя выкидывать из выборки.
   let emptyOff = 0, emptyN = 0;
-  for (const [o, c] of share) if (c > emptyN) { emptyN = c; emptyOff = o; }
+  for (const [o, c] of share) if (c > emptyN && c > 1) { emptyN = c; emptyOff = o; }
   for (let i = 0; i < count && pts.length < (sampleMax || 1500); i++) {
     const off = b.readUInt32BE(start + i * 6);
-    if (off < h.regionEnd || off === emptyOff) continue;
+    if (off < h.regionEnd || off === emptyOff || off + 4 > g.total) continue;
     const key = read(g, off, 4).readUInt32BE(0);
-    pts.push({ i, cx: (key & 0xffff) >> potX, cy: (key >>> 16) >> potY });
+    pts.push({ i, cx: ((key & 0xffff) - x0) >> potX, cy: ((key >>> 16) - y0) >> potY });
   }
-  let W = 0;
+  let W = forceW || 0;
   for (let a = 0; a < pts.length && !W; a++)
     for (let b2 = a + 1; b2 < pts.length; b2++)
       if (pts[b2].cy !== pts[a].cy) {
@@ -135,13 +153,63 @@ function gridScore(g, h, b, start, count, potX, potY, sampleMax) {
   return { W, ok, n: pts.length, emptyOff, emptyN };
 }
 
-// найти начало таблицы кластеров. Разгонов «чистых» записей много (паддинг
-// из нулей тоже «чистый»), поэтому кандидат выбирается по согласию сеточной
-// формулы slot == cy*W + cx — она однозначно ловит верное выравнивание.
+// Штатное начало таблицы кластеров. У всех двенадцати уровней Европы таблица
+// начинается на +1163 и тянется до конца уровня: (размер уровня − 1163) делится
+// на 6 у всех двенадцати, а у L0 частное равно ровно 256×280 = 71 680 — той
+// сетке, которую независимо даёт формула slot = cy·W + cx.
+const TABLE_AT = 1163;
+
+// Начало отсчёта ключей в кластере зависит от уровня. Проверено на 3309
+// кластерах всех двенадцати уровней — совпало у всех до единого:
+//
+//   уровень 0      ключ = (cx<<potX,            cy<<potY)
+//   уровень 1      ключ = (0x8000 + cx<<potX,   cy<<potY)
+//   уровни 2…11    ключ = ((N<<12) + cx<<potX,  0x8000 + cy<<potY)
+//
+// Похоже, номер уровня пишется в старшие разряды x, а когда местная часть в
+// 12 разрядов не влезает (L0 нужно 15, L1 — 14), метку ставят иначе. Именно
+// из-за этой добавки формула slot = cy·W + cx раньше «не сходилась» на грубых
+// уровнях: сетка была верной, а отсчёт — сдвинутым.
+function keyOrigin(level) {
+  if (level === 0) return { x0: 0, y0: 0 };
+  if (level === 1) return { x0: 0x8000, y0: 0 };
+  return { x0: level << 12, y0: 0x8000 };
+}
+
+// Ширина сетки считается из рамки карты и размера кластера — без выборки:
+//   W = ceil((x1 − x0) / (cellX · 2^potX))
+// Совпала с шириной, подобранной по ключам кластеров, на всех 12 уровнях
+// (256, 204, 64, 64, 102, 27, 27, 27, 26, 13, 13, 13).
+function gridW(h, hd) {
+  return Math.ceil((h.frame[2] - h.frame[0]) / (hd.cellX * (1 << hd.potX)));
+}
+
+// найти начало таблицы кластеров. Сперва проверяется штатное +1163; если по
+// нему записи «чистые», перебор не нужен. Иначе — старый поиск: разгонов
+// «чистых» записей много (паддинг из нулей тоже «чистый»), поэтому кандидат
+// выбирается по согласию сеточной формулы slot == cy*W + cx.
 function locateTable(g, h, L) {
   const b = read(g, L.offset, L.size);
   const end = b.length;
   const potX = b[8], potY = b[9];
+
+  // Штатное начало проверяется не «чистотой» записей (мусорных вариантов в
+  // таблице до 0,3 %, и они сбивают любой такой фильтр), а сеточной формулой:
+  // если с началом +1163 слоты сходятся с ключами, начало верное.
+  if (end > TABLE_AT + 6 && (end - TABLE_AT) % 6 === 0) {
+    const count = (end - TABLE_AT) / 6;
+    const hd = levelHead(b);
+    // делимость count на W не требуется: у L4 в конце таблицы лишние 34 записи
+    // (204 байта), назначение которых не установлено, а сетка при этом верна.
+    const W = gridW(h, hd);
+    const sc = gridScore(g, h, b, TABLE_AT, count, potX, potY, 300, W, keyOrigin(L.i));
+    // пустая таблица (ни одного кластера) тоже штатная — проверять нечем,
+    // поэтому берём её, но честно помечаем сетку невыверенной
+    if (sc.n === 0 || sc.ok / sc.n >= 0.5) {
+      return { b, start: TABLE_AT, count, potX, potY, lowGrid: sc.n === 0, canonical: true };
+    }
+  }
+
   let byGrid = null, byRun = null;
   for (let s = 80; s < Math.min(2400, end - 24); s++) {
     if ((end - s) % 6 > 5) continue;
@@ -180,18 +248,26 @@ function levelGrid(g, h, L) {
     const o = t.start + i * 6;
     entries.push({ off: t.b.readUInt32BE(o), sz: t.b.readUInt16BE(o + 4) });
   }
-  const sc = gridScore(g, h, t.b, t.start, t.count, hd.potX, hd.potY, 1500);
+  const Wc = t.canonical ? gridW(h, hd) : 0;
+  const sc = gridScore(g, h, t.b, t.start, t.count, hd.potX, hd.potY, 1500, Wc, keyOrigin(L.i));
   const distinct = new Set(entries.filter(e => e.off >= h.regionEnd && e.off !== sc.emptyOff).map(e => e.off));
+  // у штатной таблицы ширина берётся из рамки (не из выборки): так она известна
+  // и когда настоящих кластеров в томе всего один-два.
+  const W = Wc || sc.W;
   return {
-    head: hd, table: t, entries, W: sc.W, H: sc.W ? Math.round(t.count / sc.W) : 0,
+    head: hd, table: t, entries, W, H: W ? Math.floor(t.count / W) : 0,
     gridOk: sc.ok, gridN: sc.n, emptyOff: sc.emptyOff, emptyN: sc.emptyN, realClusters: distinct.size,
+    level: L.i, origin: keyOrigin(L.i),
   };
 }
 
-// мировая ячейка (x,y) → слот кластера на уровне
+// ячейка уровня (x,y) → слот кластера. x,y — как в ключе кластера, вместе с
+// добавкой уровня: её снимает keyOrigin.
 function slotFor(grid, hd, x, y) {
-  return (y >> hd.potY) * grid.W + (x >> hd.potX);
+  const o = grid.origin || { x0: 0, y0: 0 };
+  return (((y - o.y0) >> hd.potY) * grid.W) + (((x - o.x0) >> hd.potX));
 }
+
 
 // разобрать один кластер: таблица 19-байтных тайлов (до поиск-таблицы)
 function cluster(g, h, off, sz) {
@@ -210,19 +286,24 @@ function cluster(g, h, off, sz) {
   return { tiles, searchStart, searchBytes: sz - searchStart };
 }
 
-// заголовок блоба тайла (подтверждён на 19 499/20 001 тайлах L0):
-//   +0 u16 off0  +2 u16 off1  +4 u16 off2(≈размер)  +6 u16 счётчик
-//   +8 u16 0xE028 (константа-магия)  +14 u16 m_size_daten
-// поток элементов = [16 .. off0); хвостовые секции S1[off0..off1) S2[off1..off2)
-// S3[off2..size) — индекс/порядок отрисовки/имён/строки. Тайл НЕ сжат.
+// заголовок блоба тайла — РОВНО 10 БАЙТ (проверено: у тайлов с одним элементом
+// off0 = 36 = 10 + 26 у 2496/2496, а байт +10 у 3000/3000 — головной, 0x4d или 0x1d):
+//   +0 u16 off0  +2 u16 off1  +4 u16 off2(≈размер)  +6 u16 счётчик элементов
+//   +8 u16 0xE028 (константа-магия)
+// поток элементов = [10 .. off0); хвостовые секции S1[off0..off1) S2[off1..off2)
+// S3[off2..size) — реестр/имена/строки. Тайл НЕ сжат.
+// Прежнее «+14 u16 m_size_daten» было ошибкой чтения: эти байты принадлежат
+// первому элементу (служебной рамке), а не заголовку.
+const TILE_HEAD = 10;
+
 function tileHeader(g, off, size) {
-  const b = read(g, off, 16);
+  const b = read(g, off, TILE_HEAD);
   const off0 = b.readUInt16BE(0), off1 = b.readUInt16BE(2), off2 = b.readUInt16BE(4);
-  const count = b.readUInt16BE(6), magic = b.readUInt16BE(8), sizeDaten = b.readUInt16BE(14);
+  const count = b.readUInt16BE(6), magic = b.readUInt16BE(8);
   return {
-    off0, off1, off2, count, magic, sizeDaten,
-    geo: [16, off0], s1: [off0, off1], s2: [off1, off2], s3: [off2, size],
-    ok: 16 <= off0 && off0 <= off1 && off1 <= off2 && off2 <= size && magic === 0xE028,
+    off0, off1, off2, count, magic,
+    geo: [TILE_HEAD, off0], s1: [off0, off1], s2: [off1, off2], s3: [off2, size],
+    ok: TILE_HEAD <= off0 && off0 <= off1 && off1 <= off2 && off2 <= size && magic === 0xE028,
   };
 }
 
@@ -230,6 +311,18 @@ function tileHeader(g, off, size) {
 const CELL_X = 789, CELL_Y = 546;                  // размер ячейки L0 в мировых единицах
 const lonOfCell = cx => (cx - 11264) / 93.1;
 const latOfCell = cy => (cy - 934) / 181.8;
+// Калибровка «градусы ↔ ячейка» для ЛЮБОГО уровня. Мировая единица общая для
+// всех уровней, отличается только размер ячейки:
+//     мировые_x = 73 455,9·долгота + 8 887 296
+//     мировые_y = 99 262,8·широта  +   509 964
+// У L0 (cellX 789, cellY 546) это в точности прежние 11264 + 93,1·lon и
+// 934 + 181,8·lat, на которых стоит вся привязка Кипра.
+const UNITS_PER_LON = CELL_X * 93.1, UNITS_PER_LAT = CELL_Y * 181.8;
+const ORIGIN_X = 11264 * CELL_X, ORIGIN_Y = 934 * CELL_Y;
+const cellOfLon = (lon, cellX) => (ORIGIN_X + UNITS_PER_LON * lon) / (cellX || CELL_X);
+const cellOfLat = (lat, cellY) => (ORIGIN_Y + UNITS_PER_LAT * lat) / (cellY || CELL_Y);
+const lonOfCellL = (cx, cellX) => (cx * (cellX || CELL_X) - ORIGIN_X) / UNITS_PER_LON;
+const latOfCellL = (cy, cellY) => (cy * (cellY || CELL_Y) - ORIGIN_Y) / UNITS_PER_LAT;
 
 // Точки последнего элемента тайла. Проверено на береговой линии Кипра: узор
 //   1d <u32 Y> <u8 N> 8f 00 00 00 00   затем ровно N × u32
@@ -241,7 +334,7 @@ const latOfCell = cy => (cy - 934) / 181.8;
 function tilePoints(g, off, size, tileCellX, tileCellY) {
   const th = tileHeader(g, off, size);
   if (!th.ok) return null;
-  const s = read(g, off, size).subarray(16, th.off0);
+  const s = read(g, off, size).subarray(TILE_HEAD, th.off0);
   for (let p = 0; p + 11 <= s.length; p++) {
     if (s[p] !== 0x1d || s.readUInt32BE(p + 1) !== 0x50) continue;
     if (s[p + 6] !== 0x8f || s.readUInt32BE(p + 7) !== 0) continue;
@@ -258,7 +351,7 @@ function tilePoints(g, off, size, tileCellX, tileCellY) {
       }
       pts.push(p2);
     }
-    return { at: 16 + p, count: n, pointsAt: 16 + start, points: pts };
+    return { at: TILE_HEAD + p, count: n, pointsAt: TILE_HEAD + start, points: pts };
   }
   return null;
 }
@@ -293,8 +386,10 @@ function roundTrip(g, off, size) {
 }
 
 module.exports = {
-  openGdb, read, header, levelHead, locateTable, levelGrid, slotFor, cluster,
-  tileHeader, tilePoints, encodePoints, roundTrip, lonOfCell, latOfCell, CELL_X, CELL_Y,
+  openGdb, openBuffer, read, header, levelHead, locateTable, levelGrid, slotFor, cluster,
+  tileHeader, tilePoints, encodePoints, roundTrip, lonOfCell, latOfCell,
+  CELL_X, CELL_Y, TILE_HEAD, TABLE_AT, gridW, keyOrigin,
+  cellOfLon, cellOfLat, lonOfCellL, latOfCellL, UNITS_PER_LON, UNITS_PER_LAT,
 };
 
 if (require.main === module) {
@@ -344,14 +439,14 @@ if (require.main === module) {
     const t = tileHeader(g, off, size);
     console.log('\n=== тайл @' + off + ' (размер ' + (szS ? size : '?') + ') ===');
     console.log('заголовок: off0=' + t.off0 + ' off1=' + t.off1 + ' off2=' + t.off2 +
-      ' счётчик=' + t.count + ' магия=0x' + t.magic.toString(16) + ' m_size_daten=' + t.sizeDaten +
+      ' элементов=' + t.count + ' магия=0x' + t.magic.toString(16) +
       (t.ok ? '  [ok]' : '  [не сходится]'));
     console.log('секции: поток[' + t.geo[0] + '..' + t.geo[1] + ')=' + (t.geo[1] - t.geo[0]) + 'б  ' +
       'S1[' + t.s1[0] + '..' + t.s1[1] + ')=' + (t.s1[1] - t.s1[0]) + '  ' +
       'S2[' + t.s2[0] + '..' + t.s2[1] + ')=' + (t.s2[1] - t.s2[0]) + '  ' +
       'S3[' + t.s3[0] + '..' + t.s3[1] + ')=' + (t.s3[1] - t.s3[0]));
     const b = read(g, off, Math.min(size, 48));
-    console.log('первые байты потока (@+16): ' + b.subarray(16, Math.min(b.length, 48)).toString('hex'));
+    console.log('первые байты потока (@+10): ' + b.subarray(TILE_HEAD, Math.min(b.length, 48)).toString('hex'));
     const cellArg = opt('--cell');
     const pr = cellArg
       ? tilePoints(g, off, size, Number(cellArg.split(',')[0]), Number(cellArg.split(',')[1]))
