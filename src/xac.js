@@ -72,7 +72,31 @@ function vectorBlocks(buf) {
     });
 }
 
-module.exports = { sections, vectorBlocks, toLon, toLat, fromLon, fromLat, SCALE_X, SCALE_Y };
+// Реестр стран из общего индекса .xah: раздел COUNTRY, 216 записей по 10 байт
+// начиная с +64 полезной части. Поле 0x3a шапки VEKTORBLOCK — это номер записи
+// ПЛЮС ОДИН: правило сошлось на 46 странах из 46 (по одному тайлу на страну,
+// все три контейнера XAC). Кипр лежит записью 112, то есть его код — 113.
+function countries(xahBuf) {
+  const sec = sections(xahBuf).list.find((x) => x.name === 'COUNTRY');
+  if (!sec) throw new Error('раздел COUNTRY не найден');
+  const d = xahBuf.subarray(sec.offset, sec.offset + sec.total);
+  const out = [];
+  for (let p = 64; p + 10 <= d.length && out.length < 216; p += 10) {
+    const pick = (a, b) => d.toString('latin1', p + a, p + b).replace(/\0/g, '');
+    out.push({ code: out.length + 1, cc: pick(0, 2), iso2: pick(2, 4), iso3: pick(4, 7), car: pick(7, 10) });
+  }
+  return out;
+}
+
+// Код для поля 0x3a по внутреннему коду страны (`CY`) или по ISO (`CYP`).
+function countryCode(xahBuf, name) {
+  const up = String(name).toUpperCase();
+  const r = countries(xahBuf).find((x) => x.cc === up || x.iso2 === up || x.iso3 === up);
+  return r ? r.code : null;
+}
+
+module.exports = { sections, vectorBlocks, countries, countryCode,
+                   toLon, toLat, fromLon, fromLat, SCALE_X, SCALE_Y };
 
 if (require.main === module) {
   const file = process.argv[2];
