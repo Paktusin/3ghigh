@@ -152,3 +152,61 @@ test('координата: три формы кодируются и читаю
     assert.equal(v3.headLen(buf, 0), form);
   }
 });
+
+test('сборка блока: граф читается обратно тем же графом', () => {
+  const ox = X(33.37), oy = Y(35.165);
+  const spec = {
+    block: 11, first: 9, country: 0x5b,
+    nodes: [
+      { x: ox, y: oy, vectors: [{ to: 1, idx: 0x164 }, { to: 2, idx: 0x1b2 }] },
+      { x: ox + 500, y: oy + 300, vectors: [{ to: 2, idx: 0x166 }] },
+      { x: ox - 800, y: oy - 400, vectors: [] },
+      { x: ox + 1200, y: oy - 900, vectors: [{ to: 0, idx: 0x17d }] },
+    ],
+  };
+  const s = v3.buildBlock(spec);
+
+  const b = v3.readBlock(s);
+  assert.equal(b.fail, 0);
+  assert.equal(b.nodes.length, 4);
+  assert.equal(b.nodes.length, b.count.nodes);        // счётчик шапки сходится
+  assert.equal(b.count.vectors, 4);
+  assert.equal(b.tail, 0);
+  assert.equal(b.country, 0x5b);
+  for (const n of b.nodes) assert.equal(n.self, n.at);
+  b.nodes.forEach((n, i) => { assert.equal(n.x, spec.nodes[i].x); assert.equal(n.y, spec.nodes[i].y); });
+
+  // тот же читатель, что разбирает заводские блоки, возвращает те же рёбра
+  const at = b.nodes.map((n) => n.at);
+  const got = v3.blockEdges(s).map((e) => [
+    at.indexOf(b.nodes.find((n) => n.x === e.a.x && n.y === e.a.y).at),
+    at.indexOf(b.nodes.find((n) => n.x === e.b.x && n.y === e.b.y).at),
+    e.idx,
+  ].join('-')).sort();
+  assert.deepEqual(got, ['0-1-356', '0-2-434', '0-3-381', '1-2-358'].sort());
+
+  // и встречная ссылка есть у каждого ребра: указывает на слово вектора
+  const vecAt = new Set();
+  for (const n of b.nodes) for (const el of n.els) if (el.mark === 3) vecAt.add(el.at);
+  let backs = 0;
+  for (const n of b.nodes) for (const el of n.els) if (el.mark === 1) {
+    const q = (s.readUInt16BE(el.at) & 0x3fff) * 2;
+    assert.ok(vecAt.has(q), 'встречная ссылка ведёт на слово вектора');
+    assert.equal((s.readUInt16BE(q) & 0x3fff) * 2, n.at, 'и тот вектор ведёт обратно');
+    backs++;
+  }
+  assert.equal(backs, 4);
+
+  // собранный блок проходит и обратный проход
+  assert.equal(v3.rebuild(s).same, true);
+});
+
+test('сборка блока: пределы формата проверяются, а не молчат', () => {
+  const ox = X(33.37), oy = Y(35.165);
+  assert.throws(() => v3.buildBlock({ nodes: [] }), /без узлов/);
+  assert.throws(() => v3.buildBlock({ nodes: [{ x: ox, y: oy, vectors: [{ to: 5, idx: 1 }] }] }), /в никуда/);
+  // 9000 узлов по шесть байт — длиннее, чем адресует слово в 14 бит
+  const many = { nodes: [] };
+  for (let i = 0; i < 9000; i++) many.nodes.push({ x: ox + i, y: oy, vectors: [] });
+  assert.throws(() => v3.buildBlock(many), /32 766/);
+});

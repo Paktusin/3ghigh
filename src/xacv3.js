@@ -189,6 +189,15 @@ function encodeCoord(x, y, ox, oy, form, keep) {
   return out;
 }
 
+// Какой формой писать координату: компактной, если дельты в неё влезают,
+// иначе длинной. Добавочных полей головы мы не пишем — ниббл и бит 12 нулевые.
+function coordForm(x, y, ox, oy) {
+  const dx = x - ox, dy = y - oy;
+  if (dx + 16384 >= 0 && dx + 16384 <= 0x7fff && dy + 32768 >= 0 && dy + 32768 <= 0xffff) return 4;
+  if (dx + 524288 >= 0 && dx + 524288 <= 0xfffff && dy + 524288 >= 0 && dy + 524288 <= 0xfffff) return 6;
+  return 8;
+}
+
 // Обратный проход: собрать байты блока заново из разобранных значений.
 // Мера честная: `made` — байты, посчитанные из смысла (координата узла, номер
 // узла в записи, встречная ссылка, терминатор), `kept` — перенесённые как есть.
@@ -225,8 +234,102 @@ function rebuild(s) {
   return { out, made, kept, same: out.equals(s), size: s.length };
 }
 
+// Сборка блока v3 из графа `{x, y, vectors: [{to, idx}]}`.
+//
+// Раскладка — прямое обращение обходчика: узел это координата, список
+// элементов и слово-самоиндекс. Ребро пишется один раз записью вектора у узла
+// с меньшим номером, а у второго конца лежит встречная ссылка на её слово —
+// ровно так, как в заводских блоках, где встречная ссылка нашлась у всех
+// 693 914 записей.
+//
+// Ограничения формата, которые здесь проверяются:
+//   * смещение узла адресуется словом в 14 бит, значит блок не длиннее 32 766 б;
+//   * координата пишется компактной формой, дельты должны влезть в неё.
+function buildBlock(spec) {
+  const nodes = spec.nodes || [];
+  if (!nodes.length) throw new Error('блок без узлов');
+  let xmin = Infinity, ymin = Infinity, xmax = -Infinity, ymax = -Infinity;
+  for (const n of nodes) {
+    if (n.x < xmin) xmin = n.x;
+    if (n.x > xmax) xmax = n.x;
+    if (n.y < ymin) ymin = n.y;
+    if (n.y > ymax) ymax = n.y;
+  }
+  const ox = spec.origin ? spec.origin[0] : Math.floor((xmin + xmax) / 2);
+  const oy = spec.origin ? spec.origin[1] : Math.floor((ymin + ymax) / 2);
+
+  // Ребро принадлежит узлу с меньшим номером; у второго конца — встречная ссылка.
+  const own = nodes.map(() => []), back = nodes.map(() => []);
+  nodes.forEach((n, i) => {
+    for (const v of n.vectors || []) {
+      if (v.to < 0 || v.to >= nodes.length) throw new Error('вектор узла ' + i + ' ведёт в никуда');
+      if (v.to === i) throw new Error('вектор узла ' + i + ' ведёт сам в себя');
+      if (i < v.to) own[i].push({ to: v.to, idx: v.idx | 0 });
+      else own[v.to].push({ to: i, idx: v.idx | 0 });
+    }
+  });
+
+  // Раскладка. Узел идёт слева направо, и все его встречные ссылки приходят от
+  // узлов с меньшим номером — значит к моменту, когда до узла дошли, их число
+  // уже известно и смещения считаются одним проходом.
+  const HDR = 0x4c, SUB = 20;
+  const at = new Array(nodes.length), form = nodes.map((n) => coordForm(n.x, n.y, ox, oy));
+  let p = HDR + SUB, vectors = 0;
+  for (let i = 0; i < nodes.length; i++) {
+    at[i] = p;
+    vectors += own[i].length;
+    own[i].forEach((v, k) => back[v.to].push(at[i] + form[i] + k * 4));  // адрес слова вектора
+    p += form[i] + own[i].length * 4 + back[i].length * 2 + 2;
+  }
+  const size = p;
+  if (size > 0x7ffe) throw new Error('блок длиннее 32 766 байт — смещение не влезает в слово');
+
+  const s = Buffer.alloc(size);
+  s.write('VEKTORBLOCK     ', 0, 16, 'ascii');
+  s.writeUInt32BE(size - 20, 0x10);
+  s.writeUInt16BE(3, 0x14);
+  // 0x16 — cos(широты) в формате 1.15, та же формула, что у v5
+  const lat = ((ymin + ymax) / 2) / (40000000 / 360);
+  s.writeUInt16BE(Math.min(0xffff,
+    Math.floor(Math.cos(lat * Math.PI / 180) * (40000000 / 360) / 72000 * 32768)), 0x16);
+  s.writeInt32BE(xmin, 0x18); s.writeInt32BE(ymin, 0x1c);
+  s.writeInt32BE(xmax, 0x20); s.writeInt32BE(ymax, 0x24);
+  s.writeInt32BE(ox, 0x28); s.writeInt32BE(oy, 0x2c);
+  s.writeUInt16BE(vectors, 0x30);
+  s.writeUInt16BE(nodes.length, 0x32);
+  s.writeUInt16BE(spec.block || 0, 0x34);
+  s.writeUInt16BE(spec.first || 0, 0x36);
+  s.writeUInt16BE(2, 0x38);                            // «слов длины в записи нет»
+  s.writeUInt16BE(spec.country || 0, 0x3a);
+  s.writeUInt16BE(0x95, 0x3c);                         // как в заводских блоках; смысл не установлен
+  s.writeUInt16BE(HDR, 0x40);
+
+  // Заголовок под-блока: рамка всего блока. Слово 0 несёт число узлов —
+  // так это выглядит у заводских блоков с единственным под-блоком.
+  s.writeUInt16BE(0xc000 | (nodes.length & 0x3fff), HDR);
+  s.writeInt32BE(xmin, HDR + 4); s.writeInt32BE(ymin, HDR + 8);
+  s.writeInt32BE(xmax, HDR + 12); s.writeInt32BE(ymax, HDR + 16);
+
+  // Байты узлов.
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i];
+    const c = encodeCoord(n.x, n.y, ox, oy, form[i], Buffer.alloc(8));
+    if (!c) throw new Error('узел ' + i + ': координата не лежит ни в одной из форм');
+    c.copy(s, at[i]);
+    let q = at[i] + form[i];
+    for (const v of own[i]) {
+      s.writeUInt16BE(0xc000 | (at[v.to] / 2), q);     // слово 0: номер узла-цели
+      s.writeUInt16BE(v.idx & 0x07ff, q + 2);          // слово 1: бит 15 снят — запись кончилась
+      q += 4;
+    }
+    for (const w of back[i]) { s.writeUInt16BE(0x4000 | (w / 2), q); q += 2; }
+    s.writeUInt16BE(at[i] / 2, q);                     // терминатор — самоиндекс
+  }
+  return s;
+}
+
 module.exports = { headLen, readNode, isSubHeader, readBlock, vector, blockEdges,
-                   fileEdges, encodeCoord, rebuild };
+                   fileEdges, encodeCoord, coordForm, rebuild, buildBlock };
 
 if (require.main === module) {
   const [src, dst] = process.argv.slice(2);
