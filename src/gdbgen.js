@@ -47,6 +47,8 @@
 const fs = require('fs');
 const path = require('path');
 const gm = require('./gdb');
+const conf = require('./conf');
+const dataset = require('./dataset');
 
 // ── константы шапки ────────────────────────────────────────────────────────
 const PROLOGUE = 792;                 // столько занимает шапка до первого уровня
@@ -366,7 +368,7 @@ function build(spec) {
 
 // ── укладка дорог ──────────────────────────────────────────────────────────
 
-const TILE_CELLS = 32;                                  // тайл L0 — 32×32 ячейки
+const TILE_CELLS = 32;                                  // тайл L0 по умолчанию — 32×32 ячейки
 const cellX = lon => 11264 + 93.1 * lon;                // калибровка из docs/formats/gdb.md
 const cellY = lat => 934 + 181.8 * lat;
 
@@ -378,9 +380,20 @@ function degToTile(lon, lat, tcx, tcy) {
   };
 }
 
+// Размеры тайла, которые перебирает подбор: X и Y уменьшаются по очереди.
+// Ровно такой ряд и лежит в заводском томе — 2^5×2^5, 2^5×2^4, 2^4×2^4,
+// 2^4×2^3, 2^3×2^3, 2^3×2^2, 2^2×2^2, 2^2×2^1, 2^1×2^1, 2^1×2^0.
+const TILE_SIZES = [[5, 5], [5, 4], [4, 4], [4, 3], [3, 3], [3, 2], [2, 2], [2, 1], [1, 1], [1, 0]];
+
 // Разложить ломаные (в градусах) по тайлам L0 и собрать описание уровня.
 // Дорога целиком уходит в тайл своей первой точки: x — u16, y — i16, запаса
 // хватает, чтобы вылезти за край тайла.
+//
+// Размер тайла подбирается ПО КЛАСТЕРУ, а не берётся постоянным. Смещения
+// секций внутри блоба — u16, поэтому плотный тайл в 32 ячейки не влезает:
+// на полной сети Кипра переполнялось 16 тайлов из 31. Завод решает это так же —
+// внутри кластера размер тайла один (175 кластеров из 175 просмотренных), а
+// между кластерами он гуляет от 2^5 до 2^0 по плотности.
 //
 // Только L0: точки в тайле лежат в мировых единицах от его начала, и это
 // работает, пока тайл в них умещается. У L0 тайл — 32 ячейки × 789 = 25 248
@@ -390,34 +403,76 @@ function degToTile(lon, lat, tcx, tcy) {
 // пустыми, а не заполняем наугад.
 function roadsToLevel(lines, opts = {}) {
   const L = Object.assign({}, EUROPE_LEVELS[0]);
-  const perTile = new Map();
+  const CW = 1 << L.potX, CH = 1 << L.potY;
+
+  // 1. дороги по кластерам — кластер задан сеткой уровня и от размера тайла
+  //    не зависит.
+  //
+  // Дорога привязывается к тайлу, в который попадает ЮГО-ЗАПАДНЫЙ угол её
+  // рамки, а не первая точка. Причина: x точки — беззнаковое слово от начала
+  // тайла, и дорога, начавшаяся у западного края и ушедшая на запад, даёт
+  // отрицательный x и пропадает. По привязке к первой точке на кипрской сети
+  // терялось 1407 дорог из 87 698, по углу рамки — ни одной.
+  const perCluster = new Map();
   let skipped = 0;
   for (const ln of lines) {
     const coords = Array.isArray(ln) ? ln : ln.pts;
-    if (!coords || coords.length < 2) { skipped++; continue; }
-    const tx = Math.floor(cellX(coords[0][0]) / TILE_CELLS) * TILE_CELLS;
-    const ty = Math.floor(cellY(coords[0][1]) / TILE_CELLS) * TILE_CELLS;
-    const points = coords.map(([lon, lat]) => degToTile(lon, lat, tx, ty));
-    if (points.length > 254 || points.some(p => p.x < 0 || p.x > 0xffff || p.y < -32768 || p.y > 32767)) {
-      skipped++; continue;
+    if (!coords || coords.length < 2 || coords.length > 254) { skipped++; continue; }
+    let ax = Infinity, ay = Infinity;
+    for (const [lon, lat] of coords) {
+      const x = cellX(lon), y = cellY(lat);
+      if (x < ax) ax = x;
+      if (y < ay) ay = y;
     }
-    const k = tx + ',' + ty;
-    if (!perTile.has(k)) perTile.set(k, { tx, ty, roads: [] });
-    perTile.get(k).roads.push({ points, name: (Array.isArray(ln) ? null : ln.name) || opts.name || 'CY' });
+    const cx = Math.floor(ax / CW), cy = Math.floor(ay / CH);
+    const k = cx + ',' + cy;
+    if (!perCluster.has(k)) perCluster.set(k, { cx, cy, roads: [] });
+    perCluster.get(k).roads.push({ coords, anchor: [ax, ay],
+      name: (Array.isArray(ln) ? null : ln.name) || opts.name || 'CY' });
   }
 
-  const clusters = new Map();
-  for (const { tx, ty, roads } of perTile.values()) {
-    const cx = tx >> L.potX, cy = ty >> L.potY;
-    const k = cx + ',' + cy;
-    if (!clusters.has(k)) clusters.set(k, { cx, cy, tiles: [] });
-    clusters.get(k).tiles.push({
-      ix: (tx - (cx << L.potX)) >> 5, iy: (ty - (cy << L.potY)) >> 5,
-      lw: 5, lh: 5, blob: tileBlob(roads),
-    });
+  // 2. на каждый кластер — самый крупный размер тайла, при котором блобы влезают
+  const clusters = [];
+  let lost = 0;
+  const budget = opts.maxBlob || MAX_BLOB;
+  for (const c of perCluster.values()) {
+    let chosen = null;
+    for (const [lw, lh] of TILE_SIZES) {
+      const step = [1 << lw, 1 << lh];
+      const byTile = new Map();
+      let out = 0;
+      for (const r of c.roads) {
+        const tx = Math.floor(r.anchor[0] / step[0]) * step[0];
+        const ty = Math.floor(r.anchor[1] / step[1]) * step[1];
+        const points = r.coords.map(([lon, lat]) => degToTile(lon, lat, tx, ty));
+        if (points.some(p => p.x < 0 || p.x > 0xffff || p.y < -32768 || p.y > 32767)) { out++; continue; }
+        const k = tx + ',' + ty;
+        if (!byTile.has(k)) byTile.set(k, { tx, ty, roads: [] });
+        byTile.get(k).roads.push({ points, name: r.name });
+      }
+      let fits = true;
+      const tiles = [];
+      for (const t of byTile.values()) {
+        let blob;
+        try { blob = tileBlob(t.roads); } catch (e) { fits = false; break; }
+        if (blob.length > budget) { fits = false; break; }
+        tiles.push({
+          ix: (t.tx - c.cx * CW) >> lw, iy: (t.ty - c.cy * CH) >> lh,
+          lw, lh, blob,
+        });
+      }
+      if (fits) { chosen = { lw, lh, tiles, out }; break; }
+    }
+    if (!chosen) { skipped += c.roads.length; continue; }
+    lost += chosen.out;
+    clusters.push({ cx: c.cx, cy: c.cy, lw: chosen.lw, lh: chosen.lh, tiles: chosen.tiles });
   }
-  L.clusters = [...clusters.values()];
-  return { level: L, tiles: perTile.size, clusters: L.clusters.length, skipped };
+
+  L.clusters = clusters;
+  const tiles = clusters.reduce((a, c) => a + c.tiles.length, 0);
+  const sizes = {};
+  for (const c of clusters) sizes['2^' + c.lw + 'x2^' + c.lh] = (sizes['2^' + c.lw + 'x2^' + c.lh] || 0) + 1;
+  return { level: L, tiles, clusters: clusters.length, skipped: skipped + lost, sizes };
 }
 
 // Том «только эти дороги»: L0 с нашими кластерами, остальные уровни пустые.
@@ -430,7 +485,7 @@ function volumeFromRoads(lines, opts = {}) {
 module.exports = {
   PROLOGUE, SIG, VERSION, FRAME, MAGIC, MAX_BLOB, FRAME_ELEMENT, EUROPE_LEVELS, CLUSTER_REC,
   tileBlob, emptyTile, readTileRoads, mortonIndex, clusterBlob, build,
-  degToTile, cellX, cellY, roadsToLevel, volumeFromRoads, TILE_CELLS,
+  degToTile, cellX, cellY, roadsToLevel, volumeFromRoads, TILE_CELLS, TILE_SIZES,
 };
 
 if (require.main === module) {
@@ -464,6 +519,10 @@ if (require.main === module) {
   const v = volumeFromRoads(lines, { name: opt('--name') || 'EJ211' });
   console.log('тайлов ' + v.stat.tiles + ', кластеров ' + v.stat.clusters +
     (v.stat.skipped ? ', пропущено дорог ' + v.stat.skipped : ''));
+  if (v.stat.sizes) {
+    console.log('размер тайла по кластерам: ' +
+      Object.entries(v.stat.sizes).map(([k, n]) => k + ' — ' + n).join(', '));
+  }
   console.log('область уровней до ' + v.regionEnd + ', том ' + v.gdb.length + ' б (' +
     (v.gdb.length / 1048576).toFixed(2) + ' МБ)');
 
@@ -474,12 +533,43 @@ if (require.main === module) {
   console.log('читается: ' + h.sig + ', версия ' + h.version + ', уровней ' + h.nLevels +
     ', сетка L0 ' + gr.W + '×' + gr.H + ', слоты ' + gr.gridOk + '/' + gr.gridN);
 
-  const dirGdb = path.join(outDir, 'pkgdb', 'GDB'), dirGd2 = path.join(outDir, 'pkgdb', 'GDB2');
+  const dirGdb = path.join(outDir, 'pkgdb', 'GDB');
   fs.mkdirSync(dirGdb, { recursive: true });
-  fs.mkdirSync(dirGd2, { recursive: true });
   const base = (opt('--name') || 'EJ211') + '_v37a';
-  fs.writeFileSync(path.join(dirGdb, base + '.gdb'), v.gdb);
-  fs.writeFileSync(path.join(dirGd2, base + '.gd2'), v.gd2);
-  console.log('записано: ' + path.join(dirGdb, base + '.gdb') + ' (+ пустой .gd2)');
-  console.log('перед установкой обновить size=, MD5 и check=qa в GDB.conf/GDB2.conf');
+  const gdbPath = path.join(dirGdb, base + '.gdb');
+  fs.writeFileSync(gdbPath, v.gdb);
+  console.log('записано: ' + gdbPath);
+
+  // Компонент GDB2 в набор не кладём: второй том у нас пуст, сквозных ссылок за
+  // границу первого собранный том не делает, а нулевой файл установщику
+  // предъявлять незачем. Что GDB2 необязателен, видно по австралийскому
+  // набору — там его нет совсем.
+  if (!args.includes('--no-set')) {
+    const root = dataset.resolveRoot();
+    const srcConf = path.join(root, 'pkgdb', 'GDB', 'GDB.conf');
+    if (fs.existsSync(srcConf)) {
+      const dstConf = path.join(dirGdb, 'GDB.conf');
+      fs.copyFileSync(srcConf, dstConf);
+      let t = fs.readFileSync(dstConf, 'latin1').replace(/^name=.*\.gdb$/m, 'name=' + base + '.gdb');
+      fs.writeFileSync(dstConf, Buffer.from(t, 'latin1'));
+      conf.updateConf(dstConf, gdbPath);
+      console.log('GDB/GDB.conf: имя файла, size, MD5 и пробы qa пересчитаны');
+    }
+    for (const f of ['DBInfo.txt', 'config.nfm', 'build1']) {
+      const q = path.join(root, f);
+      if (fs.existsSync(q)) fs.copyFileSync(q, path.join(outDir, f));
+    }
+    const copyDir = d => {
+      const from = path.join(root, 'pkgdb', d);
+      if (!fs.existsSync(from)) return;
+      const to = path.join(outDir, 'pkgdb', d);
+      fs.mkdirSync(to, { recursive: true });
+      for (const f of fs.readdirSync(from)) fs.copyFileSync(path.join(from, f), path.join(to, f));
+    };
+    const style = fs.readdirSync(path.join(root, 'pkgdb')).find(d => /^StyleDBMMI3G_/.test(d));
+    if (style) copyDir(style);
+    copyDir('NaviPersistence_ALL_3');
+    console.log('дальше: node src/mkmeta.js ' + outDir + ' --keep-pkg');
+    console.log('после установки на машине: tools/write_fixacios.sh');
+  }
 }

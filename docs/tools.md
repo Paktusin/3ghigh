@@ -30,7 +30,7 @@ src/gdb.js        контейнер GDB: шапка, уровни, сетка �
 src/gdbwrite.js   ломаная в тайле: правка на месте и наращивание через .gd2
 src/gdbroads.js   набор дорог в тайлы GDB вместе с записями реестра S1/S2
 src/gdbstrip.js   урезанный том GDB: все уровни, но только вокруг заданной точки
-src/gdbgen.js     сборка тома GDB с нуля (--demo или --roads <geojson>)
+src/gdbgen.js     сборка тома GDB с нуля (--demo или --roads <geojson>); размер тайла подбирается под плотность, набор с .conf собирается сам
 src/nodes.js      узлы и связи из блоков v3/v4/v5, выгрузка в GeoJSON
 src/harvest.js    поиск абсолютных координат перебором
 src/gjcheck.js    проверка GeoJSON и рисунок сети в терминале

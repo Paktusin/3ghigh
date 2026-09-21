@@ -276,7 +276,7 @@ test('том: уровни складываются встык и все две�
 
 // ── укладка дорог из градусов ──────────────────────────────────────────────
 
-test('дороги: каждая попадает в тайл своей первой точки', () => {
+test('дороги: каждая попадает в тайл юго-западного угла своей рамки', () => {
   const lines = [
     { name: 'A1', pts: [[33.30, 35.16], [33.32, 35.17]] },
     { name: 'A2', pts: [[33.30, 35.16], [33.31, 35.16]] },
@@ -313,4 +313,63 @@ test('дороги: градусы возвращаются из тома с т�
     assert.ok(Math.abs(p.lat - deg[i][1]) < 0.01, 'точка ' + i + ': широта ' + p.lat);
   });
   assert.equal(gr.entries[c0.slot].off, c0.off, 'кластер стоит в своём слоте');
+});
+
+test('дороги: уходящая на запад не теряется — привязка идёт по углу рамки', () => {
+  // первая точка у западного края тайла, дальше дорога идёт на запад:
+  // при привязке по первой точке x стал бы отрицательным и дорога пропала бы
+  const west = [[33.3000, 35.160], [33.2900, 35.160], [33.2800, 35.161]];
+  const r = G.roadsToLevel([{ name: 'западная', pts: west }]);
+  assert.equal(r.skipped, 0, 'дорога не пропущена');
+  assert.equal(r.tiles, 1, 'дорога легла в один тайл');
+
+  const v = G.volumeFromRoads([{ name: 'западная', pts: west }]);
+  const g = gm.openBuffer(v.gdb, v.gd2);
+  const h = gm.header(g);
+  const gr = gm.levelGrid(g, h, h.levels[0]);
+  let found = 0;
+  for (const e of gr.entries) {
+    if (!e.sz || e.off < h.regionEnd) continue;
+    for (const t of gm.cluster(g, h, e.off, e.sz).tiles) {
+      const rd = G.readTileRoads(gm.read(g, t.off, t.size));
+      for (const one of rd.roads) if (one.points.length === west.length) found++;
+    }
+  }
+  assert.ok(found > 0, 'дорога нашлась в томе');
+});
+
+test('дороги: плотному кластеру достаётся тайл поменьше', () => {
+  // много коротких дорог в одной точке: при тайле 2^5 блоб переполнит u16
+  // пятно целиком внутри одного тайла 2^5, но шириной в полторы ячейки:
+  // уменьшение тайла его разрежет, а на 2^5 блоб переполнит u16
+  const lines = [];
+  for (let i = 0; i < 450; i++) {
+    const lon = 33.302 + (i % 25) * 0.00064, lat = 35.146 + Math.floor(i / 25) * 0.00044;
+    const pts = [];
+    for (let k = 0; k < 40; k++) pts.push([lon + k * 0.00002, lat + (k % 2) * 0.00002]);
+    lines.push({ name: 'R' + i, pts });
+  }
+  const r = G.roadsToLevel(lines);
+  assert.equal(r.skipped, 0, 'ни одна дорога не потеряна');
+  const sizes = Object.keys(r.sizes);
+  assert.equal(sizes.length, 1, 'кластер один');
+  assert.notEqual(sizes[0], '2^5x2^5', 'размер тайла уменьшен под плотность');
+  assert.ok(r.tiles > 1, 'кластер разбит на несколько тайлов');
+});
+
+test('дороги: размер тайла внутри кластера один — как у завода', () => {
+  const lines = [];
+  for (let i = 0; i < 400; i++) {
+    const lon = 33.30 + (i % 20) * 0.001, lat = 35.16 + Math.floor(i / 20) * 0.001;
+    lines.push({ name: 'R' + i, pts: [[lon, lat], [lon + 0.0005, lat + 0.0005]] });
+  }
+  const v = G.volumeFromRoads(lines);
+  const g = gm.openBuffer(v.gdb, v.gd2);
+  const h = gm.header(g);
+  const gr = gm.levelGrid(g, h, h.levels[0]);
+  for (const e of gr.entries) {
+    if (!e.sz || e.off < h.regionEnd) continue;
+    const set = new Set(gm.cluster(g, h, e.off, e.sz).tiles.map(t => t.lw + 'x' + t.lh));
+    assert.equal(set.size, 1, 'в кластере один размер тайла');
+  }
 });
