@@ -141,6 +141,62 @@ function poisOf(schema, block, blk, opt) {
   return out;
 }
 
+// Элементы блока в нумерации ПРОШИВКИ. Наша машина рвёт запись кодом 0x65,
+// когда продолжение не начинается кодом 0x10: у заголовка слоя так выходит два
+// куска вместо одного, и вся нумерация после него съезжает. Запись без
+// собственного типа — продолжение предыдущей, её надо слить.
+function elemsOf(records) {
+  const out = [];
+  for (const rec of records) {
+    if (rec['#'] === undefined && out.length) Object.assign(out[out.length - 1], rec);
+    else out.push(Object.assign({}, rec));
+  }
+  return out;
+}
+
+// Позиция — это (номер блока, ключ), а ключ — порядковый номер элемента,
+// считая ноль первым элементом ПОСЛЕ заголовка блока. Проверено геометрией:
+// рамка A-потомка совпала с половиной родителя у 16 886 пар, расхождений 0.
+function elemAt(elems, key) { return elems[key + 1]; }
+
+// Рамки узла: A — пары 0x61 (угол) и 0x60 (противоположный), B — 0x64 и 0x63.
+// Значения смещены от опорной точки блока, как и координаты точек.
+function nodeBox(o, rec, mn, mx) {
+  const a = rec[mn], b = rec[mx];
+  if (!Array.isArray(a) || !Array.isArray(b)) return null;
+  return { x0: o.x + a[0], y0: o.y + a[1], x1: o.x + b[0], y1: o.y + b[1] };
+}
+
+const inBox = (b, x, y) => !!b && x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1;
+
+// Спуск по дереву POI к точке. Корень — узел с ключом 1 в блоке заголовка слоя
+// (у европейского набора это блок 101099). Возвращает путь и лист: запись 0x23
+// с числом точек, лежащих в том же блоке следом за ней.
+function descend(get, lon, lat, root) {
+  const x = Math.round(lon * 72000), y = Math.round(lat * DEG);
+  let blk = (root && root.block) !== undefined ? root.block : 101099;
+  let key = (root && root.key) !== undefined ? root.key : 1;
+  const path = [];
+  for (let step = 0; step < 128; step++) {
+    const b = get(blk);
+    const rec = elemAt(b.elems, key);
+    if (!rec) return { path, why: 'нет элемента', block: blk, key: key };
+    if (rec['#'] !== 0x22)
+      return { path, why: 'лист', block: blk, key: key,
+               type: rec['#'], count: rec[0x42] };
+    const A = nodeBox(b.origin, rec, 0x61, 0x60), B = nodeBox(b.origin, rec, 0x64, 0x63);
+    let next = null, half = null;
+    if (inBox(A, x, y) && (Array.isArray(rec[0x5f]) || Array.isArray(rec[0x79])))
+      { next = rec[0x5f] || rec[0x79]; half = A; }
+    else if (inBox(B, x, y) && (Array.isArray(rec[0x62]) || Array.isArray(rec[0x7a])))
+      { next = rec[0x62] || rec[0x7a]; half = B; }
+    if (!next) return { path, why: 'дальше некуда', block: blk, key: key, A: A, B: B };
+    path.push({ block: blk, key: key, box: half });
+    blk = next[0]; key = next[1];
+  }
+  return { path, why: 'предел глубины', block: blk, key: key };
+}
+
 function schemaOf(file) {
   const pre = Buffer.alloc(8192);
   const fd = fs.openSync(file, 'r');
@@ -155,25 +211,65 @@ function open(dirs) {
   const L = lit.open(dirs);
   const schema = schemaOf(L.vols[0].file);
   const cat = L.catalog();
+  const cache = new Map();
+  const get = (i) => {
+    if (cache.has(i)) return cache.get(i);
+    const b = L.block(cat[i]);
+    let recs = [];
+    try { recs = V.run(schema, b, 0, { blk: i, limit: 4000000 }).records; } catch (e) { /* блок не читается */ }
+    const v = { origin: origin(b), elems: elemsOf(recs), size: b.length };
+    if (cache.size > 200) cache.clear();
+    cache.set(i, v);
+    return v;
+  };
   return {
-    lit: L, schema, catalog: () => cat,
+    lit: L, schema, catalog: () => cat, get,
     pois: (i) => poisOf(schema, L.block(cat[i]), i),
     origin: (i) => origin(L.block(cat[i])),
+    elems: (i) => get(i).elems,
+    find: (lon, lat, root) => descend(get, lon, lat, root),
   };
 }
 
-module.exports = { open, poisOf, origin, details, category, CATEGORIES, TAGS, DEG };
+module.exports = { open, poisOf, origin, details, category, descend, elemsOf, elemAt,
+                   CATEGORIES, TAGS, DEG };
 
 // Показать точки интереса блока (или пройтись по выборке и собрать сводку):
 //
 //   node src/litpoi.js 102275            точки одного блока
 //   node src/litpoi.js --scan 200        сводка по выборке блоков
+//   node src/litpoi.js --find 33 35      спуск по дереву к точке: какой лист её накрывает
 if (require.main === module) {
   const argv = process.argv.slice(2);
   const dirs = ['LIT', 'LIT2', 'LIT3', 'LIT4'].map((d) => path.join('maps/pkgdb', d));
   const P = open(dirs);
   const num = Number(argv.find((a) => /^\d+$/.test(a)) || 0);
-  if (argv.includes('--scan')) {
+  if (argv.includes('--find')) {
+    const i = argv.indexOf('--find');
+    const lon = Number(argv[i + 1]), lat = Number(argv[i + 2]);
+    const r = P.find(lon, lat);
+    const deg = (b) => '(' + (b.x0 / 72000).toFixed(3) + ', ' + (b.y0 / DEG).toFixed(3) + ')…(' +
+                       (b.x1 / 72000).toFixed(3) + ', ' + (b.y1 / DEG).toFixed(3) + ')';
+    console.log('цель %s° %s°', lon, lat);
+    for (const s of r.path)
+      console.log('  блок %s ключ %s  %s', String(s.block).padStart(6), String(s.key).padStart(5),
+                  s.box ? deg(s.box) : '');
+    if (r.why === 'лист') {
+      console.log('лист: блок %d, ключ %d, тип 0x%s, точек %d',
+                  r.block, r.key, Number(r.type).toString(16), r.count);
+      const list = P.pois(r.block);
+      const lons = list.map((p) => p.lon).sort((a, b) => a - b);
+      const lats = list.map((p) => p.lat).sort((a, b) => a - b);
+      console.log('точки блока: %d, долгота %s…%s, широта %s…%s', list.length,
+                  lons[0].toFixed(3), lons[lons.length - 1].toFixed(3),
+                  lats[0].toFixed(3), lats[lats.length - 1].toFixed(3));
+      for (const p of list.slice(0, 3))
+        console.log('   %s %s %s %s', p.lon.toFixed(5), p.lat.toFixed(5),
+                    (p.category || '?').padEnd(14), JSON.stringify(p.name));
+    } else {
+      console.log('остановились: %s (блок %d, ключ %d)', r.why, r.block, r.key);
+    }
+  } else if (argv.includes('--scan')) {
     const cat = P.catalog(), want = num || 200;
     const step = Math.max(1, Math.floor(120000 / want));
     const byCat = new Map();
