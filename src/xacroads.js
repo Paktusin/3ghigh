@@ -5,6 +5,7 @@
 //
 // Ключи:
 //   --classes motorway,trunk,primary   какие классы OSM брать (по умолчанию все)
+//   --zen <файл.bin>   выложить раздел ZE-NAMEN (имена и связь «имя -> дорога»)
 //   --code CY00        код тайла            --index 3776   номер в реестре
 //   --country 113      код страны (Кипр)    --base 0       сквозной номер первого блока
 //   --max-nodes 9000   потолок узлов в блоке (у завода не больше 9962)
@@ -76,6 +77,44 @@ function setAttributes(root) {
   return xr.attributes(st.openIndex(root).buf);
 }
 
+// --- имена --------------------------------------------------------------------
+
+// Имена в разделе `ZE-NAMEN` завод пишет ПРОПИСНОЙ латиницей: среди 81 483
+// имён выборки нет ни одного со строчной буквой. Греческие названия там уже
+// переложены на латиницу (`AGIOU GEORGIOU` в тайле `GR1T`), так что делаем то
+// же самое. Старшие байты у завода свои (0x81, 0x84, 0x88…) — какая это
+// кодовая страница, не разобрано, поэтому за пределы ASCII не выходим.
+const GREEK = {
+  Α: 'A', Ά: 'A', Β: 'V', Γ: 'G', Δ: 'D', Ε: 'E', Έ: 'E', Ζ: 'Z', Η: 'I', Ή: 'I',
+  Θ: 'TH', Ι: 'I', Ί: 'I', Ϊ: 'I', Κ: 'K', Λ: 'L', Μ: 'M', Ν: 'N', Ξ: 'X',
+  Ο: 'O', Ό: 'O', Π: 'P', Ρ: 'R', Σ: 'S', Σ: 'S', Τ: 'T', Υ: 'Y', Ύ: 'Y', Ϋ: 'Y',
+  Φ: 'F', Χ: 'CH', Ψ: 'PS', Ω: 'O', Ώ: 'O',
+};
+
+// Строка -> прописная латиница без диакритики, только печатный ASCII.
+// Байт 0x02 в имени невозможен по устройству потока, но здесь он отсеется сам.
+function latinize(str) {
+  let out = '';
+  for (const ch of String(str).toUpperCase().normalize('NFD')) {
+    if (GREEK[ch]) { out += GREEK[ch]; continue; }
+    const c = ch.codePointAt(0);
+    if (c >= 0x300 && c <= 0x36f) continue;            // диакритика после NFD
+    out += (c >= 0x20 && c <= 0x7e) ? ch : ' ';
+  }
+  return out.replace(/\s+/g, ' ').trim();
+}
+
+// Имя дороги: латиница предпочтительнее, дальше по убыванию надёжности.
+function roadName(props) {
+  const p = props || {};
+  for (const v of [p.name_en, p['name:en'], p.int_name, p.name]) {
+    if (!v) continue;
+    const s = latinize(v);
+    if (s) return s;
+  }
+  return null;
+}
+
 // --- граф --------------------------------------------------------------------
 
 // GeoJSON -> узлы и рёбра в единицах карты. Точки, севшие в одну единицу,
@@ -83,7 +122,8 @@ function setAttributes(root) {
 function graphFromGeoJSON(fc, opt) {
   const classes = opt && opt.classes ? new Set(opt.classes) : null;
   const byKey = new Map(), nodes = [], edges = [], seen = new Set();
-  let ways = 0, points = 0, loops = 0, dups = 0;
+  const names = [], byName = new Map();
+  let ways = 0, points = 0, loops = 0, dups = 0, named = 0;
 
   const nodeAt = (lon, lat) => {
     const x = Math.round(lon * LON), y = Math.round(lat * LAT);
@@ -98,6 +138,13 @@ function graphFromGeoJSON(fc, opt) {
     const hw = (f.properties || {}).highway || 'unclassified';
     if (classes && !classes.has(hw)) continue;
     const frc = FRC[hw] === undefined ? 6 : FRC[hw];
+    const nm = roadName(f.properties);
+    let ni = -1;
+    if (nm) {
+      ni = byName.get(nm);
+      if (ni === undefined) { ni = names.length; names.push(nm); byName.set(nm, ni); }
+      named++;
+    }
     ways++;
     const c = f.geometry.coordinates;
     points += c.length;
@@ -108,11 +155,11 @@ function graphFromGeoJSON(fc, opt) {
       const key = prev < cur ? prev + '-' + cur : cur + '-' + prev;
       if (seen.has(key)) { dups++; prev = cur; continue; }
       seen.add(key);
-      edges.push({ a: prev, b: cur, frc });
+      edges.push({ a: prev, b: cur, frc, name: ni });
       prev = cur;
     }
   }
-  return { nodes, edges, ways, points, loops, dups };
+  return { nodes, edges, names, ways, points, loops, dups, named };
 }
 
 // --- нарезка на блоки ---------------------------------------------------------
@@ -147,9 +194,10 @@ function layout(graph, groups, attrIdx) {
   groups.forEach((g, bi) => g.forEach((n, k) => { blockOf[n] = bi; localOf[n] = k; }));
 
   const recs = groups.map((g) => g.map(() => ({ vecs: [], backs: [] })));
+  const place = new Array(graph.edges.length);   // где лежит запись ребра
   let local = 0, cross = 0;
 
-  for (const e of graph.edges) {
+  graph.edges.forEach((e, ei) => {
     const idx = attrIdx[e.frc] === undefined ? attrIdx[6] : attrIdx[e.frc];
     const ba = blockOf[e.a], bb = blockOf[e.b];
     const la = localOf[e.a], lb = localOf[e.b];
@@ -164,8 +212,34 @@ function layout(graph, groups, attrIdx) {
       recs[bb][lb].backs.push({ crossBlock: ba, node: la, at: pos });
       cross++;
     }
-  }
-  return { blockOf, localOf, recs, local, cross };
+    place[ei] = { block: ba, node: la, pos: recs[ba][la].vecs.length - 1 };
+  });
+  return { blockOf, localOf, recs, place, local, cross };
+}
+
+// Связь «имя -> дорога» для ZE-NAMEN: на каждое имя список { block, recs }.
+// Номер записи — тот же, по которому её находит движок: `first` узла плюс
+// позиция записи у этого узла (векторы идут раньше встречных ссылок).
+function nameRefs(graph, lay, firsts, blockCount) {
+  const per = new Map(), place = new Array(graph.edges.length);
+  graph.edges.forEach((e, ei) => {
+    if (e.name < 0) return;
+    const p = lay.place[ei];
+    const rec = firsts[p.block].first[p.node] + p.pos;
+    place[ei] = { block: p.block, rec };
+    if (!per.has(e.name)) per.set(e.name, new Map());
+    const m = per.get(e.name);
+    if (!m.has(p.block)) m.set(p.block, new Set());
+    m.get(p.block).add(rec);
+  });
+  // порядок у завода: блоки и номера записей по возрастанию, без повторов
+  const refs = graph.names.map((_, i) => {
+    const m = per.get(i);
+    if (!m) return null;
+    return [...m.keys()].sort((a, b) => a - b)
+      .map((block) => ({ block, recs: [...m.get(block)].sort((a, b) => a - b) }));
+  });
+  return { refs, blocks: blockCount, place };
 }
 
 // Номера записей: у узла столько номеров, сколько у него записей, счёт с
@@ -217,9 +291,22 @@ function buildBlocks(graph, opt) {
       blocks.push(blk);
     }
     if (over) { maxNodes = Math.floor(maxNodes * 0.7); continue; }
-    return { blocks, groups, local: lay.local, cross: lay.cross, maxNodes };
+    return { blocks, groups, local: lay.local, cross: lay.cross, maxNodes,
+             names: nameRefs(graph, lay, firsts, groups.length) };
   }
   throw new Error('блоки не удалось уложить в потолки даже после деления');
+}
+
+// Список имён для раздела ZE-NAMEN: имена отсортированы (движок ищет по ключам
+// двоичным поиском), а списки блоков переставлены вместе с ними. `extra` —
+// имена без своей геометрии: страна, области, города; они идут в тот же список
+// и попадают в дерево ZE-NAMEN-MMI.
+function zenModel(graph, built, extra) {
+  const rows = graph.names.map((name, i) => ({ name, refs: built.names.refs[i] }));
+  for (const name of extra || []) rows.push({ name: latinize(name), refs: null });
+  rows.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  return { names: rows.map((r) => r.name), refs: rows.map((r) => r.refs),
+           blocks: built.names.blocks };
 }
 
 // Блоки -> файл тайла. Раздел ZF-NAMEN обязателен по реестру, но может быть
@@ -282,6 +369,40 @@ function verify(file, graph) {
            sections: xac.sections(file).complete, outside };
 }
 
+// Сверка связи «имя -> дорога»: каждая ссылка обязана попасть в запись-вектор
+// того же блока, и концы этой записи обязаны совпасть с концами ребра, от
+// которого ссылка взялась. Читаем собранный файл своими читателями.
+//
+// У межблочной записи дальний конец нашим читателем не разрешается — номер
+// узла в ней относится к ДРУГОМУ блоку, — поэтому у таких записей сверяем
+// только ближний конец и считаем их отдельно.
+function verifyNames(file, graph, built) {
+  const xac = require('./xac');
+  const blocks = xac.sections(file).list.filter((s) => s.name === 'VEKTORBLOCK')
+    .map((s) => file.subarray(s.offset, s.offset + s.total));
+  const byBlock = blocks.map((b) => {
+    const m = new Map();
+    for (const e of xv.blockEdges(b, { keepCross: true })) m.set(e.idx, e);
+    return m;
+  });
+  // чего ждём: ребро -> (блок, номер записи)
+  let total = 0, hit = 0, coords = 0, cross = 0, missing = 0;
+  graph.edges.forEach((e, ei) => {
+    if (e.name < 0) return;
+    const p = built.names.place[ei];
+    if (!p) { missing++; return; }
+    total++;
+    const rec = byBlock[p.block] && byBlock[p.block].get(p.rec);
+    if (!rec) return;
+    hit++;
+    const a = graph.nodes[e.a], b = graph.nodes[e.b];
+    const same = (u, v) => u.x === v.x && u.y === v.y;
+    if (rec.cross) { cross++; if (same(rec.a, a)) coords++; }
+    else if ((same(rec.a, a) && same(rec.b, b)) || (same(rec.a, b) && same(rec.b, a))) coords++;
+  });
+  return { total, hit, coords, cross, missing };
+}
+
 // --- всё вместе ---------------------------------------------------------------
 
 function convert(geojson, opt) {
@@ -292,11 +413,15 @@ function convert(geojson, opt) {
   if (!graph.nodes.length) throw new Error('в наборе дорог нет ни одной точки');
   const built = buildBlocks(graph, Object.assign({}, o, { attrIdx }));
   const file = buildTileFile(built.blocks, o);
-  return { file, graph, built, check: verify(file, graph) };
+  const zen = zenModel(graph, built, o.places);
+  return { file, graph, built, zen,
+           check: verify(file, graph),
+           namecheck: verifyNames(file, graph, built) };
 }
 
 module.exports = { convert, graphFromGeoJSON, splitNodes, layout, buildBlocks,
-                   buildTileFile, verify, attrByFrc, setAttributes, FRC };
+                   buildTileFile, verify, verifyNames, nameRefs, zenModel,
+                   latinize, roadName, attrByFrc, setAttributes, FRC };
 
 if (require.main === module) {
   const args = process.argv.slice(2);
@@ -333,11 +458,30 @@ if (require.main === module) {
     console.log('сверка: рёбер в тайле ' + c.got + ', из графа нашлось ' + c.found + ' из ' + c.want +
       ' (' + (100 * c.found / c.want).toFixed(4) + ' %), не разобрано ссылок ' + c.unresolved +
       ', узлов вне рамки блока ' + c.outside);
+    const n = r.namecheck;
+    console.log('имена: дорог с именем ' + g.named + ' -> разных имён ' + r.zen.names.length +
+      ', ссылок «имя -> дорога» ' + n.total + ', попали в запись ' + n.hit +
+      ', концы совпали ' + n.coords + ' (межблочных записей ' + n.cross + ')');
     console.log('за ' + ((Date.now() - t0) / 1000).toFixed(1) + ' с');
   }
   if (out) {
     fs.mkdirSync(path.dirname(out), { recursive: true });
     fs.writeFileSync(out, r.file);
     console.log('записано: ' + out);
+  }
+  const zenOut = flag('zen');
+  if (zenOut) {
+    const zen = require('./zenamen');
+    const sec = zen.buildSection({ names: r.zen.names, refs: r.zen.refs,
+                                   blocks: r.zen.blocks, version: 2, label: 'ZE-NAMEN',
+                                   country: Number(flag('country', 113)) });
+    fs.mkdirSync(path.dirname(zenOut), { recursive: true });
+    fs.writeFileSync(zenOut, sec);
+    const back = zen.allNames(sec), gr = zen.refGroups(sec);
+    console.log('раздел ZE-NAMEN: ' + sec.length + ' байт, имён ' + back.names.length +
+      ', поток съеден ' + (back.end === back.len ? 'ровно' : 'НЕ РОВНО') +
+      ', групп ' + (gr ? gr.groups.length : 0) +
+      ', область ссылок ' + (gr && !gr.err && gr.end === gr.len ? 'съедена ровно' : 'СБОЙ'));
+    console.log('записано: ' + zenOut);
   }
 }

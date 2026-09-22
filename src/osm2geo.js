@@ -32,7 +32,15 @@ function convert(src, max) {
     if (parts.length > 1) split_++;
     for (const p of parts) features.push({
       type: 'Feature',
-      properties: { id: w.id, highway: (w.tags || {}).highway || null, ref: (w.tags || {}).ref || null },
+      properties: {
+        id: w.id,
+        highway: (w.tags || {}).highway || null,
+        ref: (w.tags || {}).ref || null,
+        // имена нужны разделу ZE-NAMEN: латиница предпочтительнее греческого
+        name: (w.tags || {}).name || null,
+        name_en: (w.tags || {})['name:en'] || null,
+        int_name: (w.tags || {}).int_name || null,
+      },
       geometry: { type: 'LineString', coordinates: p },
     });
   }

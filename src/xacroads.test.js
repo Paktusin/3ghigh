@@ -156,3 +156,85 @@ test('пустой набор дорог отвергается не молча'
   assert.throws(() => xr.convert({ type: 'FeatureCollection', features: [] },
     { attr: attrTable() }), /нет ни одной точки/);
 });
+
+// ---------------------------------------------------------------------------
+// Имена и связь «имя -> дорога».
+
+// Дорога с именем.
+function named(pts, highway, props) {
+  const f = way(pts, highway);
+  Object.assign(f.properties, props);
+  return f;
+}
+
+test('имена: греческое переводится на латиницу, латинское предпочитается', () => {
+  assert.equal(xr.latinize('Λεωφόρος Καρύων'), 'LEOFOROS KARYON');
+  assert.equal(xr.latinize('Archi. Makariou III'), 'ARCHI. MAKARIOU III');
+  assert.equal(xr.latinize('  Ledra   Street  '), 'LEDRA STREET');
+  assert.equal(xr.roadName({ name: 'Λεωφόρος Καρύων', name_en: 'Leoforos Karion' }),
+    'LEOFOROS KARION', 'name:en важнее');
+  assert.equal(xr.roadName({ name: 'Λεωφόρος Καρύων' }), 'LEOFOROS KARYON');
+  assert.equal(xr.roadName({}), null, 'дорога без имени — без имени');
+});
+
+test('имена: одинаковые имена сводятся в одно, разные считаются', () => {
+  const fc = { type: 'FeatureCollection', features: [
+    named([[33.0, 35.0], [33.002, 35.0]], 'primary', { name: 'Ledra Street' }),
+    named([[33.002, 35.0], [33.004, 35.0]], 'primary', { name: 'Ledra Street' }),
+    named([[33.0, 35.002], [33.002, 35.002]], 'primary', { name: 'Griva Digeni' }),
+    way([[33.0, 35.004], [33.002, 35.004]], 'primary'),
+  ] };
+  const g = xr.graphFromGeoJSON(fc, {});
+  assert.deepEqual(g.names, ['LEDRA STREET', 'GRIVA DIGENI']);
+  assert.equal(g.named, 3, 'три дороги с именем');
+  assert.deepEqual(g.edges.map((e) => e.name), [0, 0, 1, -1]);
+});
+
+test('связь «имя -> дорога»: ссылка попадает в запись с теми же концами', () => {
+  const fc = { type: 'FeatureCollection', features: [] };
+  // сетка, где каждая горизонталь — своя улица
+  for (let y = 0; y < 5; y++) {
+    fc.features.push(named(
+      Array.from({ length: 6 }, (_, x) => [33.0 + x * 0.002, 35.0 + y * 0.002]),
+      'primary', { name: 'STREET ' + y }));
+  }
+  for (let x = 0; x < 6; x++) {
+    fc.features.push(way(Array.from({ length: 5 }, (_, y) => [33.0 + x * 0.002, 35.0 + y * 0.002]),
+      'primary'));
+  }
+  const r = xr.convert(fc, { attr: attrTable(), code: 'CY00', country: 113 });
+  const n = r.namecheck;
+  assert.ok(n.total > 0, 'ссылки вообще есть');
+  assert.equal(n.missing, 0, 'у каждого именованного ребра есть место');
+  assert.equal(n.hit, n.total, 'каждая ссылка попала в запись-вектор');
+  assert.equal(n.coords, n.total, 'концы записи совпали с концами ребра');
+});
+
+test('модель ZE-NAMEN: имена отсортированы, списки блоков переставлены с ними', () => {
+  const fc = { type: 'FeatureCollection', features: [
+    named([[33.0, 35.0], [33.002, 35.0]], 'primary', { name: 'Zeta' }),
+    named([[33.002, 35.0], [33.004, 35.0]], 'primary', { name: 'Alpha' }),
+  ] };
+  const r = xr.convert(fc, { attr: attrTable(), code: 'CY00', country: 113,
+                             places: ['Lefkosia'] });
+  assert.deepEqual(r.zen.names, ['ALPHA', 'LEFKOSIA', 'ZETA'], 'по возрастанию');
+  assert.equal(r.zen.refs[1], null, 'у города своей геометрии нет');
+  assert.ok(r.zen.refs[0] && r.zen.refs[2], 'у улиц ссылки есть');
+
+  // модель -> раздел -> обратно
+  const zen = require('./zenamen');
+  const sec = zen.buildSection({ names: r.zen.names, refs: r.zen.refs,
+                                 blocks: r.zen.blocks, version: 2, label: 'ZE-NAMEN' });
+  const back = zen.allNames(sec), gr = zen.refGroups(sec);
+  assert.deepEqual(back.names, r.zen.names);
+  assert.equal(back.end, back.len, 'поток съеден ровно');
+  assert.equal(gr.err, null);
+  assert.equal(gr.end, gr.len, 'область ссылок съедена ровно');
+  assert.equal(gr.groups.length, r.zen.blocks, 'группа на каждый блок');
+  const seen = new Map();
+  for (const g of gr.groups) for (const nm of g.names) seen.set(nm.nid + '@' + g.block, nm.recs.join(','));
+  let pairs = 0;
+  r.zen.refs.forEach((list, nid) => { if (!list) return;
+    for (const g of list) { pairs++; assert.equal(seen.get(nid + '@' + g.block), g.recs.join(',')); } });
+  assert.ok(pairs > 0);
+});
