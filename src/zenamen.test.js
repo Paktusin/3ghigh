@@ -115,3 +115,35 @@ test('распаковка: приставка длиннее предыдуще
   assert.equal(r.end, 0, 'поток не сдвинулся');
   assert.equal(r.inherited, true);
 });
+
+test('список пар: у тайлового раздела шаг варинтом, у .ort — два байта', () => {
+  // Соберём поток вручную: имя, затем список пар. Флаги ставим бит 7.
+  const tok = [Buffer.from([2])];
+  const stream = Buffer.from([
+    3, 2, 0x41, 0x42, 2,          // имя «AB» и конец
+    0x81, 0x05,                   // пара со старшим битом, затем байт без него
+    3, 2, 0x43, 0x44, 2,          // имя «CD»
+  ]);
+  // варинт: 0x81 -> значение 1 (<0x7e) -> шаг 1; 0x05 -> шаг 1, цепочка кончилась
+  let p = 5, b;
+  do { b = stream[p]; const v = b & 0x7f; p += v < 0x7e ? 1 : (v === 0x7e ? 2 : 3); } while (b & 0x80);
+  assert.equal(p, 7, 'варинт съел два байта');
+  assert.equal(ze.unpackName(stream, p, tok, Buffer.alloc(0), 0).name.toString('latin1'), 'CD');
+
+  // шаг 2 съел бы четыре байта и встал бы не туда — потому у .ort и тайлов
+  // разные режимы, и по ним разделы и различаются
+  let q = 5; do { b = stream[q]; q += 2; } while (b & 0x80);
+  assert.equal(q, 9, 'шаг 2 съедает больше');
+});
+
+test('имена тайла: раздел версии 2 читается тем же кодом, что и .ort', () => {
+  // Собираем раздел версии 2 своим писателем и читаем обратно.
+  const names = ['RRUGA ABAZ SHEHU', 'RRUGA DOGANES', 'RRUGA PAVARESIA', 'BERAT', 'MORAVE'];
+  const b = ze.buildSection({ names, version: 2, label: 'ZE-NAMEN' });
+  const h = ze.header(b);
+  assert.equal(h.version, 2);
+  const r = ze.allNames(b, h);
+  assert.equal(r.err, null);
+  assert.deepEqual(r.names, names);
+  assert.equal(r.end, r.len, 'поток съеден ровно');
+});

@@ -193,9 +193,13 @@ function mmiBuildTree(rows) {
 //   биты 0…4  длина приставки, наследуемой от ПРЕДЫДУЩЕГО имени
 //   бит 6     после тела имени лежит поле: 2 байта, а при числе имён
 //             больше 65 536 — 3 (порог `DAT_082797fc` = 0x10000)
-//   бит 7     после него список пар, кончающийся байтом без старшего бита;
-//             шаг пары 2 байта (в прошивке есть ещё варианты по 1…3 и по 3,
-//             они выбираются полем структуры; в наборе встречается только 2)
+//   бит 7     после него список пар, кончающийся байтом без старшего бита.
+//             Шаг пары прошивка выбирает полем структуры (`param_2[2] & 0xf0000000`):
+//             0x80000000 — «варинт» (1…3 байта по правилу 7E/7F), 0 — по два
+//             байта, 0x10000000 — по три. В наборе встречаются два первых, и
+//             различает их вид раздела: у тайловых `ZE-NAMEN` (версия 2) —
+//             варинт, у файлов `ORTSNAMEN` (версия 3) — ровно два байта.
+//             Это и было последним, обо что спотыкался разбор тайлов.
 //
 // И вторая тонкость, без которой поток не сходится: копируя приставку,
 // распаковщик останавливается, если наткнулся на НОЛЬ предыдущего имени, —
@@ -247,9 +251,12 @@ function unpackName(stream, p, tok, prev, prefix) {
 }
 
 // Все имена раздела подряд. Возвращает { names, end, err }.
-function allNames(d, h) {
+// `opt.pairs` — шаг списка пар: 'varint', 2 или 3; по умолчанию выбирается
+// по версии раздела, как в наборе.
+function allNames(d, h, opt) {
   h = h || header(d);
   if (!h) return null;
+  const pairs = (opt && opt.pairs) || (h.version === 3 ? 2 : 'varint');
   const tok = tokens(d, h);
   const stream = d.subarray(h.stream.off, h.stream.off + h.stream.len);
   const wide = h.index.names > 0x10000;
@@ -262,7 +269,15 @@ function allNames(d, h) {
     if (r.err) return { names, end: p, err: 'имя ' + i + ': ' + r.err };
     let q = r.end;
     if (flags & 0x40) q += wide ? 3 : 2;
-    if (flags & 0x80) { let b; do { b = stream[q]; q += 2; } while (b !== undefined && (b & 0x80)); }
+    if (flags & 0x80) {
+      let b;
+      do {
+        b = stream[q];
+        if (b === undefined) break;
+        if (pairs === 'varint') { const v = b & 0x7f; q += v < 0x7e ? 1 : (v === 0x7e ? 2 : 3); }
+        else q += pairs;
+      } while (b & 0x80);
+    }
     names.push(r.name.toString('latin1'));
     prev = Buffer.concat([r.name, Buffer.from([0])]);
     p = q;
