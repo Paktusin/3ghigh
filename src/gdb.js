@@ -322,22 +322,41 @@ function tileHeader(g, off, size) {
   };
 }
 
-// Привязка координат (см. README «Привязка координат»): сетка равнопромежуточная.
+// ── Привязка координат ─────────────────────────────────────────────────────
+//
+// Система координат у GDB ОБЩАЯ С XAC (docs/formats/xac.md): равнопромежуточная
+// цилиндрическая, долгота = X / 72 000, широта = Y / (40 000 000 / 360). Там
+// она выведена по микрогосударствам и проверена на Ватикане с точностью около
+// 100 метров.
+//
+// Отсчёт ячеек идёт ОТ РАМКИ КАРТЫ (шапка +0x14), а не от нуля: прошивка
+// считает номер кластера как `(мировая − рамка.min) / (cell << pot)`
+// (FUN_08cb2bf4), а начало тайла — как `кластер.x0 + местная_ячейка * cellX`
+// (CGdbCluster::berechne_kachel_bereich, FUN_08cafc18). Отсюда
+//
+//     мировая_x = рамка.x0 + ячейка_x * cellX      долгота = мировая_x / 72 000
+//     мировая_y = рамка.y0 + ячейка_y * cellY      широта  = мировая_y / 111 111,1
+//
+// Прежняя калибровка (`11264 + 93,1·долгота`, `934 + 181,8·широта`) была
+// выведена по меткам стран за краем покрытия и рамку не учитывала; по широте
+// она ошибалась почти на градус. Сверка на 36 городах Европы: у новой привязки
+// у всех 36 в пределах ±0,6° лежит тайл толще 25 КБ (центр города), у прежней —
+// у 27, а медиана промаха вдвое меньше (25 км против 50 при размере тайла
+// 26×18 км). Средний промах новой: −0,3 км по долготе, +2,3 км по широте.
 const CELL_X = 789, CELL_Y = 546;                  // размер ячейки L0 в мировых единицах
-const lonOfCell = cx => (cx - 11264) / 93.1;
-const latOfCell = cy => (cy - 934) / 181.8;
-// Калибровка «градусы ↔ ячейка» для ЛЮБОГО уровня. Мировая единица общая для
-// всех уровней, отличается только размер ячейки:
-//     мировые_x = 73 455,9·долгота + 8 887 296
-//     мировые_y = 99 262,8·широта  +   509 964
-// У L0 (cellX 789, cellY 546) это в точности прежние 11264 + 93,1·lon и
-// 934 + 181,8·lat, на которых стоит вся привязка Кипра.
-const UNITS_PER_LON = CELL_X * 93.1, UNITS_PER_LAT = CELL_Y * 181.8;
-const ORIGIN_X = 11264 * CELL_X, ORIGIN_Y = 934 * CELL_Y;
-const cellOfLon = (lon, cellX) => (ORIGIN_X + UNITS_PER_LON * lon) / (cellX || CELL_X);
-const cellOfLat = (lat, cellY) => (ORIGIN_Y + UNITS_PER_LAT * lat) / (cellY || CELL_Y);
-const lonOfCellL = (cx, cellX) => (cx * (cellX || CELL_X) - ORIGIN_X) / UNITS_PER_LON;
-const latOfCellL = (cy, cellY) => (cy * (cellY || CELL_Y) - ORIGIN_Y) / UNITS_PER_LAT;
+const UNITS_PER_LON = 72000, UNITS_PER_LAT = 40000000 / 360;
+// рамка набора EJ211 (шапка +0x14). У другого набора она своя, поэтому все
+// функции принимают её отдельными аргументами, а эти числа — значения по умолчанию.
+const FRAME_X0 = -8978432, FRAME_Y0 = -196608;
+
+// градусы ↔ ячейка уровня (cellX/cellY из заголовка уровня; у L0 — 789/546)
+const lonOfCellL = (cx, cellX, fx) => ((fx === undefined ? FRAME_X0 : fx) + cx * (cellX || CELL_X)) / UNITS_PER_LON;
+const latOfCellL = (cy, cellY, fy) => ((fy === undefined ? FRAME_Y0 : fy) + cy * (cellY || CELL_Y)) / UNITS_PER_LAT;
+const cellOfLon = (lon, cellX, fx) => (lon * UNITS_PER_LON - (fx === undefined ? FRAME_X0 : fx)) / (cellX || CELL_X);
+const cellOfLat = (lat, cellY, fy) => (lat * UNITS_PER_LAT - (fy === undefined ? FRAME_Y0 : fy)) / (cellY || CELL_Y);
+// короткие формы для L0
+const lonOfCell = cx => lonOfCellL(cx, CELL_X);
+const latOfCell = cy => latOfCellL(cy, CELL_Y);
 
 // Точки последнего элемента тайла. Проверено на береговой линии Кипра: узор
 //   1d <u32 Y> <u8 N> 8f 00 00 00 00   затем ровно N × u32
@@ -419,7 +438,7 @@ function roundTrip(g, off, size) {
 module.exports = {
   openGdb, openBuffer, read, header, levelHead, locateTable, levelGrid, slotFor, cluster,
   tileHeader, tilePoints, encodePoints, roundTrip, lonOfCell, latOfCell,
-  CELL_X, CELL_Y, TILE_HEAD, TABLE_AT, LEVEL_SHIFT_AT, gridW, keyOrigin,
+  CELL_X, CELL_Y, TILE_HEAD, TABLE_AT, LEVEL_SHIFT_AT, FRAME_X0, FRAME_Y0, gridW, keyOrigin,
   cellOfLon, cellOfLat, lonOfCellL, latOfCellL, UNITS_PER_LON, UNITS_PER_LAT,
 };
 

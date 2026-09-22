@@ -75,8 +75,8 @@ function s2string(name) {
   const s = Buffer.from(name.slice(0, 15), 'latin1');
   return Buffer.concat([Buffer.from([s.length]), s]);
 }
-const cellX = lon => 11264 + 93.1 * lon;
-const cellY = lat => 934 + 181.8 * lat;
+const cellX = lon => gm.cellOfLon(lon, gm.CELL_X);
+const cellY = lat => gm.cellOfLat(lat, gm.CELL_Y);
 
 // разложить ломаные по тайлам: дорога целиком уходит в тайл своей первой точки.
 // Координаты за границей тайла допустимы — x это u16, y это i16, запаса хватает.

@@ -369,8 +369,10 @@ function build(spec) {
 // ── укладка дорог ──────────────────────────────────────────────────────────
 
 const TILE_CELLS = 32;                                  // тайл L0 по умолчанию — 32×32 ячейки
-const cellX = lon => 11264 + 93.1 * lon;                // калибровка из docs/formats/gdb.md
-const cellY = lat => 934 + 181.8 * lat;
+// Калибровка — общая с XAC и с отсчётом от рамки карты, см. gm.cellOfLon
+// (docs/formats/gdb.md, «Привязка вскрыта: система координат общая с XAC»).
+const cellX = lon => gm.cellOfLon(lon, gm.CELL_X);
+const cellY = lat => gm.cellOfLat(lat, gm.CELL_Y);
 
 // Ячейка уровня по градусам: мировая единица у всех уровней общая, меняется
 // только размер ячейки. У L0 (789×546) это в точности прежние cellX/cellY.

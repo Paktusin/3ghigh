@@ -8,8 +8,10 @@
 // элемента не меняется, и правка делается строго на месте: ни одно смещение в
 // заголовке тайла, в таблице кластеров и в томах трогать не нужно.
 //
-// Координаты задаются в градусах и переводятся по калибровке из README:
-//     клетка_X = 11264 + 93,1·долгота      клетка_Y = 934 + 181,8·широта
+// Координаты задаются в градусах и переводятся по калибровке gm.cellOfLon /
+// gm.cellOfLat (общая с XAC, отсчёт от рамки карты):
+//     мировая = рамка.min + клетка·cell,  долгота = мировая/72000,
+//     широта = мировая/111111,1           (docs/formats/gdb.md)
 //
 //   node src/gdbwrite.js maps --tile <смещение>:<размер> --cell <cx>,<cy> \
 //        --road "33.30,35.40 33.40,35.45 ..."   [--apply <файл.gdb>]
@@ -24,8 +26,8 @@ const dataset = require('./dataset');
 
 // градусы → мировые единицы относительно начала тайла
 function degToTile(lon, lat, tcx, tcy) {
-  const cellX = 11264 + 93.1 * lon;
-  const cellY = 934 + 181.8 * lat;
+  const cellX = gm.cellOfLon(lon, gm.CELL_X);     // привязка общая с XAC, отсчёт от рамки
+  const cellY = gm.cellOfLat(lat, gm.CELL_Y);
   return {
     x: Math.round((cellX - tcx) * gm.CELL_X),
     y: Math.round((cellY - tcy) * gm.CELL_Y),

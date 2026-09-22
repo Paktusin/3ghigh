@@ -79,12 +79,14 @@ test('сетка: слот считается с учётом добавки у�
   assert.notEqual((y >> hd.potY) * 27 + (x >> hd.potX), cy * 27 + cx);
 });
 
-test('калибровка: поуровневая совпадает с прежней на L0 и обратима', () => {
+test('калибровка: система координат общая с XAC, отсчёт от рамки, перевод обратим', () => {
+  // мировая = рамка.min + ячейка*cell, долгота = мировая/72000, широта = мировая/111111,1
+  const FX = gm.FRAME_X0, FY = gm.FRAME_Y0, UL = 72000, UT = 40000000 / 360;
   for (const lon of [-10, 0, 12.5, 33.36]) {
-    assert.ok(Math.abs(gm.cellOfLon(lon, 789) - (11264 + 93.1 * lon)) < 1e-6, 'долгота ' + lon);
+    assert.ok(Math.abs(gm.cellOfLon(lon, 789) - (lon * UL - FX) / 789) < 1e-6, 'долгота ' + lon);
   }
   for (const lat of [35.17, 48.86, 60]) {
-    assert.ok(Math.abs(gm.cellOfLat(lat, 546) - (934 + 181.8 * lat)) < 1e-6, 'широта ' + lat);
+    assert.ok(Math.abs(gm.cellOfLat(lat, 546) - (lat * UT - FY) / 546) < 1e-6, 'широта ' + lat);
   }
   // на грубом уровне ячейка другая, но перевод туда-обратно сходится
   for (const L of G.EUROPE_LEVELS) {
@@ -138,7 +140,7 @@ test('точки: больше 254 не кодируются — счётчик 
 
 test('точки: перевод клетки в градусы обратим', () => {
   const lon = 33.37, lat = 35.17;
-  const cx = 11264 + 93.1 * lon, cy = 934 + 181.8 * lat;
+  const cx = gm.cellOfLon(lon, gm.CELL_X), cy = gm.cellOfLat(lat, gm.CELL_Y);
   assert.ok(Math.abs(gm.lonOfCell(cx) - lon) < 1e-9);
   assert.ok(Math.abs(gm.latOfCell(cy) - lat) < 1e-9);
 });
@@ -146,7 +148,9 @@ test('точки: перевод клетки в градусы обратим',
 // ── gdbwrite: правка на месте и наращивание ────────────────────────────────
 
 test('правка на месте: длина сохраняется, координаты меняются', () => {
-  const tcx = 14336, tcy = 7392;
+  // начало тайла берём по калибровке: 33,3°E 35,2°N лежит в этом тайле L0
+  const tcx = Math.floor(gm.cellOfLon(33.30, gm.CELL_X) / 32) * 32;
+  const tcy = Math.floor(gm.cellOfLat(35.20, gm.CELL_Y) / 32) * 32;
   const deg = [[33.30, 35.20], [33.33, 35.22], [33.36, 35.25]];
   const was = deg.map(([lo, la]) => gw.degToTile(lo, la, tcx, tcy));
   const { g, size } = tileVolume([{ points: was, name: 'A1' }]);
@@ -202,7 +206,9 @@ test('наращивание: блоб больше 64 КБ отвергаетс
 // ── gdbroads: набор дорог с записями реестра ───────────────────────────────
 
 test('дороги: каждая получает запись в S1 и имя в S2', () => {
-  const tcx = 14336, tcy = 7392;
+  // начало тайла берём по калибровке: 33,3°E 35,2°N лежит в этом тайле L0
+  const tcx = Math.floor(gm.cellOfLon(33.30, gm.CELL_X) / 32) * 32;
+  const tcy = Math.floor(gm.cellOfLat(35.20, gm.CELL_Y) / 32) * 32;
   const { g, size } = tileVolume([]);                        // пустой тайл, как у морской клетки
   const lines = [
     { name: 'A1', pts: [[33.30, 35.20], [33.31, 35.21]] },
@@ -239,7 +245,9 @@ test('дороги: раскладка по тайлам — по первой �
 });
 
 test('дороги: собранный тайл читается штатным читателем', () => {
-  const tcx = 14336, tcy = 7392;
+  // начало тайла берём по калибровке: 33,3°E 35,2°N лежит в этом тайле L0
+  const tcx = Math.floor(gm.cellOfLon(33.30, gm.CELL_X) / 32) * 32;
+  const tcy = Math.floor(gm.cellOfLat(35.20, gm.CELL_Y) / 32) * 32;
   const { g, size } = tileVolume([]);
   const deg = [[33.30, 35.20], [33.31, 35.21], [33.32, 35.215]];
   const r = gr.buildTile(g, 0, size, [{ name: 'A1', pts: deg }], tcx, tcy);
