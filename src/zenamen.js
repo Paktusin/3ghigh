@@ -41,11 +41,15 @@ const KEY = 8;
 const TOK = 10;        // запись таблицы токенов
 const STRIDE = 16;     // ключ на каждое шестнадцатое имя
 
+// Версия 2 — раздел ZE-NAMEN внутри тайла, версия 3 — файл ORTSNAMEN (.ort):
+// раскладка у них одна и та же, у .ort в поле +0x16 лежит номер страны.
 function header(d) {
-  if (d.length < 0x64 || d.readUInt16BE(0x14) !== 2) return null;
+  if (d.length < 0x64) return null;
+  const v = d.readUInt16BE(0x14);
+  if (v !== 2 && v !== 3) return null;
   const u = (o) => d.readUInt32BE(o);
   return {
-    version: d.readUInt16BE(0x14), keys: u(0x18),
+    version: v, country: d.readUInt16BE(0x16), keys: u(0x18),
     index:  { off: u(0x1c), len: u(0x20), names: u(0x24) },
     perName:{ off: u(0x28), len: u(0x2c), tokens: u(0x30) },
     tokens: { off: u(0x34), len: u(0x38), names: u(0x3c) },
@@ -174,10 +178,182 @@ function mmiBuildTree(rows) {
   return out;
 }
 
+
+// ---------------------------------------------------------------------------
+// Раскладка имён МЕЖДУ ключами: разгадана по FUN_08279190 и FUN_08279074.
+//
+// Ключевое место, которое раньше не давалось: **байт флагов имени — это
+// МЛАДШИЙ байт слова на имя** из области `+0x28`, а старший байт держит два
+// номера «частей» (нибблами). В кадре читателя этот байт адресуется парой
+// указателей `A` и `A+1`, обе идут по области с шагом 2 на имя, и начинаются
+// с `база + (первое имя блока) * 2` — отсюда и «указатель, который готовит не
+// тело функции».
+//
+// Байт флагов:
+//   биты 0…4  длина приставки, наследуемой от ПРЕДЫДУЩЕГО имени
+//   бит 6     после тела имени лежит поле: 2 байта, а при числе имён
+//             больше 65 536 — 3 (порог `DAT_082797fc` = 0x10000)
+//   бит 7     после него список пар, кончающийся байтом без старшего бита;
+//             шаг пары 2 байта (в прошивке есть ещё варианты по 1…3 и по 3,
+//             они выбираются полем структуры; в наборе встречается только 2)
+//
+// И вторая тонкость, без которой поток не сходится: копируя приставку,
+// распаковщик останавливается, если наткнулся на НОЛЬ предыдущего имени, —
+// и тогда тело из потока НЕ читается вовсе. Поэтому приставка длиннее
+// предыдущего имени означает «имя совпадает с предыдущим», и такие имена
+// занимают в потоке ноль байт.
+//
+// Проверка: 45 файлов `.ort` набора, 611 206 имён. У 41 файла поток съедается
+// РОВНО до последнего байта; оставшиеся четыре упираются в ветку «имя из
+// частей» (условие `(слово & 0xC0000000) == 0xC0000000`, отдельный читатель
+// `FUN_082855e8`), она не разобрана.
+
+// Распаковка одного имени: приставка от предыдущего плюс тело из потока.
+function unpackName(stream, p, tok, prev, prefix) {
+  const out = [];
+  for (let i = 0; i < prefix; i++) {
+    const b = i < prev.length ? prev[i] : 0;
+    if (b === 0) return { name: Buffer.from(out), end: p, inherited: true };
+    out.push(b);
+  }
+  while (p < stream.length) {
+    const c = stream[p++];
+    if (c === 1) {
+      const b = stream[p++];
+      if (b === 2) return { name: Buffer.from(out), end: p };
+      out.push(b);
+    } else if (c === 2) {
+      return { name: Buffer.from(out), end: p };
+    } else if (c === 3) {
+      let n = stream[p++];
+      if (n === 0) continue;                       // «серия из нуля» — пустой шаг
+      while (n-- > 0) {
+        const b = stream[p++];
+        if (b === 2) return { name: Buffer.from(out), end: p };
+        out.push(b);
+      }
+    } else if (c < 6) {
+      return { name: Buffer.from(out), end: p, err: 'код ' + c + ' на ' + (p - 1) };
+    } else {
+      const t = tok[c - 6];
+      if (!t || !t.length) return { name: Buffer.from(out), end: p, err: 'пустой токен ' + (c - 6) };
+      for (const b of t) {
+        if (b === 2) return { name: Buffer.from(out), end: p };
+        out.push(b);
+      }
+    }
+  }
+  return { name: Buffer.from(out), end: p, err: 'поток кончился' };
+}
+
+// Все имена раздела подряд. Возвращает { names, end, err }.
+function allNames(d, h) {
+  h = h || header(d);
+  if (!h) return null;
+  const tok = tokens(d, h);
+  const stream = d.subarray(h.stream.off, h.stream.off + h.stream.len);
+  const wide = h.index.names > 0x10000;
+  const names = [];
+  let p = 0, prev = Buffer.alloc(0);
+  for (let i = 0; i < h.index.names; i++) {
+    const flags = d[h.perName.off + i * 2 + 1];     // МЛАДШИЙ байт слова на имя
+    const prefix = (i % STRIDE === 0) ? 0 : (flags & 0x1f);
+    const r = unpackName(stream, p, tok, prev, prefix);
+    if (r.err) return { names, end: p, err: 'имя ' + i + ': ' + r.err };
+    let q = r.end;
+    if (flags & 0x40) q += wide ? 3 : 2;
+    if (flags & 0x80) { let b; do { b = stream[q]; q += 2; } while (b !== undefined && (b & 0x80)); }
+    names.push(r.name.toString('latin1'));
+    prev = Buffer.concat([r.name, Buffer.from([0])]);
+    p = q;
+  }
+  return { names, end: p, len: stream.length, err: null };
+}
+
+// ---------------------------------------------------------------------------
+// Писатель: список имён -> раздел (версия 2) или файл .ort (версия 3).
+//
+// Пишем самой простой формой, какую читает прошивка: тело имени — серия
+// литералов и явный конец, приставка берётся от предыдущего имени. Токены не
+// сочиняем: в таблицу кладём только нулевой («\x02» — он же конец имени),
+// остальные пустые. Так файл длиннее заводского, но читается тем же кодом.
+//
+// Ограничения раскладки, которые приходится соблюдать:
+//   * ключ стоит на каждом шестнадцатом имени, и у такого имени приставки нет;
+//   * приставка не длиннее 31 символа и не длиннее предыдущего имени —
+//     иначе распаковщик решит, что имя совпадает с предыдущим;
+//   * байт 0x02 внутри имени невозможен: он кончает имя.
+const HEAD = 0x64;              // конец шапки, дальше идут области
+
+function buildSection(spec) {
+  const names = spec.names.map((n) => Buffer.from(String(n), 'latin1'));
+  for (const n of names) if (n.includes(2)) throw new Error('имя содержит байт 0x02');
+  if (!names.length) throw new Error('пустой список имён');
+  const keyCount = Math.ceil(names.length / STRIDE);
+
+  // поток и слова на имя
+  const bodies = [], words = Buffer.alloc(names.length * 2);
+  const keyOff = new Array(keyCount).fill(0);
+  let at = 0, prev = Buffer.alloc(0);
+  names.forEach((n, i) => {
+    let prefix = 0;
+    if (i % STRIDE === 0) keyOff[i / STRIDE] = at;
+    else {
+      const max = Math.min(31, prev.length, n.length);
+      while (prefix < max && n[prefix] === prev[prefix]) prefix++;
+    }
+    const rest = n.subarray(prefix);
+    const body = Buffer.alloc(rest.length + 3);
+    body[0] = 3; body[1] = rest.length;             // серия литералов
+    rest.copy(body, 2);
+    body[body.length - 1] = 2;                      // конец имени
+    bodies.push(body);
+    words.writeUInt16BE(prefix & 0x1f, i * 2);      // старший байт (части) — ноль
+    at += body.length;
+    prev = n;
+  });
+  const stream = Buffer.concat(bodies);
+
+  // таблица токенов: 250 записей по 10 байт, нулевой — «\x02»
+  const tokTab = Buffer.alloc(TOK * 250);
+  tokTab[0] = 2;
+
+  const idxOff = HEAD;
+  const perOff = idxOff + keyCount * REC;
+  const tokOff = perOff + words.length;
+  const strOff = tokOff + tokTab.length;
+  const total = strOff + stream.length;
+
+  const out = Buffer.alloc(total);
+  out.write((spec.label || 'ORTSNAMEN').padEnd(16, ' '), 0, 16, 'latin1');
+  out.writeUInt32BE(total - 20, 0x10);
+  out.writeUInt16BE(spec.version === undefined ? 3 : spec.version, 0x14);
+  out.writeUInt16BE(spec.country || 0, 0x16);
+  out.writeUInt32BE(keyCount, 0x18);
+  out.writeUInt32BE(idxOff, 0x1c); out.writeUInt32BE(keyCount * REC, 0x20);
+  out.writeUInt32BE(names.length, 0x24);
+  out.writeUInt32BE(perOff, 0x28); out.writeUInt32BE(words.length, 0x2c);
+  out.writeUInt32BE(250, 0x30);
+  out.writeUInt32BE(tokOff, 0x34); out.writeUInt32BE(tokTab.length, 0x38);
+  out.writeUInt32BE(names.length, 0x3c);
+  out.writeUInt32BE(strOff, 0x40); out.writeUInt32BE(stream.length, 0x44);
+  // ключи: восемь байт текста и смещение имени в потоке
+  for (let k = 0; k < keyCount; k++) {
+    const n = names[k * STRIDE];
+    n.copy(out, idxOff + k * REC, 0, Math.min(KEY, n.length));
+    out.writeUInt32BE(keyOff[k], idxOff + k * REC + KEY);
+  }
+  words.copy(out, perOff);
+  tokTab.copy(out, tokOff);
+  stream.copy(out, strOff);
+  return out;
+}
+
 module.exports = { header, tokens, keys, perName, nameAt, checkKeys,
+  unpackName, allNames, buildSection,
   mmiHeader, mmiTree, mmiBuildTree, REC, KEY, TOK, STRIDE, MMI_REC };
 
-if (require.main === module) {
+if (require.main === module && process.argv[2] !== '--build-ort') {
   const fldb = require('./fldb');
   const db = fldb.open(process.argv[2] || 'maps/pkgdb/XAC/kN221EUx01_0.db');
   const step = Number(process.argv[3] || 1);
@@ -197,4 +373,27 @@ if (require.main === module) {
     secs, allKeys, okKeys, (100 * okKeys / allKeys).toFixed(2));
   console.log('разделов, где сошлись все ключи: %d; ключей ровно ceil(имён/16): %d', clean, strideOk);
   for (const x of bad) console.log('  ' + x);
+}
+
+if (require.main === module && process.argv[2] === '--build-ort') {
+  // node src/zenamen.js --build-ort <имена.json> <выход.ort> [--country 113]
+  // Файл имён — массив строк или {names:[...]}; имена сортируются, как у завода.
+  const fs = require('fs');
+  const src = process.argv[3], dst = process.argv[4];
+  const ci = process.argv.indexOf('--country');
+  if (!src || !dst) {
+    console.error('использование: node src/zenamen.js --build-ort <имена.json> <выход.ort> [--country 113]');
+    process.exit(1);
+  }
+  const j = JSON.parse(fs.readFileSync(src, 'utf8'));
+  const list = [...new Set((Array.isArray(j) ? j : j.names).map((s) => String(s).trim()))]
+    .filter(Boolean).sort();
+  const out = buildSection({ names: list, country: Number(ci > 0 ? process.argv[ci + 1] : 0), version: 3 });
+  fs.writeFileSync(dst, out);
+  const back = allNames(out);
+  console.log('имён ' + list.length + ', ключей ' + header(out).keys + ', файл ' + out.length + ' б');
+  console.log('чтение обратно: ' + back.names.length + ' имён, поток съеден ' + back.end + ' из ' + back.len +
+    (back.err ? ' ОШИБКА ' + back.err : '') +
+    ', совпало ' + back.names.filter((n, i) => n === list[i]).length + ' из ' + list.length);
+  console.log('записано: ' + dst);
 }
