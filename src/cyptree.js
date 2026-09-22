@@ -3,6 +3,7 @@
 //   node src/cyptree.js --plan        сколько листьев выйдет и куда они лягут
 //   node src/cyptree.js --build       собрать блоки в out/cyp/lit/
 //   node src/cyptree.js --check       обойти собранное дерево, как это делает прошивка
+//   node src/cyptree.js --lift        ещё и расширить рамки предков под весь Кипр
 //
 // Почему так можно. Дерево POI европейского набора Кипр уже накрывает, и спуск
 // к нему (`node src/litpoi.js --find 33 35`) приходит в узел (101170, 667):
@@ -25,7 +26,8 @@ const C = require('./cyppoi');
 
 const DEG = 40000000 / 360;
 const ROOT = { block: 112447, key: 0 };        // куда уже указывает родитель
-const PARENT = { block: 101170, key: 667 };    // сам родитель — его не трогаем
+const PARENT = { block: 101170, key: 667 };    // сам родитель
+const TREE = { block: 101099, key: 1 };        // корень всего дерева POI
 
 // Рамка набора точек в единицах карты.
 function bbox(pois) {
@@ -164,6 +166,63 @@ function build(pois, donors, opt) {
   return out;
 }
 
+// Цепочка узлов от корня дерева до нашего: на каждом — та половина, в которую
+// попадает точка. Рамки этой цепочки и есть потолок: точку вне любой из них
+// прошивка не найдёт, сколько её ни клади.
+function chain(get, from, x, y) {
+  let blk = from.block, key = from.key;
+  const out = [];
+  for (let d = 0; d < 64; d++) {
+    const g = get(blk), rec = g.elems[key + 1];
+    if (!rec || rec['#'] !== 0x22) break;
+    const box = (mn, mx) => ({ x0: g.origin.x + rec[mn][0], y0: g.origin.y + rec[mn][1],
+                               x1: g.origin.x + rec[mx][0], y1: g.origin.y + rec[mx][1] });
+    const A = box(0x61, 0x60), Bx = box(0x64, 0x63);
+    const has = (b) => x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1;
+    const half = has(A) ? 'A' : (has(Bx) ? 'B' : null);
+    if (!half) break;
+    const l = half === 'A' ? (rec[0x5f] || rec[0x79]) : (rec[0x62] || rec[0x7a]);
+    out.push({ blk: blk, key: key, half: half, box: half === 'A' ? A : Bx });
+    if (!Array.isArray(l)) break;
+    blk = l[0]; key = l[1];
+  }
+  return out;
+}
+
+// Расширить рамки цепочки так, чтобы они накрыли `box`. Рамка лежит УПАКОВАННОЙ
+// ПАРОЙ постоянной ширины, поэтому длина записи от значения не зависит: блок
+// выходит ровно того же размера, что и был, байт в байт кроме этих пар.
+// Рамки только расширяются — сузить чужую ветку мы не вправе.
+function lift(schema, blockOf, ch, box) {
+  const byBlk = new Map();
+  for (const c of ch) {
+    if (!byBlk.has(c.blk)) byBlk.set(c.blk, { model: null, keys: [] });
+    byBlk.get(c.blk).keys.push(c);
+  }
+  const out = new Map();
+  for (const [blk, v] of byBlk) {
+    const orig = blockOf(blk);
+    const m = B.readBlock(schema, orig, blk);
+    if (m.other.size) throw new Error('блок ' + blk + ': есть записи, которых писатель не знает');
+    for (const c of v.keys) {
+      const n = m.nodes[c.key];
+      if (!n) throw new Error('блок ' + blk + ': нет узла с ключом ' + c.key);
+      const mn = c.half === 'A' ? 'aMin' : 'bMin', mx = c.half === 'A' ? 'aMax' : 'bMax';
+      n[mn] = [Math.min(n[mn][0], box.x0 - m.origin.x), Math.min(n[mn][1], box.y0 - m.origin.y)];
+      n[mx] = [Math.max(n[mx][0], box.x1 - m.origin.x), Math.max(n[mx][1], box.y1 - m.origin.y)];
+      if (n[mn][0] < 0 || n[mn][1] < 0) throw new Error('блок ' + blk + ': рамка ушла за опору');
+      const cap = Math.pow(2, m.width);
+      if (n[mx][0] >= cap || n[mx][1] >= cap)
+        throw new Error('блок ' + blk + ': рамка не влезает в ширину ' + m.width);
+    }
+    const bytes = B.writeBlock(m, blk);
+    if (bytes.length !== orig.length)
+      throw new Error('блок ' + blk + ': размер изменился с ' + orig.length + ' на ' + bytes.length);
+    out.set(blk, bytes);
+  }
+  return out;
+}
+
 // Сбор листьев по рамке запроса — ровно то, что делает `getTilesInTree`:
 // на каждом узле сравниваются обе рамки, и обход идёт по КАЖДОЙ подошедшей,
 // а не по одной. Поэтому смыкающиеся рамки половин не беда: точка на границе
@@ -187,7 +246,8 @@ function collect(get, blk, key, q, out, depth) {
   return out;
 }
 
-module.exports = { plan, build, nodes, split, bbox, collect, ROOT, PARENT, DEG };
+module.exports = { plan, build, nodes, split, bbox, collect, chain, lift,
+                   ROOT, PARENT, DEG };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
@@ -221,19 +281,18 @@ if (require.main === module) {
     }
   })(101169, 786, 0);
 
+  const LIFT = argv.includes('--lift');
   const pbf = argv.find((a) => a.endsWith('.pbf')) || 'out/cyp/cyprus-latest.osm.pbf';
-  const all = C.collect(pbf);
-  const inside = all.filter((q) => {
-    const x = Math.round(q.lon * 72000), y = Math.round(q.lat * DEG);
-    return x >= A.x0 && x <= A.x1 && y >= A.y0 && y <= A.y1;
-  });
-  const pois = inside.map((q) => Object.assign({}, q, {
+  const all = C.collect(pbf).map((q) => Object.assign({}, q, {
     x: Math.round(q.lon * 72000), y: Math.round(q.lat * DEG),
   }));
+  // Без --lift рамка родителя — потолок, и точки вне неё брать бессмысленно.
+  const pois = LIFT ? all
+    : all.filter((q) => q.x >= A.x0 && q.x <= A.x1 && q.y >= A.y0 && q.y <= A.y1);
   const deg = (b) => '(' + (b.x0 / 72000).toFixed(3) + ', ' + (b.y0 / DEG).toFixed(3) + ')…(' +
                      (b.x1 / 72000).toFixed(3) + ', ' + (b.y1 / DEG).toFixed(3) + ')';
-  console.log('рамка родителя %s', deg(A));
-  console.log('точек собрано %d, внутри рамки %d, за бортом %d',
+  console.log('рамка родителя %s%s', deg(A), LIFT ? ' — будет расширена' : '');
+  console.log('точек собрано %d, взято %d, за бортом %d',
               all.length, pois.length, all.length - pois.length);
   console.log('доноров %d, суммарно %d КБ, самый большой %d байт',
               donors.length, Math.round(donors.reduce((s, d) => s + d.size, 0) / 1024),
@@ -252,12 +311,30 @@ if (require.main === module) {
     console.log('ОШИБКА: блок узлов не влезает в свой слот');
     process.exit(1);
   }
+  // Расширение рамок предков: только с --lift и только вверх. Рамки лежат
+  // упакованными парами постоянной ширины, поэтому блоки выходят того же
+  // размера — правка чужих блоков тут безопасна по длине.
+  const lifted = new Map();
+  const start = LIFT ? TREE : PARENT;
+  if (LIFT) {
+    const box = bbox(pois);
+    const ch = chain((i) => p.get(i), TREE, Math.round(33.0 * 72000), Math.round(35.0 * DEG));
+    const narrow = ch.filter((c) => c.box.x0 > box.x0 || c.box.y0 > box.y0 ||
+                                    c.box.x1 < box.x1 || c.box.y1 < box.y1);
+    console.log('цепочка от корня: %d узлов, узки %d (%s)', ch.length, narrow.length,
+                narrow.map((c) => c.blk + ':' + c.key + c.half).join(' '));
+    const patched = lift(p.schema, (i) => p.lit.block(cat[i]), narrow, box);
+    for (const [blk, bytes] of patched) lifted.set(blk, bytes);
+    console.log('переписано блоков с узлами: %d (%s), размеры не изменились',
+                lifted.size, [...lifted.keys()].join(', '));
+  }
   if (argv.includes('--check')) {
     // Обход по собранному: наши блоки кладутся поверх заводских, и для каждой
     // точки проверяется, что её лист СОБИРАЕТСЯ по рамке вокруг неё.
     const VM = require('./litvm');
     const over = new Map([[r.node.blk, r.node.bytes]]);
     for (const l of r.leaves) over.set(l.blk, l.bytes);
+    for (const [blk, bytes] of lifted) over.set(blk, bytes);
     const cache = new Map();
     const get = (i) => {
       if (cache.has(i)) return cache.get(i);
@@ -278,7 +355,7 @@ if (require.main === module) {
       for (let i = 0; i < list.length; i += 17) {
         const q0 = list[i]; seen++;
         const x = Math.round(q0.lon * 72000), y = Math.round(q0.lat * DEG);
-        const out = collect(get, PARENT.block, PARENT.key,
+        const out = collect(get, start.block, start.key,
                             { x0: x - 72, y0: y - 111, x1: x + 72, y1: y + 111 }, new Set(), 0);
         if (out.has(l.blk)) hit++;
       }
@@ -288,7 +365,8 @@ if (require.main === module) {
     console.log('блок узлов дочитан: %s (%d из %d байт)',
                 nres.why === 'данные кончились' && nres.pos === r.node.bytes.length ? 'да' : 'НЕТ',
                 nres.pos, r.node.bytes.length);
-    console.log('обход по рамке вокруг точки: проверено %d, свой лист собран у %d', seen, hit);
+    console.log('обход от (%d,%d) по рамке вокруг точки: проверено %d, свой лист собран у %d',
+                start.block, start.key, seen, hit);
     if (hit !== seen || ends !== r.leaves.length) process.exit(1);
   }
   if (!argv.includes('--build')) return;
@@ -296,10 +374,13 @@ if (require.main === module) {
   fs.mkdirSync(outDir, { recursive: true });
   fs.writeFileSync(path.join(outDir, String(r.node.blk) + '.bin'), r.node.bytes);
   for (const l of r.leaves) fs.writeFileSync(path.join(outDir, String(l.blk) + '.bin'), l.bytes);
+  for (const [blk, bytes] of lifted) fs.writeFileSync(path.join(outDir, String(blk) + '.bin'), bytes);
   fs.writeFileSync(path.join(outDir, 'plan.json'), JSON.stringify({
     root: ROOT, parent: PARENT,
     node: { blk: r.node.blk, bytes: r.node.bytes.length, slot: cat[ROOT.block].size },
     leaves: r.leaves.map((l) => ({ blk: l.blk, bytes: l.bytes.length, slot: l.size, pois: l.pois })),
+    lifted: [...lifted.keys()].map((blk) => ({ blk: blk, bytes: lifted.get(blk).length,
+                                               slot: cat[blk].size })),
   }, null, 1));
-  console.log('записано в %s: %d файлов', outDir, r.leaves.length + 2);
+  console.log('записано в %s: %d файлов', outDir, r.leaves.length + 2 + lifted.size);
 }

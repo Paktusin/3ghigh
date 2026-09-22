@@ -70,3 +70,34 @@ test('сбор по рамке обходит обе половины', () => {
   const both = T.collect(get, 1, 0, { x0: 99, y0: 10, x1: 101, y1: 20 }, new Set(), 0);
   assert.deepEqual([...both].sort(), [2, 3]);
 });
+
+// Цепочка от корня — это потолок: точка вне любой её рамки не найдётся.
+test('цепочка идёт по той половине, что накрыла точку', () => {
+  const blocks = {
+    1: { origin: { x: 0, y: 0 },
+         elems: [{}, { '#': 0x22, 0x61: [0, 0], 0x60: [100, 100],
+                       0x64: [100, 0], 0x63: [200, 100],
+                       0x5f: [2, 0], 0x62: [9, 0] }] },
+    2: { origin: { x: 0, y: 0 },
+         elems: [{}, { '#': 0x22, 0x61: [0, 0], 0x60: [50, 100],
+                       0x64: [50, 0], 0x63: [100, 100],
+                       0x5f: [3, 0], 0x62: [4, 0] }] },
+    3: { origin: { x: 0, y: 0 }, elems: [{}, { '#': 0x23, 0x42: 1 }] },
+    4: { origin: { x: 0, y: 0 }, elems: [{}, { '#': 0x23, 0x42: 1 }] },
+  };
+  const ch = T.chain((i) => blocks[i], { block: 1, key: 0 }, 10, 10);
+  assert.deepEqual(ch.map((c) => c.blk + ':' + c.key + c.half), ['1:0A', '2:0A']);
+  assert.deepEqual(ch[0].box, { x0: 0, y0: 0, x1: 100, y1: 100 });
+  const right = T.chain((i) => blocks[i], { block: 1, key: 0 }, 80, 10);
+  assert.deepEqual(right.map((c) => c.half), ['A', 'B']);
+});
+
+test('цепочка останавливается, когда точка не попала ни в одну половину', () => {
+  const blocks = {
+    1: { origin: { x: 0, y: 0 },
+         elems: [{}, { '#': 0x22, 0x61: [0, 0], 0x60: [10, 10],
+                       0x64: [10, 0], 0x63: [20, 10], 0x5f: [2, 0], 0x62: [2, 0] }] },
+    2: { origin: { x: 0, y: 0 }, elems: [{}, { '#': 0x23, 0x42: 1 }] },
+  };
+  assert.equal(T.chain((i) => blocks[i], { block: 1, key: 0 }, 500, 500).length, 0);
+});

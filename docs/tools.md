@@ -76,7 +76,7 @@ node src/litblock.js --scan 4000           # сверка писателя бл�
 node src/cyppoi.js --cover                 # покрытие: заводские типы против тегов OSM
 node src/cyppoi.js --build                 # кипрский блок на место листа
 node src/cyptree.js --plan                 # сколько листьев выйдет и куда лягут
-node src/cyptree.js --build --check        # собрать блоки и обойти дерево, как прошивка
+node src/cyptree.js --lift --build --check # собрать блоки, расширить рамки предков, обойти дерево
 node src/litenc.js 2000                    # обратный проход по блокам LIT
 ```
 
