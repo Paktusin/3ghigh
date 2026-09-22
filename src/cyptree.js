@@ -247,7 +247,7 @@ function collect(get, blk, key, q, out, depth) {
 }
 
 module.exports = { plan, build, nodes, split, bbox, collect, chain, lift,
-                   ROOT, PARENT, DEG };
+                   ROOT, PARENT, TREE, DEG };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);

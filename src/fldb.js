@@ -95,12 +95,38 @@ function checksum(buf) {
   return acc >>> 0;
 }
 
+// Та же сумма, но по файлу и кусками: запись каталога может быть длиной в
+// два гигабайта (том LIT), и целиком в буфер её читать незачем. Шаг считается
+// по 4-байтовым словам, поэтому куски берутся кратными четырём, а хвост в
+// неполные четыре байта досчитывается сложением — как в checksum.
+function checksumFd(fd, offset, size, chunk) {
+  const step = ((chunk || 1 << 22) & ~3) || 4;
+  const buf = Buffer.alloc(step);
+  const words = size & ~3;
+  let acc = 0, done = 0;
+  while (done < words) {
+    const k = fs.readSync(fd, buf, 0, Math.min(step, words - done), offset + done);
+    if (k <= 0) throw new Error('чтение оборвалось на ' + (offset + done));
+    const n = k & ~3;                       // читаем только целыми словами
+    for (let i = 0; i < n; i += 4) {
+      let s = (acc << 1) >>> 0;
+      if (acc & 0x80000000) s = (s ^ 0x04C11DB7) >>> 0;
+      acc = (0xC7 + s + buf.readUInt32BE(i)) >>> 0;
+    }
+    done += n;
+  }
+  if (size > words) {
+    const tail = Buffer.alloc(size - words);
+    fs.readSync(fd, tail, 0, tail.length, offset + words);
+    for (const b of tail) acc = (acc + b) >>> 0;
+  }
+  return acc >>> 0;
+}
+
 // Пересчитать и записать сумму записи каталога по актуальным данным файла.
 // fd открыт на запись (r+). Возвращает { name, old, now, changed }.
 function refreshChecksum(fd, entry) {
-  const b = Buffer.alloc(entry.size);
-  fs.readSync(fd, b, 0, entry.size, entry.offset);
-  const now = checksum(b);
+  const now = checksumFd(fd, entry.offset, entry.size);
   const at = DIR_OFFSET + entry.index * ENTRY_SIZE + 32;
   const cur = Buffer.alloc(4); fs.readSync(fd, cur, 0, 4, at);
   const old = cur.readUInt32LE(0);
@@ -108,7 +134,8 @@ function refreshChecksum(fd, entry) {
   return { name: entry.name, old, now, changed: old !== now };
 }
 
-module.exports = { open, entries, read, verify, checksum, refreshChecksum, DIR_OFFSET, ENTRY_SIZE };
+module.exports = { open, entries, read, verify, checksum, checksumFd, refreshChecksum,
+                   DIR_OFFSET, ENTRY_SIZE };
 
 if (require.main === module) {
   const [, , path, cmd, arg] = process.argv;

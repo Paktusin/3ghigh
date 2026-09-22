@@ -7,6 +7,16 @@
 // настоящим файлом тайла, цела ли сквозная нумерация блоков, читаются ли
 // рёбра и разделы имён. Установку это не заменяет, но ловит расхождения,
 // которые на устройстве выглядели бы как молчаливый отказ навигации.
+//
+// Если в наборе есть компоненты `GDB` и `LIT*`, проверяются и они — и именно
+// из набора, а не из того, что было в памяти у сборщика:
+//
+//   GDB   том открывается штатным читателем: шапка, число уровней, сетка
+//         каждого уровня, кластеры за границей области уровней;
+//   LIT   спуск по дереву точек интереса от КОРНЯ всего дерева по рамке Кипра.
+//         Собранные листья читаются машиной грамматики: разбор обязан
+//         остановиться на метке конца блока, а всё, что за ней, — быть нулями
+//         (наши блоки короче слотов и дополнены нулями, см. src/mklit.js).
 
 const fs = require('fs');
 const path = require('path');
@@ -17,6 +27,11 @@ const zen = require('./zenamen');
 const hn = require('./hausnr');
 const zfn = require('./zfnamen');
 const xg = require('./xacgraph');
+const dataset = require('./dataset');
+const litpoi = require('./litpoi');
+const litvm = require('./litvm');
+const ct = require('./cyptree');
+const gm = require('./gdb');
 
 // Разделы тайла и их места в записи XAC-STRUKTUR (84 байта на тайл).
 const REC = 84, REC_START = 24;
@@ -158,7 +173,64 @@ function check(root, donor) {
            fldb: fldb.verify(c.db), edges: edges.edges.size, lost: edges.lost, names };
 }
 
-module.exports = { check };
+// Рамка Кипра. Точки за её пределами — не сбой: в кипрском извлечении OSM
+// есть паромные терминалы на турецком берегу (Анамур, переправа на север
+// острова), они и выходят наружу. Поэтому считаются отдельно, а не в ошибки.
+const CYP = { lon0: 32.2, lat0: 34.5, lon1: 34.7, lat1: 35.8 };
+const LIT_VOLS = ['LIT', 'LIT2', 'LIT3', 'LIT4'];
+
+// Точки интереса: спуск от корня дерева по рамке Кипра идёт ПО НАБОРУ.
+// Тома, которых в наборе нет, берутся заводские — адресное пространство LIT
+// сквозное через все четыре, и без них каталог не прочитать.
+function checkLit(root) {
+  const mine = LIT_VOLS.filter((d) => fs.existsSync(path.join(root, 'pkgdb', d)));
+  if (!mine.length) return null;
+  const base = dataset.resolveRoot();
+  const dirs = LIT_VOLS.map((d) => (fs.existsSync(path.join(root, 'pkgdb', d))
+    ? path.join(root, 'pkgdb', d) : path.join(base, 'pkgdb', d)));
+  const P = litpoi.open(dirs);
+  const cat = P.catalog();
+  const q = { x0: Math.round(CYP.lon0 * 72000), y0: Math.round(CYP.lat0 * ct.DEG),
+              x1: Math.round(CYP.lon1 * 72000), y1: Math.round(CYP.lat1 * ct.DEG) };
+  const leaves = [...ct.collect((i) => P.get(i), ct.TREE.block, ct.TREE.key, q, new Set(), 0)];
+  let pois = 0, inside = 0, stops = 0, zeroTail = 0, bad = [];
+  for (const blk of leaves) {
+    const b = P.lit.block(cat[blk]);
+    const r = litvm.run(P.schema, b, 0, { blk, limit: 4000000 });
+    const stopped = r.why === 'данные кончились' || r.why === 'конец (0x11 без цели)';
+    if (stopped) stops++; else bad.push(blk + ': ' + r.why);
+    let zero = true;
+    for (let i = r.pos; i < b.length; i++) if (b[i] !== 0) { zero = false; break; }
+    if (zero) zeroTail++; else bad.push(blk + ': за концом разбора не нули');
+    for (const x of P.pois(blk)) {
+      pois++;
+      if (x.lon >= CYP.lon0 && x.lon <= CYP.lon1 && x.lat >= CYP.lat0 && x.lat <= CYP.lat1) inside++;
+    }
+  }
+  P.lit.vols.forEach((v) => fs.closeSync(v.fd));
+  return { vols: mine, leaves: leaves.length, stops, zeroTail, pois, inside, bad };
+}
+
+// Том отрисовки: открывается тем же читателем, что и заводской.
+function checkGdb(root) {
+  const dir = path.join(root, 'pkgdb', 'GDB');
+  if (!fs.existsSync(dir)) return null;
+  const f = fs.readdirSync(dir).find((x) => /\.gdb$/i.test(x));
+  if (!f) return null;
+  const g = gm.openBuffer(fs.readFileSync(path.join(dir, f)), null);
+  const h = gm.header(g);
+  const levels = [];
+  for (let i = 0; i < h.levels.length; i++) {
+    const gr = gm.levelGrid(g, h, h.levels[i]);
+    if (!gr) continue;
+    const real = gr.entries.filter((e) => e.sz && e.off >= h.regionEnd).length;
+    levels.push({ nr: i, W: gr.W, H: gr.H, ok: gr.gridOk, n: gr.gridN, clusters: real });
+  }
+  return { file: f, sig: h.sig, version: h.version, nLevels: h.nLevels, levels,
+           bad: levels.filter((l) => l.ok !== l.n).length };
+}
+
+module.exports = { check, checkLit, checkGdb };
 
 if (require.main === module) {
   const args = process.argv.slice(2);
@@ -168,7 +240,13 @@ if (require.main === module) {
     console.error('использование: node src/setcheck.js <каталог-набора> [--donor IS01]');
     process.exit(1);
   }
-  const r = check(root, (flag('donor', 'IS01')).toUpperCase());
+  // Компонента XAC в наборе может не быть (образ только с точками интереса
+  // или только с отрисовкой) — тогда проверяется то, что есть.
+  const pkgdb = path.join(root, 'pkgdb');
+  const hasXac = fs.existsSync(pkgdb) && fs.readdirSync(pkgdb).some((d) => /^XAC/.test(d));
+  const r = hasXac ? check(root, (flag('donor', 'IS01')).toUpperCase()) : null;
+  if (!r) console.log('набор ' + root + ': компонента XAC нет, проверяю остальное');
+  if (r) {
   console.log('набор ' + root + ', компонент ' + r.container + ', тайл ' + r.donor +
               ' (номер ' + r.gi + ')');
   for (const x of r.reg) {
@@ -202,11 +280,33 @@ if (require.main === module) {
       ', ссылок ' + n.refs + (n.err ? ', ОШИБКА ' + n.err : ''));
     console.log('дерево: записей ' + n.mmi + ', корней ' + n.roots + ', листьев ' + n.leaves);
   }
-  const bad = r.regBad || r.numErr || r.lost || r.fldb.anomalies ||
+  }
+  const gdb = checkGdb(root);
+  if (gdb) {
+    console.log('GDB: ' + gdb.file + ', ' + gdb.sig + ' версия ' + gdb.version +
+                ', уровней ' + gdb.nLevels);
+    for (const l of gdb.levels) {
+      console.log('  L' + String(l.nr).padStart(2) + ': сетка ' + l.W + '×' + l.H +
+                  ', слоты ' + l.ok + '/' + l.n + ', кластеров с данными ' + l.clusters);
+    }
+  }
+  const poi = checkLit(root);
+  if (poi) {
+    console.log('POI (' + poi.vols.join(', ') + '): спуск от корня по рамке Кипра дал листьев ' +
+                poi.leaves + ', разбор остановлен штатно у ' + poi.stops +
+                ', хвост за разбором нулевой у ' + poi.zeroTail);
+    console.log('точек в собранных листьях ' + poi.pois + ', из них в рамке Кипра ' + poi.inside +
+                (poi.pois > poi.inside ? ', за рамкой ' + (poi.pois - poi.inside) +
+                 ' (паромные терминалы на турецком берегу)' : ''));
+    for (const b of poi.bad.slice(0, 5)) console.log('  СБОЙ ' + b);
+  }
+  const bad = (gdb && gdb.bad) ||
+              (poi && (poi.bad.length || !poi.leaves || !poi.inside)) ||
+              (r && (r.regBad || r.numErr || r.lost || r.fldb.anomalies ||
               (r.names && (!r.names.streamExact || !r.names.refsExact || r.names.err)) ||
               (r.houses && (r.houses.bad || !r.houses.indexOk ||
                             r.houses.refs !== r.houses.inRefs)) ||
-              (r.guide && (r.guide.err || r.guide.parsed !== r.guide.count));
+              (r.guide && (r.guide.err || r.guide.parsed !== r.guide.count))));
   console.log(bad ? 'ЕСТЬ РАСХОЖДЕНИЯ' : 'расхождений нет');
   process.exit(bad ? 1 : 0);
 }

@@ -563,11 +563,36 @@ function volumeFromRoads(lines, opts = {}) {
   });
 }
 
+// Компонент GDB в наборе: сам том и его .conf. Вынесено из CLI, потому что
+// этим же путём кладёт том сборщик образа (src/mkimage.js).
+//
+// GDB2 в набор не кладём: второй том у нас пуст, сквозных ссылок за границу
+// первого собранный том не делает, а нулевой файл установщику предъявлять
+// незачем. Что GDB2 необязателен, видно по австралийскому набору — там его нет.
+function component(outDir, v, opt) {
+  const o = opt || {};
+  const root = o.root || dataset.resolveRoot();
+  const base = (o.name || 'EJ211') + '_v37a';
+  const dir = path.join(outDir, 'pkgdb', 'GDB');
+  fs.mkdirSync(dir, { recursive: true });
+  const gdbPath = path.join(dir, base + '.gdb');
+  fs.writeFileSync(gdbPath, v.gdb);
+  const srcConf = path.join(root, 'pkgdb', 'GDB', 'GDB.conf');
+  if (o.conf !== false && fs.existsSync(srcConf)) {
+    const dstConf = path.join(dir, 'GDB.conf');
+    fs.copyFileSync(srcConf, dstConf);
+    const t = fs.readFileSync(dstConf, 'latin1').replace(/^name=.*\.gdb$/m, 'name=' + base + '.gdb');
+    fs.writeFileSync(dstConf, Buffer.from(t, 'latin1'));
+    conf.updateConf(dstConf, gdbPath);
+  }
+  return { dir, file: base + '.gdb', path: gdbPath, size: v.gdb.length };
+}
+
 module.exports = {
   PROLOGUE, SIG, VERSION, FRAME, MAGIC, MAX_BLOB, FRAME_ELEMENT, EUROPE_LEVELS, CLUSTER_REC,
   tileBlob, emptyTile, readTileRoads, mortonIndex, clusterBlob, build,
   degToTile, degToTileL, cellX, cellY, cellXL, cellYL, roadsToLevel, volumeFromRoads,
-  linesForLevel, LEVEL_CLASSES, TILE_CELLS, TILE_SIZES, tileSizes,
+  linesForLevel, LEVEL_CLASSES, TILE_CELLS, TILE_SIZES, tileSizes, component,
 };
 
 if (require.main === module) {
@@ -631,28 +656,12 @@ if (require.main === module) {
       ', кластеров в таблице ' + real + ', слоты ' + g2.gridOk + '/' + g2.gridN);
   }
 
-  const dirGdb = path.join(outDir, 'pkgdb', 'GDB');
-  fs.mkdirSync(dirGdb, { recursive: true });
-  const base = (opt('--name') || 'EJ211') + '_v37a';
-  const gdbPath = path.join(dirGdb, base + '.gdb');
-  fs.writeFileSync(gdbPath, v.gdb);
-  console.log('записано: ' + gdbPath);
+  const c = component(outDir, v, { name: opt('--name'), conf: !args.includes('--no-set') });
+  console.log('записано: ' + c.path);
 
-  // Компонент GDB2 в набор не кладём: второй том у нас пуст, сквозных ссылок за
-  // границу первого собранный том не делает, а нулевой файл установщику
-  // предъявлять незачем. Что GDB2 необязателен, видно по австралийскому
-  // набору — там его нет совсем.
   if (!args.includes('--no-set')) {
     const root = dataset.resolveRoot();
-    const srcConf = path.join(root, 'pkgdb', 'GDB', 'GDB.conf');
-    if (fs.existsSync(srcConf)) {
-      const dstConf = path.join(dirGdb, 'GDB.conf');
-      fs.copyFileSync(srcConf, dstConf);
-      let t = fs.readFileSync(dstConf, 'latin1').replace(/^name=.*\.gdb$/m, 'name=' + base + '.gdb');
-      fs.writeFileSync(dstConf, Buffer.from(t, 'latin1'));
-      conf.updateConf(dstConf, gdbPath);
-      console.log('GDB/GDB.conf: имя файла, size, MD5 и пробы qa пересчитаны');
-    }
+    console.log('GDB/GDB.conf: имя файла, size, MD5 и пробы qa пересчитаны');
     for (const f of ['DBInfo.txt', 'config.nfm', 'build1']) {
       const q = path.join(root, f);
       if (fs.existsSync(q)) fs.copyFileSync(q, path.join(outDir, f));
