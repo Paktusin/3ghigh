@@ -27,6 +27,9 @@ node src/checksum.js "$D" 2>&1 | grep -q "все суммы и размеры с
   echo "$D не сходится по суммам — не пишу"; node src/checksum.js "$D" | tail -20; exit 1; }
 
 # какие компоненты есть в наборе
+# (nomatch выключен: у NaviPersistence и StyleDB файла .conf нет, и zsh иначе
+#  ругается на несовпавший шаблон, хотя это норма)
+setopt +o nomatch 2>/dev/null || true
 COMPS=()
 for d in "$D"/pkgdb/*/; do
   [ -d "$d" ] || continue
