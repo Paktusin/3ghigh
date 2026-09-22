@@ -3,6 +3,7 @@
 //
 //   node src/mkcyp.js <каталог-выхода> [--donor IS01] [--roads out/cyp/roads.geojson]
 //                     [--classes motorway,trunk,primary]
+//                     [--places out/cyp/places_geo.json] [--country-name CYPRUS]
 //
 // Почему в чужой слот. Число тайлов в базе менять нельзя: `XAC-STRUKTUR`,
 // `NACHBARN`, `FE GRUPPEN`, `L3 GRUPPEN`, `L4 LOAD TABLE` и счётчики
@@ -25,9 +26,14 @@
 //   * счётчик блоков в `XACDB HEADER` (+0x4c), он равен той же сумме;
 //   * общий растр `.ras`: ячейки донора освобождаются, ячейки Кипра занимаются.
 //
+// Имена. Если задан файл городов (`--places`), в тайл кладутся разделы
+// `ZE-NAMEN` и `ZE-NAMEN-MMI`: имена улиц из OSM, связь «имя → дорога» и
+// дерево «страна → город → улица». Их смещения и размеры уходят в запись
+// `XAC-STRUKTUR` — без этого устройство разделов не найдёт.
+//
 // Чего этот набор не делает: не трогает `NACHBARN` (у донора остаются его
-// соседи — для острова это дальние связи, как паромные), не пишет имён, домов
-// и точек интереса, не заполняет уровни 2…4 — там у нас данных нет.
+// соседи — для острова это дальние связи, как паромные), не пишет `ZF-NAMEN`,
+// домов и точек интереса, не заполняет уровни 2…4 — там у нас данных нет.
 
 const fs = require('fs');
 const path = require('path');
@@ -38,6 +44,7 @@ const ras = require('./rasidx');
 const raster = require('./raster');
 const tile = require('./xactile');
 const roads = require('./xacroads');
+const zenamen = require('./zenamen');
 const conf = require('./conf');
 const dataset = require('./dataset');
 
@@ -138,11 +145,24 @@ function mkcyp(outDir, opt) {
   }
   const built14 = o.built || '20260922120000';
   const name1 = tileE.name.replace(/^.*\//, '').replace(/\.xac$/, '');
+
+  // Разделы имён идут перед RASTERINFOS: порядок цепочки жёсткий.
+  const names = [];
+  let zen = null;
+  if (o.places) {
+    zen = roads.zenModel(graph, built, { places: o.places, countryName: o.countryName || 'CYPRUS' });
+    names.push(zenamen.buildSection({ names: zen.names, refs: zen.refs, blocks: zen.blocks,
+                                      version: 2, label: 'ZE-NAMEN', country: CYPRUS }));
+    names.push(zenamen.mmiBuildSection(zen.mmi));
+    log('имена: ' + zen.names.length + ' (городов ' + zen.places + ', записей улиц ' +
+        zen.streets + '), разделы ' + names.map((b) => b.length).join(' и ') + ' б');
+  }
+
   const spec = {
     code: donor, file: name1, index: gi, country: CYPRUS, built: built14,
     zf: tile.section('ZF-NAMEN', Buffer.alloc(ZF_SIZE - 20)),
     blocks: built.blocks,
-    extra: [rasterSection([bb[0] - 1000, bb[1] - 1000, bb[2] + 1000, bb[3] + 1000])],
+    extra: names.concat([rasterSection([bb[0] - 1000, bb[1] - 1000, bb[2] + 1000, bb[3] + 1000])]),
   };
   const file1 = fitTile(spec, tileE.size);
   if (!file1) {
@@ -181,8 +201,15 @@ function mkcyp(outDir, opt) {
   const rs = xac.sections(file1).list.find((x) => x.name === 'RASTERINFOS');
   const vbSize = vb.reduce((a, x) => a + x.total, 0);
   for (let k = 0; k < 4; k++) patchU32(fd, at + 4 + k * 4, vbSize);   // границы групп по уровням
-  const zero = ['ZE-NAMEN', 0x14, 'ZE-NAMEN-MMI', 0x1c, 'HAUSNUMMERN', 0x24, 'LOCAL POIS', 0x2c];
-  for (let k = 1; k < zero.length; k += 2) { patchU32(fd, at + zero[k], 0); patchU32(fd, at + zero[k] + 4, 0); }
+  // Разделы, которых у нас может не быть, — нулями; те, что есть, своими
+  // смещением и размером в собранном файле (fitTile их уже сдвинул).
+  const secAt = (name) => xac.sections(file1).list.find((x) => x.name === name);
+  for (const [name, off] of [['ZE-NAMEN', 0x14], ['ZE-NAMEN-MMI', 0x1c],
+                             ['HAUSNUMMERN', 0x24], ['LOCAL POIS', 0x2c]]) {
+    const sec = secAt(name);
+    patchU32(fd, at + off, sec ? sec.offset : 0);
+    patchU32(fd, at + off + 4, sec ? sec.total : 0);
+  }
   patchU32(fd, at + 0x3c, rs ? rs.offset : 0);
   patchU32(fd, at + 0x40, rs ? rs.total : 0);
   patchU32(fd, at + 0x44, vbSize);
@@ -273,7 +300,7 @@ function mkcyp(outDir, opt) {
   copyDir('NaviPersistence_ALL_3');
 
   return { donor, gi, blocks: vb.length, nodes: graph.nodes.length, edges: graph.edges.length,
-           totalBlocks: running, container: idxC.dir, file1, file2 };
+           totalBlocks: running, container: idxC.dir, file1, file2, zen };
 }
 
 module.exports = { mkcyp, fitTile, rasterSection, stubLevel2 };
@@ -283,13 +310,15 @@ if (require.main === module) {
   const outDir = args[0];
   const flag = (n, d) => { const i = args.indexOf('--' + n); return i > 0 && args[i + 1] ? args[i + 1] : d; };
   if (!outDir) {
-    console.error('использование: node src/mkcyp.js <каталог-выхода> [--donor IS01] [--roads ...] [--classes ...]');
+    console.error('использование: node src/mkcyp.js <каталог-выхода> [--donor IS01] [--roads ...] [--classes ...] [--places ...]');
     process.exit(1);
   }
   const r = mkcyp(outDir, {
     donor: flag('donor', 'IS01'),
     roads: flag('roads', 'out/cyp/roads.geojson'),
     classes: flag('classes', 'motorway,motorway_link,trunk,trunk_link,primary,primary_link').split(','),
+    places: flag('places') ? JSON.parse(fs.readFileSync(flag('places'), 'utf8')) : null,
+    countryName: flag('country-name', 'CYPRUS'),
     log: (m) => console.log(m),
   });
   console.log();
