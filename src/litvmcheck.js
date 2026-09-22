@@ -50,11 +50,11 @@ for (const kind of ['LIT', 'PIT']) {
       const b = l.block(cat[i]);
       stats.проверено++;
       if (b.length > 3 && b[2] === 0 && WIDTHS.has(b[3])) stats.сЗаголовком++;
-      const r = current.run(schema, b, 0), ok = full(r, b);
+      const r = current.run(schema, b, 0, { blk: i }), ok = full(r, b);
       stats.доКонца += Number(ok);
       if (!ok) stats.причины[r.why] = (stats.причины[r.why] || 0) + 1;
       if (baseline) {
-        const before = full(baseline.run(schema, b, 0), b);
+        const before = full(baseline.run(schema, b, 0, { blk: i }), b);
         stats.былоДоКонца += Number(before);
         stats.стало += Number(!before && ok);
         stats.потеряно += Number(before && !ok);

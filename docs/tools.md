@@ -40,6 +40,14 @@ src/gdbwrite.js   ломаная в тайле: правка на месте и 
 src/gdbroads.js   набор дорог в тайлы GDB вместе с записями реестра S1/S2
 src/gdbstrip.js   урезанный том GDB: все уровни, но только вокруг заданной точки
 src/gdbgen.js     сборка тома GDB с нуля (--demo или --roads <geojson>); размер тайла подбирается под плотность, набор с .conf собирается сам
+src/lit.js        контейнер LIT/PIT: заголовок Lit\x02, склейка томов, каталог блоков
+src/litschema.js  грамматика блока TTD: дизассемблер правил
+src/litvm.js      машина грамматики (FUN_08cd0798): разбор блока в записи
+src/litvmcheck.js сверка границ: дочитывает ли машина блок ровно до конца
+src/litdict.js    словарь блока (биграммы): чтение, развёртка, построение
+src/litnames.js   названия из блока: приставки, словарь, порядок
+src/litenc.js     обратный проход: байты блока собираются заново из значений
+src/litpoi.js     точки интереса: координаты, категория, название, адрес
 src/nodes.js      узлы и связи из блоков v3/v4/v5, выгрузка в GeoJSON
 src/harvest.js    поиск абсолютных координат перебором
 src/gjcheck.js    проверка GeoJSON и рисунок сети в терминале
@@ -58,6 +66,9 @@ node src/nodes.js maps/pkgdb/.../EJ211_MO00_1.xac out/MO00.geojson
 node src/gjcheck.js out/MO00.geojson
 node src/gdb.js maps                       # шапка, уровни, сетки кластеров
 node src/gdbgen.js --demo --out out/gdbgen # том GDB, собранный с нуля
+node src/litpoi.js 102275                  # точки интереса одного блока LIT
+node src/litpoi.js --scan 800              # сводка: сколько точек и каких категорий
+node src/litenc.js 2000                    # обратный проход по блокам LIT
 ```
 
 Результат проверяется перетаскиванием `.geojson` на geojson.io.

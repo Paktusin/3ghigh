@@ -98,15 +98,16 @@ function encDelta(t) {
   if (!reset && dX === 0)                   { head = 0xa0; mode = 'X-'; }
   else if (!reset && dX >= 1 && dX <= 15)   { head = 0x80 | dX;    mode = 'X+'; }
   else if (!reset && dX <= -1 && dX >= -15) { head = 0xa0 | (-dX); mode = 'X-'; }
-  else if (!reset && dX >= -2048 && dX <= 2047) {
+  else if (!reset && dX >= -2047 && dX <= 2047) {
     const d = dX & 0xfff;
     head = 0xc0 | (d >> 8); extra = Buffer.from([d & 0xff]);        mode = 'X12';
   } else if (x === base)                    { head = 0xe0 | 0x0c;  mode = 'Xбаза'; }
-  // «База + смещение» не используется только на САМОМ ПЕРВОМ чтении блока:
-  // базы там ещё нет, и оригинал пишет абсолют, даже когда он на байт длиннее
-  // (все 16 расхождений PIT). А после сброса 0xff база работает как обычно —
-  // запрет на неё и там дал 142 расхождения против одного.
-  else if (!t.first && x - base >= -128 && x - base <= 127) {
+  // «База + смещение» работает и на самом первом чтении блока. Прежде здесь
+  // стоял запрет: при базе, засеянной нулём, первое чтение выглядело как
+  // абсолют, и запрет убирал 16 расхождений PIT. С верной базой — номером
+  // блока (см. litvm.js) — запрет сам стал давать 36 расхождений: оригинал
+  // пишет именно `fd ff` = «база − 1», то есть ссылку на соседний блок.
+  else if (x - base >= -127 && x - base <= 127) {
     head = 0xe0 | 0x0d; extra = Buffer.from([(x - base) & 0xff]);   mode = 'Xбаза+';
   } else if (x >= 0 && x <= 0xfffff && ![0x0c, 0x0d, 0x0e].includes(x >>> 16)) {
     head = 0xe0 | (x >>> 16);
@@ -298,7 +299,9 @@ if (require.main === module) {
                разошлисьКоды: {}, примеры: [], примерыЧисел: [] };
   const step = Math.max(1, Math.floor((cat.length - from) / want));
   let n = 0;
-  for (let i = from; i < cat.length && n < want; i += step) { roundBlock(schema, l.block(cat[i]), { stats: st }); n++; }
+  for (let i = from; i < cat.length && n < want; i += step) {
+    roundBlock(schema, l.block(cat[i]), { stats: st, run: { blk: i } }); n++;
+  }
   l.vols.forEach((v) => fs.closeSync(v.fd));
 
   console.log('блоков: %d (%s)', n, pit ? 'PIT' : 'LIT');
