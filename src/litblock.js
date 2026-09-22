@@ -8,6 +8,10 @@
 //
 //   заголовок блока   u16 число элементов, байт 0, байт ширина координат,
 //                     s32 X опоры, s32 Y опоры, байт число кодов, словарь
+//   узел дерева       байт 0x95, пара минимума A, пара максимума A, ссылка A,
+//                     пара минимума B, пара максимума B, ссылка B, ссылка 0x79,
+//                     varint, ссылка 0x7a, varint — все поля без условий,
+//                     «нет ссылки» пишется сбросом кодека 0xff
 //   запись-тайл       байт 0x96, varint — сколько точек в блоке
 //   точка интереса    байт 0xa8|флаги, дельта-ссылка, упакованная пара,
 //                     и при бите 2 — категория, название, блоб, [кухня],
@@ -25,6 +29,7 @@ const V = require('./litvm');
 const D = require('./litdict');
 const E = require('./litenc');
 
+const LEAD_NODE = 0x95;                    // весь байт — признак узла дерева
 const LEAD_TILE = 0x96;                    // весь байт — признак записи-тайла
 const LEAD_POI = 0xa8;                     // старшие пять бит записи точки
 const LEAD_END = 0x80;                     // запись-конец: структура 0x80
@@ -48,13 +53,49 @@ function readBlock(schema, block, blk) {
     dict: (D.dict(block) || { codes: new Map() }).codes,
     tile: null,
     pois: [],
+    nodes: [],
+    other: new Map(),                        // ведущие байты записей, которых писатель не знает
   };
-  let cur = null, lead = 0;
-  const fin = () => { if (cur) m.pois.push(cur); cur = null; };
+  let cur = null, node = null, lead = 0;
+  const fin = () => {
+    if (cur) m.pois.push(cur);
+    if (node) m.nodes.push(node);
+    cur = null; node = null;
+  };
   V.run(schema, block, 0, { blk: blk, limit: 4000000, tap: (t) => {
     const r = t.rule;
-    if (r === 18) { fin(); lead = block[t.at]; return; }
+    if (r === 18) {
+      fin();
+      lead = block[t.at];
+      // 0x95 узел, 0x96 тайл, 0xa8|флаги точка, 0x80 конец блока — остальное
+      // писатель не знает и молчать об этом нельзя.
+      if (lead !== LEAD_NODE && lead !== LEAD_TILE && lead !== LEAD_END &&
+          (lead & 0xf8) !== LEAD_POI) m.other.set(lead, (m.other.get(lead) || 0) + 1);
+      return;
+    }
     if (r === 142) { m.tile = { count: t.val }; return; }
+    if (r >= 129 && r <= 138) {
+      if (r === 129) node = { aMin: null, aMax: null, a: null,
+                              bMin: null, bMax: null, b: null,
+                              x79: null, n42: 0, x7a: null, n7b: 0 };
+      if (!node) return;
+      // ссылка «нет» приходит сбросом кодека: X и Y становятся −1
+      const link = () => (t.x === -1 && t.y === -1 ? null : [t.x, t.y]);
+      switch (r) {
+        case 129: node.aMin = t.pair; break;
+        case 130: node.aMax = t.pair; break;
+        case 131: node.a = link(); break;
+        case 132: node.bMin = t.pair; break;
+        case 133: node.bMax = t.pair; break;
+        case 134: node.b = link(); break;
+        case 135: node.x79 = link(); break;
+        case 136: node.n42 = t.val; break;
+        case 137: node.x7a = link(); break;
+        case 138: node.n7b = t.val; break;
+        default: break;
+      }
+      return;
+    }
     if (r < 218 || r > 241) return;
     if (r === 218) cur = { flags: lead & 7, ref: null, xy: null };
     if (!cur) return;
@@ -128,11 +169,42 @@ function writePoi(p, width, st) {
   return Buffer.concat(out);
 }
 
+// Ссылка узла: позиция дельта-кодеком, а «нет ссылки» — сброс 0xff. Прошивка
+// проверяет ссылку сравнением с нулём (`if (-1 < piVar3[4])`), так что минус
+// единица и значит «потомка нет».
+function writeLink(link, st) {
+  if (!link) { st.x = -1; st.y = -1; st.first = false; return Buffer.from([RESET]); }
+  const d = E.encDelta({ x: link[0], y: link[1], px: st.x, py: st.y,
+                         base: st.base, first: st.first });
+  if (!d) throw new Error('ссылка не кодируется: ' + JSON.stringify(link));
+  st.x = link[0]; st.y = link[1]; st.first = false;
+  return d.buf;
+}
+
+// Узел дерева. Полей одиннадцать и все безусловные — порядок задан правилами
+// 128…138 и менять его нельзя.
+function writeNode(n, width, st) {
+  const pair = (p) => {
+    const b = E.encPair(p[0], p[1], width);
+    if (!b) throw new Error('ширина ' + width + ' не поддерживается');
+    return b;
+  };
+  return Buffer.concat([
+    Buffer.from([LEAD_NODE]),
+    pair(n.aMin), pair(n.aMax), writeLink(n.a, st),
+    pair(n.bMin), pair(n.bMax), writeLink(n.b, st),
+    writeLink(n.x79, st), E.encVarint(n.n42 || 0),
+    writeLink(n.x7a, st), E.encVarint(n.n7b || 0),
+  ]);
+}
+
 // Блок целиком. `blk` — его номер в каталоге: им засевается база дельта-кодека.
 function writeBlock(m, blk) {
   const st = { x: blk, y: 0, base: blk, first: true };
-  const parts = [writeHeader(m), writeTile(m.tile, m.pois)];
+  const parts = [writeHeader(m)];
+  if (m.tile) parts.push(writeTile(m.tile, m.pois));
   for (const p of m.pois) parts.push(writePoi(p, m.width, st));
+  for (const n of m.nodes || []) parts.push(writeNode(n, m.width, st));
   parts.push(Buffer.from([LEAD_END]));
   return Buffer.concat(parts);
 }
@@ -196,8 +268,9 @@ function model(pois, opt) {
 }
 
 module.exports = { readBlock, writeBlock, writeHeader, writeTile, writePoi,
-                   model, detailText, fit,
-                   LEAD_TILE, LEAD_POI, LEAD_END, RESET, F_FOOD, F_TAIL, F_FULL };
+                   writeNode, writeLink, model, detailText, fit,
+                   LEAD_NODE, LEAD_TILE, LEAD_POI, LEAD_END, RESET,
+                   F_FOOD, F_TAIL, F_FULL };
 
 // Сверка: прочитать заводской блок в модель, собрать обратно и сравнить байты.
 //
@@ -219,7 +292,9 @@ if (require.main === module) {
     const b = l.block(cat[i]);
     let m;
     try { m = readBlock(schema, b, i); } catch (e) { return { why: 'не читается: ' + e.message }; }
-    if (!m.tile) return { why: 'не блок точек интереса' };
+    if (m.other.size) return { why: 'записи, которых писатель не знает: ' +
+        [...m.other.keys()].map((v) => '0x' + v.toString(16)).join(',') };
+    if (!m.tile && !m.nodes.length) return { why: 'не блок точек интереса и не блок узлов' };
     if (m.pois.some((p) => p.flags & F_TAIL)) return { why: 'есть хвостовые циклы' };
     let out;
     try { out = writeBlock(m, i); } catch (e) { return { why: 'не пишется: ' + e.message }; }
@@ -230,7 +305,7 @@ if (require.main === module) {
       console.log('  разошлось с байта %d: наш %s, их %s', k,
                   out.subarray(k, k + 12).toString('hex'), b.subarray(k, k + 12).toString('hex'));
     }
-    return { ok, len: out.length, orig: b.length, pois: m.pois.length };
+    return { ok, len: out.length, orig: b.length, pois: m.pois.length, nodes: m.nodes.length };
   };
   if (argv.includes('--scan')) {
     const want = Number(argv.find((a) => /^\d+$/.test(a)) || 400);
@@ -248,7 +323,7 @@ if (require.main === module) {
     const i = Number(argv[0] || 112447);
     const r = one(i);
     console.log('блок %d: %s', i, r.why ? r.why
-      : (r.ok ? 'собран побайтово, ' + r.len + ' байт, точек ' + r.pois
+      : (r.ok ? 'собран побайтово, ' + r.len + ' байт, точек ' + r.pois + ', узлов ' + r.nodes
               : 'РАЗОШЁЛСЯ: наш ' + r.len + ', их ' + r.orig));
   }
 }
