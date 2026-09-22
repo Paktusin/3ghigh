@@ -141,6 +141,9 @@ function buildTile(spec) {
   const parts = [head];
   if (spec.zf) parts.push(spec.zf);
   parts.push(...blocks);
+  // Разделы после блоков — RASTERINFOS и прочие: порядок в цепочке жёсткий,
+  // и они идут последними. На вычислимые поля шапки они не влияют.
+  if (spec.extra) parts.push(...spec.extra);
   const file = Buffer.concat(parts);
 
   // Поля, считаемые по разделам, — теми же формулами, что сверены на 536 тайлах.
