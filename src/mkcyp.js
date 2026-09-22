@@ -4,6 +4,7 @@
 //   node src/mkcyp.js <каталог-выхода> [--donor IS01] [--roads out/cyp/roads.geojson]
 //                     [--classes motorway,trunk,primary]
 //                     [--places out/cyp/places_geo.json] [--country-name CYPRUS]
+//                     [--houses out/cyp/cyprus-latest.osm.pbf]
 //
 // Почему в чужой слот. Число тайлов в базе менять нельзя: `XAC-STRUKTUR`,
 // `NACHBARN`, `FE GRUPPEN`, `L3 GRUPPEN`, `L4 LOAD TABLE` и счётчики
@@ -28,8 +29,10 @@
 //
 // Имена. Если задан файл городов (`--places`), в тайл кладутся разделы
 // `ZE-NAMEN` и `ZE-NAMEN-MMI`: имена улиц из OSM, связь «имя → дорога» и
-// дерево «страна → город → улица». Их смещения и размеры уходят в запись
-// `XAC-STRUKTUR` — без этого устройство разделов не найдёт.
+// дерево «страна → город → улица». С `--houses` добавляется `HAUSNUMMERN`:
+// номера домов из извлечения `.osm.pbf`, посаженные на ближайший отрезок своей
+// улицы. Смещения и размеры всех трёх уходят в запись `XAC-STRUKTUR` — без
+// этого устройство разделов не найдёт.
 //
 // Чего этот набор не делает: не трогает `NACHBARN` (у донора остаются его
 // соседи — для острова это дальние связи, как паромные), не пишет `ZF-NAMEN`,
@@ -150,10 +153,15 @@ function mkcyp(outDir, opt) {
   const names = [];
   let zen = null;
   if (o.places) {
-    zen = roads.zenModel(graph, built, { places: o.places, countryName: o.countryName || 'CYPRUS' });
+    zen = roads.zenModel(graph, built, { places: o.places, houses: o.houses,
+                                         countryName: o.countryName || 'CYPRUS' });
     names.push(zenamen.buildSection({ names: zen.names, refs: zen.refs, blocks: zen.blocks,
                                       version: 2, label: 'ZE-NAMEN', country: CYPRUS }));
     names.push(zenamen.mmiBuildSection(zen.mmi));
+    if (zen.houses) {
+      names.push(require('./hausnr').buildSection({ rows: zen.hnr }));
+      log('дома: ' + JSON.stringify(zen.houseStat) + ' -> записей ' + zen.houses);
+    }
     log('имена: ' + zen.names.length + ' (городов ' + zen.places + ', записей улиц ' +
         zen.streets + '), разделы ' + names.map((b) => b.length).join(' и ') + ' б');
   }
@@ -303,7 +311,28 @@ function mkcyp(outDir, opt) {
            totalBlocks: running, container: idxC.dir, file1, file2, zen };
 }
 
-module.exports = { mkcyp, fitTile, rasterSection, stubLevel2 };
+// Дома из извлечения `.osm.pbf`: точки и контуры зданий с номером и улицей.
+function readHouses(path) {
+  const pbf = require('./osmpbf');
+  const idx = pbf.read(path, {
+    node: (t) => t['addr:housenumber'] !== undefined && t['addr:street'] !== undefined,
+    way: (t) => t['addr:housenumber'] !== undefined && t['addr:street'] !== undefined,
+  });
+  const out = [];
+  for (const p of idx.points) {
+    out.push({ lon: p.lon / 1e7, lat: p.lat / 1e7,
+               number: p.tags['addr:housenumber'], street: p.tags['addr:street'] });
+  }
+  for (const w of idx.ways) {
+    const c = pbf.center(idx, w.refs);
+    if (!c) continue;
+    out.push({ lon: c[0] / 1e7, lat: c[1] / 1e7,
+               number: w.tags['addr:housenumber'], street: w.tags['addr:street'] });
+  }
+  return out;
+}
+
+module.exports = { mkcyp, fitTile, rasterSection, stubLevel2, readHouses };
 
 if (require.main === module) {
   const args = process.argv.slice(2);
@@ -318,6 +347,7 @@ if (require.main === module) {
     roads: flag('roads', 'out/cyp/roads.geojson'),
     classes: flag('classes', 'motorway,motorway_link,trunk,trunk_link,primary,primary_link').split(','),
     places: flag('places') ? JSON.parse(fs.readFileSync(flag('places'), 'utf8')) : null,
+    houses: flag('houses') ? readHouses(flag('houses')) : null,
     countryName: flag('country-name', 'CYPRUS'),
     log: (m) => console.log(m),
   });

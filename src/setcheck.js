@@ -14,6 +14,7 @@ const fldb = require('./fldb');
 const xac = require('./xac');
 const st = require('./struktur');
 const zen = require('./zenamen');
+const hn = require('./hausnr');
 const xg = require('./xacgraph');
 
 // Разделы тайла и их места в записи XAC-STRUKTUR (84 байта на тайл).
@@ -59,6 +60,8 @@ function check(root, donor) {
     reg.push({ name, ok, reg: [ro, rl], file: sec ? [sec.offset, sec.total] : null });
   }
 
+  const ze = byName('ZE-NAMEN');
+
   // сквозная нумерация блоков и счётчик в XACDB HEADER
   const lv = st.parseLevels(xah);
   let running = 0, numErr = 0;
@@ -78,7 +81,7 @@ function check(root, donor) {
 
   // разделы имён
   let names = null;
-  const ze = byName('ZE-NAMEN'), mm = byName('ZE-NAMEN-MMI');
+  const mm = byName('ZE-NAMEN-MMI');
   if (ze) {
     const d = file.subarray(ze.offset, ze.offset + ze.total);
     const h = zen.header(d), an = zen.allNames(d, h), gr = zen.refGroups(d, h);
@@ -94,7 +97,45 @@ function check(root, donor) {
     };
   }
 
-  return { donor, gi, container: c.dir, reg, regBad: reg.filter((r) => !r.ok).length,
+  // дома: поток каждого имени обязан съедаться ровно, а ссылка — лежать в
+  // области ссылок той же улицы
+  let houses = null;
+  const hs = byName('HAUSNUMMERN');
+  if (hs && ze) {
+    const d = file.subarray(hs.offset, hs.offset + hs.total);
+    const h = hn.header(d);
+    const zd = file.subarray(ze.offset, ze.offset + ze.total);
+    const gr = zen.refGroups(zd, zen.header(zd));
+    const own = new Map();
+    if (gr && !gr.err) {
+      for (const g of gr.groups) {
+        for (const x of g.names) {
+          if (!own.has(x.nid)) own.set(x.nid, new Set());
+          for (const r of x.recs) own.get(x.nid).add(g.block + ':' + r);
+        }
+      }
+    }
+    let names = 0, rows = 0, refs = 0, inRefs = 0, exact = 0, bad = 0;
+    for (let k = 0; k + 1 < h.count; k++) {
+      const a = hn.at(d, h, k), b = hn.at(d, h, k + 1);
+      if (a === b) continue;
+      names++;
+      const r = hn.housesOf(d, k, h);
+      if (!r) { bad++; continue; }
+      if (r.end === h.data.off + b) exact++; else bad++;
+      rows += r.rows.length;
+      for (const x of r.rows) {
+        for (const v of x.refs) {
+          refs++;
+          if (own.get(k) && own.get(k).has(v.block + ':' + v.rec)) inRefs++;
+        }
+      }
+    }
+    houses = { section: hs.total, indexOk: h.count === zen.header(zd).index.names + 1,
+               names, rows, refs, inRefs, exact, bad };
+  }
+
+  return { donor, gi, container: c.dir, reg, regBad: reg.filter((r) => !r.ok).length, houses,
            numErr, rows: order.length * 4, blockSum: running, counter,
            fldb: fldb.verify(c.db), edges: edges.edges.size, lost: edges.lost, names };
 }
@@ -122,6 +163,13 @@ if (require.main === module) {
               'счётчик XACDB HEADER ' + r.counter);
   console.log('каталог FLDB: аномалий ' + r.fldb.anomalies);
   console.log('рёбра тайла: ' + r.edges + ', неразобранных ссылок ' + r.lost);
+  if (r.houses) {
+    const x = r.houses;
+    console.log('дома: раздел ' + x.section + ' б, записей индекса по именам: ' +
+      (x.indexOk ? 'сходится' : 'НЕ СХОДИТСЯ') + '; имён с домами ' + x.names +
+      ', записей ' + x.rows + ', поток съеден ровно у ' + x.exact + ', сбоев ' + x.bad);
+    console.log('ссылок домов ' + x.refs + ', из них в области ссылок своей улицы ' + x.inRefs);
+  }
   if (r.names) {
     const n = r.names;
     console.log('имена: ' + n.count + ', поток съеден ' + (n.streamExact ? 'ровно' : 'НЕ РОВНО') +
@@ -131,7 +179,9 @@ if (require.main === module) {
     console.log('дерево: записей ' + n.mmi + ', корней ' + n.roots + ', листьев ' + n.leaves);
   }
   const bad = r.regBad || r.numErr || r.lost || r.fldb.anomalies ||
-              (r.names && (!r.names.streamExact || !r.names.refsExact || r.names.err));
+              (r.names && (!r.names.streamExact || !r.names.refsExact || r.names.err)) ||
+              (r.houses && (r.houses.bad || !r.houses.indexOk ||
+                            r.houses.refs !== r.houses.inRefs));
   console.log(bad ? 'ЕСТЬ РАСХОЖДЕНИЯ' : 'расхождений нет');
   process.exit(bad ? 1 : 0);
 }

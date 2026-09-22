@@ -9,6 +9,8 @@
 //   --places <файл>    города с координатами: [{ name, lon, lat }] — дерево
 //                      ZE-NAMEN-MMI «страна -> город -> улица»
 //   --country-name CYPRUS   корень дерева
+//   --houses <файл.osm.pbf> номера домов: садятся на ближайший отрезок своей
+//                      улицы и уходят в раздел HAUSNUMMERN
 //   --no-names         собрать тайл без разделов имён
 //   --code CY00        код тайла            --index 3776   номер в реестре
 //   --country 113      код страны (Кипр)    --base 0       сквозной номер первого блока
@@ -127,6 +129,9 @@ function graphFromGeoJSON(fc, opt) {
   const classes = opt && opt.classes ? new Set(opt.classes) : null;
   const byKey = new Map(), nodes = [], edges = [], seen = new Set();
   const names = [], byName = new Map();
+  // сырое имя OSM нужно отдельно от показываемого: дома ссылаются тегом
+  // `addr:street` именно на него, а показываем мы `name:en`, когда он есть
+  const rawNames = [], byRaw = new Map();
   let ways = 0, points = 0, loops = 0, dups = 0, named = 0;
 
   const nodeAt = (lon, lat) => {
@@ -149,6 +154,12 @@ function graphFromGeoJSON(fc, opt) {
       if (ni === undefined) { ni = names.length; names.push(nm); byName.set(nm, ni); }
       named++;
     }
+    const rawText = latinize((f.properties || {}).name || '');
+    let ri = -1;
+    if (rawText) {
+      ri = byRaw.get(rawText);
+      if (ri === undefined) { ri = rawNames.length; rawNames.push(rawText); byRaw.set(rawText, ri); }
+    }
     ways++;
     const c = f.geometry.coordinates;
     points += c.length;
@@ -159,11 +170,11 @@ function graphFromGeoJSON(fc, opt) {
       const key = prev < cur ? prev + '-' + cur : cur + '-' + prev;
       if (seen.has(key)) { dups++; prev = cur; continue; }
       seen.add(key);
-      edges.push({ a: prev, b: cur, frc, name: ni });
+      edges.push({ a: prev, b: cur, frc, name: ni, raw: ri });
       prev = cur;
     }
   }
-  return { nodes, edges, names, ways, points, loops, dups, named };
+  return { nodes, edges, names, rawNames, byRaw, ways, points, loops, dups, named };
 }
 
 // --- нарезка на блоки ---------------------------------------------------------
@@ -319,6 +330,33 @@ function buildBlocks(graph, opt) {
 // 0x3c, улица 0xc0 — и это ДОГАДКА: что кодируют биты 0…6, не установлено.
 const MMI_ROOT = 0x3f, MMI_PLACE = 0x3c, MMI_STREET = 0xc0;
 
+// Номер дома из тега `addr:housenumber`. Формат хранит целые, поэтому буквенная
+// приставка теряется («5A» -> 5), а диапазон «5-7» ложится на пару «от, до»
+// как родной. Косая черта диапазоном НЕ считается: «12/3» — это дом 12,
+// квартира 3. Что не разобрали — возвращаем null и считаем отдельно.
+function houseNumber(str) {
+  const s = String(str).trim();
+  let m = /^(\d{1,5})\s*[-–]\s*(\d{1,5})$/.exec(s);
+  if (m) {
+    const a = +m[1], b = +m[2];
+    return a <= b ? [a, b] : [b, a];
+  }
+  m = /^(\d{1,5})/.exec(s);
+  if (!m) return null;
+  const v = +m[1];
+  return [v, v];
+}
+
+// Расстояние от точки до отрезка в единицах карты, в квадрате.
+function segDist2(px, py, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay;
+  const L = dx * dx + dy * dy;
+  let t = L ? ((px - ax) * dx + (py - ay) * dy) / L : 0;
+  t = t < 0 ? 0 : t > 1 ? 1 : t;
+  const qx = ax + t * dx - px, qy = ay + t * dy - py;
+  return qx * qx + qy * qy;
+}
+
 function zenModel(graph, built, opt) {
   const o = opt || {};
   const places = (o.places || []).filter((p) => p && p.lon != null && p.lat != null)
@@ -336,6 +374,7 @@ function zenModel(graph, built, opt) {
 
   // «имя в городе» -> блоки и номера записей
   const streets = new Map();
+  const edgeKey = new Array(graph.edges.length);
   graph.edges.forEach((e, ei) => {
     if (e.name < 0) return;
     const pos = built.names.place[ei];
@@ -343,11 +382,48 @@ function zenModel(graph, built, opt) {
     const a = graph.nodes[e.a], b = graph.nodes[e.b];
     const pl = nearest((a.x + b.x) / 2, (a.y + b.y) / 2);
     const key = e.name + '@' + pl;
+    edgeKey[ei] = key;
     let st = streets.get(key);
     if (!st) { st = { name: graph.names[e.name], place: pl, by: new Map() }; streets.set(key, st); }
     if (!st.by.has(pos.block)) st.by.set(pos.block, new Set());
     st.by.get(pos.block).add(pos.rec);
   });
+
+  // Дома. Тег `addr:street` указывает на СЫРОЕ имя дороги, поэтому улицу ищем
+  // по нему, а не по показываемому. Дальше дом садится на ближайший отрезок
+  // своей улицы — номера записей у нас уже розданы, взять их неоткуда больше.
+  const stat = { всего: 0, 'улица не найдена': 0, 'номер не разобран': 0, 'село на отрезок': 0 };
+  if (o.houses && o.houses.length) {
+    const byRaw = new Map();
+    graph.edges.forEach((e, ei) => {
+      if (e.raw === undefined || e.raw < 0) return;
+      let a = byRaw.get(e.raw);
+      if (!a) byRaw.set(e.raw, a = []);
+      a.push(ei);
+    });
+    for (const h of o.houses) {
+      stat.всего++;
+      const ri = graph.byRaw.get(latinize(h.street || ''));
+      const cand = ri === undefined ? null : byRaw.get(ri);
+      if (!cand) { stat['улица не найдена']++; continue; }
+      const nums = houseNumber(h.number);
+      if (!nums) { stat['номер не разобран']++; continue; }
+      const px = Math.round(h.lon * LON), py = Math.round(h.lat * LAT);
+      let best = -1, bd = Infinity;
+      for (const ei of cand) {
+        const e = graph.edges[ei], a = graph.nodes[e.a], b = graph.nodes[e.b];
+        const d = segDist2(px, py, a.x, a.y, b.x, b.y);
+        if (d < bd) { bd = d; best = ei; }
+      }
+      const pos = best >= 0 ? built.names.place[best] : null;
+      if (!pos) { stat['улица не найдена']++; continue; }
+      const key = edgeKey[best];
+      const st = key && streets.get(key);
+      if (!st) { stat['улица не найдена']++; continue; }
+      (st.houses || (st.houses = [])).push({ nums, block: pos.block, rec: pos.rec });
+      stat['село на отрезок']++;
+    }
+  }
 
   // 0 — страна, дальше города, дальше улицы; порядок пока свой, сортируем ниже
   const rows = [{ name: latinize(o.countryName || 'COUNTRY'), refs: null, kind: 'root', up: -1 }];
@@ -356,6 +432,7 @@ function zenModel(graph, built, opt) {
     name: st.name, kind: 'street', up: st.place < 0 ? 0 : 1 + st.place,
     refs: [...st.by.keys()].sort((a, b) => a - b)
       .map((block) => ({ block, recs: [...st.by.get(block)].sort((a, b) => a - b) })),
+    houses: st.houses || null,
   });
 
   const order = rows.map((_, i) => i)
@@ -371,8 +448,24 @@ function zenModel(graph, built, opt) {
     if (r.kind === 'root') return { flags: MMI_ROOT, parent: null };
     return { flags: r.kind === 'place' ? MMI_PLACE : MMI_STREET, parent: nid[r.up] };
   });
-  return { names, refs, mmi, blocks: built.names.blocks,
-           places: places.length, streets: streets.size };
+  // Дома для HAUSNUMMERN: запись на каждый номер, ссылка одна — тот отрезок,
+  // на который дом сел. Повторы «номер на том же отрезке» отбрасываем.
+  const hnr = order.map((i) => {
+    const list = rows[i].houses;
+    if (!list || !list.length) return null;
+    const seen = new Set(), out = [];
+    list.sort((a, b) => a.block - b.block || a.rec - b.rec || a.nums[0] - b.nums[0]);
+    for (const h of list) {
+      const k = h.block + ':' + h.rec + ':' + h.nums[0] + ':' + h.nums[1];
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push({ left: h.nums, right: null, refs: [{ block: h.block, rec: h.rec }] });
+    }
+    return out;
+  });
+  return { names, refs, mmi, hnr, blocks: built.names.blocks,
+           places: places.length, streets: streets.size,
+           houses: hnr.reduce((a, x) => a + (x ? x.length : 0), 0), houseStat: stat };
 }
 
 // Блоки -> файл тайла. Раздел ZF-NAMEN обязателен по реестру, но может быть
@@ -488,6 +581,7 @@ function convert(geojson, opt) {
     extra.push(zn.buildSection({ names: zen.names, refs: zen.refs, blocks: zen.blocks,
                                  version: 2, label: 'ZE-NAMEN', country: o.country || 0 }));
     extra.push(zn.mmiBuildSection(zen.mmi));
+    if (zen.houses) extra.push(require('./hausnr').buildSection({ rows: zen.hnr }));
   }
   const file = buildTileFile(built.blocks, Object.assign({}, o,
     { extra: (o.extra || []).concat(extra) }));
@@ -498,7 +592,8 @@ function convert(geojson, opt) {
 
 module.exports = { convert, graphFromGeoJSON, splitNodes, layout, buildBlocks,
                    buildTileFile, verify, verifyNames, nameRefs, zenModel,
-                   latinize, roadName, attrByFrc, setAttributes, FRC };
+                   latinize, roadName, houseNumber, segDist2,
+                   attrByFrc, setAttributes, FRC };
 
 if (require.main === module) {
   const args = process.argv.slice(2);
@@ -516,7 +611,30 @@ if (require.main === module) {
   const t0 = Date.now();
   const fc = JSON.parse(fs.readFileSync(src, 'utf8'));
   const placesFile = flag('places');
+  const housesFile = flag('houses');
+  let houses = null;
+  if (housesFile) {
+    const pbf = require('./osmpbf');
+    const idx = pbf.read(housesFile, {
+      node: (t) => t['addr:housenumber'] !== undefined && t['addr:street'] !== undefined,
+      way: (t) => t['addr:housenumber'] !== undefined && t['addr:street'] !== undefined,
+    });
+    houses = [];
+    for (const p of idx.points) {
+      houses.push({ lon: p.lon / 1e7, lat: p.lat / 1e7,
+                    number: p.tags['addr:housenumber'], street: p.tags['addr:street'] });
+    }
+    for (const w of idx.ways) {
+      const c = pbf.center(idx, w.refs);
+      if (!c) continue;
+      houses.push({ lon: c[0] / 1e7, lat: c[1] / 1e7,
+                    number: w.tags['addr:housenumber'], street: w.tags['addr:street'] });
+    }
+    console.log('дома из ' + housesFile + ': ' + houses.length +
+                ' (точками ' + idx.points.length + ', контурами ' + idx.ways.length + ')');
+  }
   const r = convert(fc, {
+    houses,
     classes,
     names: !args.includes('--no-names'),
     places: placesFile ? JSON.parse(fs.readFileSync(placesFile, 'utf8')) : null,
@@ -545,6 +663,10 @@ if (require.main === module) {
       ', концы совпали ' + n.coords + ' (межблочных записей ' + n.cross + ')');
     console.log('раздел ZE-NAMEN: имён ' + r.zen.names.length + ' (городов ' + r.zen.places +
       ', записей улиц ' + r.zen.streets + '), дерево «страна -> город -> улица»');
+    if (r.zen.houseStat.всего) {
+      console.log('дома: ' + JSON.stringify(r.zen.houseStat) +
+        ' -> записей HAUSNUMMERN ' + r.zen.houses);
+    }
     console.log('за ' + ((Date.now() - t0) / 1000).toFixed(1) + ' с');
   }
   if (out) {

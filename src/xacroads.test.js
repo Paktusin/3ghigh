@@ -289,3 +289,75 @@ test('тайл: разделы имён встают после блоков и 
   assert.equal(rows.length, r.zen.names.length, 'записей столько же, сколько имён');
   assert.equal(rows.filter((x) => x.parent === null).length, 1, 'корень один');
 });
+
+// ---------------------------------------------------------------------------
+// Номера домов.
+
+test('номер дома: диапазон, буквенная приставка, косая черта', () => {
+  assert.deepEqual(xr.houseNumber('5'), [5, 5]);
+  assert.deepEqual(xr.houseNumber('5A'), [5, 5], 'приставка теряется');
+  assert.deepEqual(xr.houseNumber(' 34-36 '), [34, 36], 'диапазон');
+  assert.deepEqual(xr.houseNumber('7–9'), [7, 9], 'длинное тире тоже');
+  assert.deepEqual(xr.houseNumber('12/3'), [12, 12], 'косая черта — не диапазон');
+  assert.equal(xr.houseNumber('A'), null, 'без цифр — никак');
+});
+
+test('расстояние до отрезка считается с зажимом на концах', () => {
+  assert.equal(xr.segDist2(0, 5, 0, 0, 10, 0), 25, 'точка над серединой');
+  assert.equal(xr.segDist2(-3, 4, 0, 0, 10, 0), 25, 'за левым концом');
+  assert.equal(xr.segDist2(13, 4, 0, 0, 10, 0), 25, 'за правым концом');
+  assert.equal(xr.segDist2(5, 0, 0, 0, 10, 0), 0, 'на отрезке');
+});
+
+test('дом садится на ближайший отрезок своей улицы', () => {
+  // две параллельные улицы с разными именами, дом стоит у южной
+  const fc = { type: 'FeatureCollection', features: [
+    named([[33.000, 35.000], [33.010, 35.000]], 'primary',
+      { name: 'Notia', name_en: 'South Street' }),
+    named([[33.000, 35.010], [33.010, 35.010]], 'primary',
+      { name: 'Voreia', name_en: 'North Street' }),
+  ] };
+  const r = xr.convert(fc, { attr: attrTable(), code: 'CY00', country: 113,
+    countryName: 'Cyprus', places: [{ name: 'Town', lon: 33.005, lat: 35.005 }],
+    houses: [
+      { lon: 33.004, lat: 35.0001, number: '7', street: 'Notia' },
+      { lon: 33.006, lat: 35.0099, number: '10-12', street: 'Voreia' },
+      { lon: 33.004, lat: 35.000, number: '1', street: 'Nowhere' },
+    ] });
+  assert.equal(r.zen.houseStat['село на отрезок'], 2, 'два дома из трёх');
+  assert.equal(r.zen.houseStat['улица не найдена'], 1, 'улицы Nowhere нет');
+
+  // раздел в тайле, и ссылки домов лежат в области ссылок своей же улицы
+  const list = xac.sections(r.file).list;
+  const hs = list.find((s) => s.name === 'HAUSNUMMERN');
+  assert.ok(hs, 'раздел HAUSNUMMERN на месте');
+  assert.ok(list.indexOf(list.find((s) => s.name === 'ZE-NAMEN-MMI')) < list.indexOf(hs),
+    'после ZE-NAMEN-MMI');
+  const hn = require('./hausnr'), zen = require('./zenamen');
+  const d = r.file.subarray(hs.offset, hs.offset + hs.total), h = hn.header(d);
+  const ze = list.find((s) => s.name === 'ZE-NAMEN');
+  const zd = r.file.subarray(ze.offset, ze.offset + ze.total);
+  const gr = zen.refGroups(zd), names = zen.allNames(zd).names;
+  const own = new Map();
+  for (const g of gr.groups) {
+    for (const x of g.names) {
+      if (!own.has(x.nid)) own.set(x.nid, new Set());
+      for (const rec of x.recs) own.get(x.nid).add(g.block + ':' + rec);
+    }
+  }
+  let found = 0, total = 0;
+  const seen = [];
+  for (let k = 0; k + 1 < h.count; k++) {
+    const a = hn.at(d, h, k), b = hn.at(d, h, k + 1);
+    if (a === b) continue;
+    const row = hn.housesOf(d, k, h);
+    assert.equal(row.end, h.data.off + b, 'поток имени съеден ровно');
+    for (const x of row.rows) {
+      seen.push([names[k], x.left]);
+      for (const v of x.refs) { total++; if (own.get(k).has(v.block + ':' + v.rec)) found++; }
+    }
+  }
+  assert.equal(total, 2, 'две ссылки');
+  assert.equal(found, 2, 'обе лежат в области ссылок своей улицы');
+  assert.deepEqual(seen.sort(), [['NORTH STREET', [10, 12]], ['SOUTH STREET', [7, 7]]]);
+});
