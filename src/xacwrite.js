@@ -285,6 +285,33 @@ function writeBlock(m, tally) {
 // Индексы таблицы ATTRIBUTE, при которых запись вектора занимает ровно четыре
 // байта: разборщик не потребует ни подстановки половин слова (биты 31 и 15
 // заготовки), ни дополнительных полей (биты 30, 29, 28, 27).
+// Индексы ATTRIBUTE, у которых в хвосте записи лежит ТОЛЬКО список имён
+// ведения: в байте 0 описателя стоит бит 5 и больше ничего из удлиняющего,
+// а бит 7 байта 2 снят. Разбор — в docs/formats/zf.md.
+function nameAttributes(attr) {
+  const out = [];
+  for (let i = 0; i < attr.length && i <= 0x07ff; i++) {
+    const v = attr[i] >>> 0;
+    if (!v) continue;
+    if (v & 0x80000000) continue;              // байт флагов берётся из записи
+    if ((v >>> 15) & 1) continue;              // ещё два байта
+    if (v & 0x58000000) continue;              // другие хвосты (биты 3, 4, 6)
+    if (!(v & 0x20000000)) continue;           // нужен именно список имён
+    out.push(i);
+  }
+  return out;
+}
+
+// Хвост записи: имена ведения по два байта, бит 6 первого — «есть следующий».
+function encodeNames(list) {
+  const out = Buffer.alloc(list.length * 2);
+  list.forEach((v, i) => {
+    if (!(v >= 0 && v < 0x3fff)) throw new Error('номер имени ведения вне 14 бит: ' + v);
+    out.writeUInt16BE((i < list.length - 1 ? 0x4000 : 0) | v, i * 2);
+  });
+  return out;
+}
+
 function simpleAttributes(attr) {
   const out = [];
   for (let i = 0; i < attr.length && i <= 0x07ff; i++) {
@@ -439,6 +466,11 @@ function buildBlock(spec) {
         step[first[i] + k] = k === 0 ? form / 2 : 0;
         vectors++;
         p += b.length;
+        if (v.names && v.names.length) {        // имена ведения идут сразу за записью
+          const t = encodeNames(v.names);
+          body.push(t);
+          p += t.length;
+        }
       }
     }
     for (let k = 0; k < backs.length; k++) {
@@ -506,7 +538,8 @@ function buildBlock(spec) {
   return out;
 }
 
-module.exports = { readBlock, writeBlock, buildBlock, simpleAttributes, encodeCoord,
+module.exports = { readBlock, writeBlock, buildBlock, simpleAttributes,
+                   nameAttributes, encodeNames, encodeCoord,
                    coordForm, looksSub, encodeLength, encodeHeader, encodeNull, scaleAt,
                    recordParts, HDR, SUB };
 

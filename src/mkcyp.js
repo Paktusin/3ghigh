@@ -48,6 +48,7 @@ const raster = require('./raster');
 const tile = require('./xactile');
 const roads = require('./xacroads');
 const zenamen = require('./zenamen');
+const zfnamen = require('./zfnamen');
 const conf = require('./conf');
 const dataset = require('./dataset');
 
@@ -135,8 +136,22 @@ function mkcyp(outDir, opt) {
   const graph = roads.graphFromGeoJSON(fc, { classes: o.classes });
   const attr = roads.setAttributes(root);
   const base = lv[1].rows[gi].firstBlock;
+  // Имена ведения: те же показываемые имена, по возрастанию. Номер лежит в
+  // хвосте записи вектора, поэтому индекс ATTRIBUTE берётся «именующий».
+  let named = null, zfSection = null;
+  if (graph.names.length) {
+    const order = graph.names.map((_, k) => k)
+      .sort((a, b) => (graph.names[a] < graph.names[b] ? -1
+                     : graph.names[a] > graph.names[b] ? 1 : a - b));
+    const of = new Int32Array(graph.names.length).fill(-1);
+    order.forEach((gi2, k) => { of[gi2] = k; });
+    named = { of, attr: roads.attrByFrcNamed(attr) };
+    const tok = zfnamen.tokens(xah);
+    zfSection = zfnamen.buildSection(order.map((gi2) => ({ text: graph.names[gi2], kind: 0 })), tok);
+    log('имена ведения: ' + order.length + ', раздел ZF-NAMEN ' + zfSection.length + ' б');
+  }
   const built = roads.buildBlocks(graph, { attr, attrIdx: roads.attrByFrc(attr),
-    base, country: CYPRUS, maxNodes: o.maxNodes || 9000 });
+    named, base, country: CYPRUS, maxNodes: o.maxNodes || 9000 });
   log('дорог ' + graph.ways + ', узлов ' + graph.nodes.length + ', рёбер ' + graph.edges.length +
       ' -> блоков ' + built.blocks.length + ' (внутриблочных рёбер ' + built.local +
       ', межблочных ' + built.cross + ')');
@@ -168,7 +183,7 @@ function mkcyp(outDir, opt) {
 
   const spec = {
     code: donor, file: name1, index: gi, country: CYPRUS, built: built14,
-    zf: tile.section('ZF-NAMEN', Buffer.alloc(ZF_SIZE - 20)),
+    zf: zfSection || tile.section('ZF-NAMEN', Buffer.alloc(ZF_SIZE - 20)),
     blocks: built.blocks,
     extra: names.concat([rasterSection([bb[0] - 1000, bb[1] - 1000, bb[2] + 1000, bb[3] + 1000])]),
   };
@@ -232,8 +247,9 @@ function mkcyp(outDir, opt) {
   patchU16(fd, r1 + 0x10, vb.length);
   patchU32(fd, r1 + 0x14, vb.length ? vb[0].offset : 0);
   patchU32(fd, r1 + 0x18, vbSize);
+  const zfSec = xac.sections(file1).list.find((x) => x.name === 'ZF-NAMEN');
   patchU32(fd, r1 + 0x1c, HDR_SIZE);
-  patchU32(fd, r1 + 0x20, ZF_SIZE);
+  patchU32(fd, r1 + 0x20, zfSec ? zfSec.total : ZF_SIZE);
   patchU32(fd, r1 + 0x24, 0);
   for (const n of [2, 3, 4]) {                       // данных на грубых уровнях нет
     const r = rowAt(n, gi);

@@ -15,6 +15,7 @@ const xac = require('./xac');
 const st = require('./struktur');
 const zen = require('./zenamen');
 const hn = require('./hausnr');
+const zfn = require('./zfnamen');
 const xg = require('./xacgraph');
 
 // Разделы тайла и их места в записи XAC-STRUKTUR (84 байта на тайл).
@@ -135,7 +136,24 @@ function check(root, donor) {
                names, rows, refs, inRefs, exact, bad };
   }
 
-  return { donor, gi, container: c.dir, reg, regBad: reg.filter((r) => !r.ok).length, houses,
+  // имена ведения: поток обязан разобраться и дать столько же имён, сколько
+  // обещает шапка
+  let guide = null;
+  const zs = byName('ZF-NAMEN');
+  if (zs && zs.total > 0x4c) {
+    const d = file.subarray(zs.offset, zs.offset + zs.total);
+    if (d.readUInt32BE(0x30) === 0) zs.empty = true;          // заглушка «имён нет»
+  }
+  if (zs && !zs.empty && zs.total > 0x4c) {
+    const d = file.subarray(zs.offset, zs.offset + zs.total);
+    try {
+      const r = zfn.readSection(d, zfn.tokens(xah));
+      guide = r && { section: zs.total, count: r.count, parsed: r.names.length,
+                     err: r.err || null, sample: r.names.slice(0, 4).map((x) => x.text) };
+    } catch (e) { guide = { section: zs.total, err: e.message, count: 0, parsed: 0, sample: [] }; }
+  }
+
+  return { donor, gi, container: c.dir, reg, regBad: reg.filter((r) => !r.ok).length, houses, guide,
            numErr, rows: order.length * 4, blockSum: running, counter,
            fldb: fldb.verify(c.db), edges: edges.edges.size, lost: edges.lost, names };
 }
@@ -163,6 +181,12 @@ if (require.main === module) {
               'счётчик XACDB HEADER ' + r.counter);
   console.log('каталог FLDB: аномалий ' + r.fldb.anomalies);
   console.log('рёбра тайла: ' + r.edges + ', неразобранных ссылок ' + r.lost);
+  if (r.guide) {
+    const g = r.guide;
+    console.log('имена ведения: раздел ' + g.section + ' б, в шапке ' + g.count +
+      ', разобрано из потока ' + g.parsed + (g.err ? ', ОШИБКА ' + g.err : '') +
+      (g.sample.length ? ' — ' + g.sample.join(' | ') : ''));
+  }
   if (r.houses) {
     const x = r.houses;
     console.log('дома: раздел ' + x.section + ' б, записей индекса по именам: ' +
@@ -181,7 +205,8 @@ if (require.main === module) {
   const bad = r.regBad || r.numErr || r.lost || r.fldb.anomalies ||
               (r.names && (!r.names.streamExact || !r.names.refsExact || r.names.err)) ||
               (r.houses && (r.houses.bad || !r.houses.indexOk ||
-                            r.houses.refs !== r.houses.inRefs));
+                            r.houses.refs !== r.houses.inRefs)) ||
+              (r.guide && (r.guide.err || r.guide.parsed !== r.guide.count));
   console.log(bad ? 'ЕСТЬ РАСХОЖДЕНИЯ' : 'расхождений нет');
   process.exit(bad ? 1 : 0);
 }

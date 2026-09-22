@@ -46,6 +46,7 @@ const xv = require('./xacvec');
 const tile = require('./xactile');
 const xr = require('./xacrec');
 const st = require('./struktur');
+const zfn = require('./zfnamen');
 const dataset = require('./dataset');
 
 const LON = 72000, LAT = 40000000 / 360;
@@ -68,6 +69,17 @@ const FRC = {
 // не берём: это описатель без единого признака, и дорогой он быть не может.
 // В заводской таблице нулей нет вовсе (0 из 2048), так что правило ничего не
 // отнимает, зато не даёт синтетической таблице подсунуть пустой индекс.
+// То же, но из индексов, у которых в хвосте записи лежит список имён ведения.
+function attrByFrcNamed(attr) {
+  const out = {};
+  for (const i of xw.nameAttributes(attr)) {
+    if (!attr[i]) continue;
+    const frc = attr[i] & 7;
+    if (out[frc] === undefined) out[frc] = i;
+  }
+  return out;
+}
+
 function attrByFrc(attr) {
   const out = {};
   for (const i of xw.simpleAttributes(attr)) {
@@ -203,7 +215,7 @@ function splitNodes(nodes, idx, maxNodes) {
 // Кто где лежит и какие записи у каждого узла. Ребро внутри блока — вектор у
 // узла с меньшим номером и встречная ссылка у второго; ребро между блоками —
 // межблочный вектор и встречная ссылка в другой блок.
-function layout(graph, groups, attrIdx) {
+function layout(graph, groups, attrIdx, named) {
   const blockOf = new Int32Array(graph.nodes.length).fill(-1);
   const localOf = new Int32Array(graph.nodes.length).fill(-1);
   groups.forEach((g, bi) => g.forEach((n, k) => { blockOf[n] = bi; localOf[n] = k; }));
@@ -213,17 +225,22 @@ function layout(graph, groups, attrIdx) {
   let local = 0, cross = 0;
 
   graph.edges.forEach((e, ei) => {
-    const idx = attrIdx[e.frc] === undefined ? attrIdx[6] : attrIdx[e.frc];
+    // У дороги с именем ведения индекс берётся из «именующих»: у них в хвосте
+    // записи лежит список имён, у простых хвоста нет вовсе.
+    const zf = named && e.name >= 0 ? named.of[e.name] : -1;
+    const tab = zf >= 0 ? named.attr : attrIdx;
+    const idx = tab[e.frc] === undefined ? tab[6] : tab[e.frc];
+    const names = zf >= 0 ? [zf] : null;
     const ba = blockOf[e.a], bb = blockOf[e.b];
     const la = localOf[e.a], lb = localOf[e.b];
     if (ba === bb) {
       const pos = recs[ba][la].vecs.length;
-      recs[ba][la].vecs.push({ to: lb, idx });
+      recs[ba][la].vecs.push({ to: lb, idx, names });
       recs[bb][lb].backs.push({ from: la, at: pos });
       local++;
     } else {
       const pos = recs[ba][la].vecs.length;
-      recs[ba][la].vecs.push({ cross: bb, node: lb, idx });          // номер запишем потом
+      recs[ba][la].vecs.push({ cross: bb, node: lb, idx, names });   // номер запишем потом
       recs[bb][lb].backs.push({ crossBlock: ba, node: la, at: pos });
       cross++;
     }
@@ -281,7 +298,7 @@ function buildBlocks(graph, opt) {
 
   for (let round = 0; round < 8; round++) {
     const groups = splitNodes(graph.nodes, graph.nodes.map((_, i) => i), maxNodes);
-    const lay = layout(graph, groups, attrIdx);
+    const lay = layout(graph, groups, attrIdx, o.named);
     const firsts = lay.recs.map(firstEntries);
     const tooMany = firsts.findIndex((f) => f.count > MAX_ENTRIES);
     if (tooMany >= 0) { maxNodes = Math.floor(maxNodes * 0.7); continue; }
@@ -293,8 +310,10 @@ function buildBlocks(graph, opt) {
         const r = lay.recs[bi][k];
         return {
           x: graph.nodes[gi].x, y: graph.nodes[gi].y,
-          vectors: r.vecs.map((v) => v.cross === undefined ? { to: v.to, idx: v.idx }
-            : { block: base + v.cross, ref: firsts[v.cross].first[v.node], idx: v.idx }),
+          vectors: r.vecs.map((v) => v.cross === undefined
+            ? { to: v.to, idx: v.idx, names: v.names }
+            : { block: base + v.cross, ref: firsts[v.cross].first[v.node], idx: v.idx,
+                names: v.names }),
           backs: r.backs.map((b) => b.crossBlock === undefined ? { from: b.from, at: b.at }
             : { block: base + b.crossBlock,
                 ref: firsts[b.crossBlock].first[b.node] + b.at }),
@@ -486,7 +505,8 @@ function buildTileFile(blocks, opt) {
     index: o.index || 0,
     country: o.country || 0,
     built: o.built || '20260922120000',
-    zf: tile.section('ZF-NAMEN', Buffer.alloc(o.zfSize === undefined ? 92 : o.zfSize)),
+    zf: o.zfSection || tile.section('ZF-NAMEN',
+      Buffer.alloc(o.zfSize === undefined ? 92 : o.zfSize)),
     blocks: padded,
     extra: o.extra,
   });
@@ -563,6 +583,69 @@ function verifyNames(file, graph, built) {
   return { total, hit, coords, cross, missing };
 }
 
+// Сверка имён ведения: у каждого именованного ребра запись в блоке обязана
+// нести хвост, а номер в хвосте — раскрываться в имя той же улицы. Читаем
+// собранный файл так же, как это делает прошивка (FUN_082740bc).
+function verifyGuidance(file, graph, built, attr) {
+  const xac = require('./xac');
+  const list = xac.sections(file).list;
+  const zfSec = list.find((x) => x.name === 'ZF-NAMEN');
+  if (!zfSec) return null;
+  const tok = zfn.tokens(st.openIndex(dataset.resolveRoot()).buf);
+  const back = zfn.readSection(file.subarray(zfSec.offset, zfSec.offset + zfSec.total), tok);
+  const texts = (back && back.names ? back.names : []).map((x) => x.text);
+  const blocks = list.filter((x) => x.name === 'VEKTORBLOCK')
+    .map((x) => file.subarray(x.offset, x.offset + x.total));
+
+  // номер записи -> хвост, по каждому блоку
+  const tail = blocks.map((s) => {
+    const m = new Map();
+    if (s.readUInt16BE(0x72) !== 1) return m;
+    const tab = s.readUInt32BE(0x6c), cnt = s.readUInt16BE(0x70);
+    for (let k = 0; k < cnt; k++) {
+      let q = s.readUInt16BE(tab + k * 2) * 2;
+      if (q <= 0 || q + 4 > s.length || (s[q] & 0xc0) !== 0xc0) continue;
+      const b2 = s[q + 2], b3 = s[q + 3];
+      q += 4;
+      if (b2 & 0x08) continue;                        // встречная ссылка: имя у хозяина
+      if (b2 & 0x40) q += 2;                          // межблочная: ещё слово
+      const idx = ((b2 & 7) << 8) | b3;
+      const desc = attr[idx] >>> 0;
+      let b5 = (desc >>> 24) & 0xff;
+      if (b5 & 0x80) { b5 = s[q]; q += 2; }
+      if (((desc >>> 8) & 0xff) & 0x80) q += 2;
+      if (b5 & 0x40) q += 4;
+      if (b5 & 0x10) q += 4;
+      if (!(b5 & 0x20)) continue;
+      const got = [];
+      for (let i = 0; i < 8 && q + 2 <= s.length; i++) {
+        const b0 = s[q], v = ((b0 & 0x3f) << 8) | s[q + 1];
+        q += 2;
+        got.push(v);
+        if (!((b0 >> 6) & 1)) break;
+      }
+      m.set(k, got);
+    }
+    return m;
+  });
+
+  let total = 0, withTail = 0, sameText = 0, outOfRange = 0;
+  graph.edges.forEach((e, ei) => {
+    if (e.name < 0) return;
+    const pos = built.names.place[ei];
+    if (!pos) return;
+    total++;
+    const got = tail[pos.block] && tail[pos.block].get(pos.rec);
+    if (!got || !got.length) return;
+    withTail++;
+    const v = got[0];
+    if (v >= texts.length) { outOfRange++; return; }
+    if (texts[v] === graph.names[e.name]) sameText++;
+  });
+  return { names: texts.length, total, withTail, sameText, outOfRange,
+           parsed: back ? back.names.length : 0, count: back ? back.count : 0 };
+}
+
 // --- всё вместе ---------------------------------------------------------------
 
 function convert(geojson, opt) {
@@ -571,7 +654,21 @@ function convert(geojson, opt) {
   const attrIdx = attrByFrc(attr);
   const graph = graphFromGeoJSON(geojson, o);
   if (!graph.nodes.length) throw new Error('в наборе дорог нет ни одной точки');
-  const built = buildBlocks(graph, Object.assign({}, o, { attrIdx }));
+  // Имена ведения: те же показываемые имена, по возрастанию — по ним движок
+  // ищет двоичным поиском. Номер имени 14-битный, больше 16 382 не влезет.
+  let named = null, zfSection = null;
+  if (o.guidance !== false && graph.names.length) {
+    const order = graph.names.map((_, i) => i)
+      .sort((a, b) => (graph.names[a] < graph.names[b] ? -1
+                     : graph.names[a] > graph.names[b] ? 1 : a - b));
+    if (order.length > 0x3ffe) throw new Error('имён ведения больше 16 382: ' + order.length);
+    const of = new Int32Array(graph.names.length).fill(-1);
+    order.forEach((gi, k) => { of[gi] = k; });
+    named = { of, attr: attrByFrcNamed(attr) };
+    const tok = o.tok || zfn.tokens(st.openIndex(dataset.resolveRoot(o.root)).buf);
+    zfSection = zfn.buildSection(order.map((gi) => ({ text: graph.names[gi], kind: 0 })), tok);
+  }
+  const built = buildBlocks(graph, Object.assign({}, o, { attrIdx, named }));
   const zen = zenModel(graph, built, o);
   // Разделы имён идут после блоков и в жёстком порядке: ZE-NAMEN, затем
   // ZE-NAMEN-MMI (см. цепочку разделов в docs/formats/xac.md).
@@ -584,16 +681,17 @@ function convert(geojson, opt) {
     if (zen.houses) extra.push(require('./hausnr').buildSection({ rows: zen.hnr }));
   }
   const file = buildTileFile(built.blocks, Object.assign({}, o,
-    { extra: (o.extra || []).concat(extra) }));
+    { extra: (o.extra || []).concat(extra), zfSection }));
   return { file, graph, built, zen,
            check: verify(file, graph),
-           namecheck: verifyNames(file, graph, built) };
+           namecheck: verifyNames(file, graph, built),
+           zfcheck: zfSection ? verifyGuidance(file, graph, built, attr) : null };
 }
 
 module.exports = { convert, graphFromGeoJSON, splitNodes, layout, buildBlocks,
-                   buildTileFile, verify, verifyNames, nameRefs, zenModel,
+                   buildTileFile, verify, verifyNames, verifyGuidance, nameRefs, zenModel,
                    latinize, roadName, houseNumber, segDist2,
-                   attrByFrc, setAttributes, FRC };
+                   attrByFrc, attrByFrcNamed, setAttributes, FRC };
 
 if (require.main === module) {
   const args = process.argv.slice(2);
@@ -663,6 +761,12 @@ if (require.main === module) {
       ', концы совпали ' + n.coords + ' (межблочных записей ' + n.cross + ')');
     console.log('раздел ZE-NAMEN: имён ' + r.zen.names.length + ' (городов ' + r.zen.places +
       ', записей улиц ' + r.zen.streets + '), дерево «страна -> город -> улица»');
+    if (r.zfcheck) {
+      const z = r.zfcheck;
+      console.log('имена ведения: в ZF-NAMEN ' + z.names + ', рёбер с именем ' + z.total +
+        ', запись несёт хвост у ' + z.withTail + ', имя совпало у ' + z.sameText +
+        ', номер вне диапазона ' + z.outOfRange);
+    }
     if (r.zen.houseStat.всего) {
       console.log('дома: ' + JSON.stringify(r.zen.houseStat) +
         ' -> записей HAUSNUMMERN ' + r.zen.houses);

@@ -361,3 +361,77 @@ test('дом садится на ближайший отрезок своей у
   assert.equal(found, 2, 'обе лежат в области ссылок своей улицы');
   assert.deepEqual(seen.sort(), [['NORTH STREET', [10, 12]], ['SOUTH STREET', [7, 7]]]);
 });
+
+// ---------------------------------------------------------------------------
+// Имена для ведения по маршруту.
+
+// Таблица ATTRIBUTE с двумя семействами: простые записи и «именующие»
+// (бит 5 байта 0 описателя — за записью идёт список имён ведения).
+function attrTableNamed() {
+  const a = new Uint32Array(2048);
+  for (let frc = 0; frc <= 7; frc++) {
+    a[0x100 + frc] = 0x1000 | frc;                  // простая, хвоста нет
+    a[0x200 + frc] = 0x20000000 | 0x1000 | frc;     // с именем ведения
+  }
+  return a;
+}
+const zfTok = (() => { const t = [Buffer.from([2])]; t.stamp = 0; return t; })();
+
+test('индексы атрибутов: «именующие» отбираются по биту 5', () => {
+  const a = attrTableNamed();
+  const plain = xr.attrByFrc(a), named = xr.attrByFrcNamed(a);
+  assert.equal(plain[2], 0x102, 'простой индекс');
+  assert.equal(named[2], 0x202, 'именующий индекс');
+  for (const frc of [0, 1, 2, 3, 4, 6, 7]) {
+    assert.ok((a[named[frc]] & 0x20000000) !== 0, 'FRC ' + frc + ': бит 5 стоит');
+    assert.equal(a[plain[frc]] & 0x20000000, 0, 'FRC ' + frc + ': у простого его нет');
+  }
+});
+
+test('хвост записи: имена пишутся по два байта, бит 6 — продолжение', () => {
+  const xw = require('./xacwrite');
+  const one = xw.encodeNames([5]);
+  assert.deepEqual([...one], [0x00, 0x05], 'одно имя, продолжения нет');
+  const two = xw.encodeNames([0x1234, 7]);
+  assert.deepEqual([...two], [0x40 | 0x12, 0x34, 0x00, 0x07], 'у первого бит 6');
+  assert.throws(() => xw.encodeNames([0x3fff]), /вне 14 бит/);
+});
+
+test('тайл: имя ведения доходит до записи и раскрывается обратно', () => {
+  const fc = { type: 'FeatureCollection', features: [] };
+  for (let y = 0; y < 4; y++) {
+    fc.features.push(named(
+      Array.from({ length: 5 }, (_, x) => [33.0 + x * 0.002, 35.0 + y * 0.002]),
+      'primary', { name: 'Odos ' + y }));
+  }
+  fc.features.push(way([[33.0, 35.008], [33.008, 35.008]], 'primary'));   // без имени
+  const r = xr.convert(fc, { attr: attrTableNamed(), tok: zfTok,
+    code: 'CY00', country: 113, countryName: 'Cyprus',
+    places: [{ name: 'Town', lon: 33.004, lat: 35.004 }] });
+
+  const z = r.zfcheck;
+  assert.ok(z, 'сверка имён ведения выполнилась');
+  assert.equal(z.names, 4, 'в ZF-NAMEN четыре имени');
+  assert.equal(z.total, z.withTail, 'у каждого именованного ребра есть хвост');
+  assert.equal(z.sameText, z.total, 'имя раскрывается в то же самое');
+  assert.equal(z.outOfRange, 0);
+
+  const list = xac.sections(r.file).list;
+  const zs = list.find((x) => x.name === 'ZF-NAMEN');
+  assert.notEqual(zs.total, 112, 'раздел настоящий, а не заглушка');
+  assert.equal(list.indexOf(zs), 1, 'ZF-NAMEN идёт сразу за шапкой');
+  const zfn = require('./zfnamen');
+  const back = zfn.readSection(r.file.subarray(zs.offset, zs.offset + zs.total), zfTok);
+  assert.equal(back.err, null);
+  assert.equal(back.names.length, back.count, 'поток даёт столько имён, сколько в шапке');
+  assert.deepEqual(back.names.map((x) => x.text), ['ODOS 0', 'ODOS 1', 'ODOS 2', 'ODOS 3']);
+});
+
+test('без имён ведения тайл собирается по-прежнему', () => {
+  const fc = grid(4, 4, 33.0, 35.0, 0.002, 'primary');
+  const r = xr.convert(fc, { attr: attrTableNamed(), code: 'CY00', country: 113 });
+  assert.equal(r.zfcheck, null, 'сверять нечего');
+  const zs = xac.sections(r.file).list.find((x) => x.name === 'ZF-NAMEN');
+  assert.equal(zs.total, 112, 'заглушка на месте');
+  assert.equal(r.check.found, r.check.want, 'рёбра целы');
+});
