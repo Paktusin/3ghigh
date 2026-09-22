@@ -340,6 +340,16 @@ function encodeNull(links) {
 //                          Номер кладётся разностью с `tileBase` — прошивка
 //                          складывает его с полем 0x36 блока.
 //
+// `backs` — встречные ссылки, без которых ребро видно только с одного конца.
+// Две разновидности, обе проверены на заводских данных:
+//   {from, at}      запись `at` узла `from` ЭТОГО блока ведёт сюда. Пишется
+//                   словом `0x4000 | номер записи` — в v5 это именно НОМЕР
+//                   ЗАПИСИ, а не смещение (88 642 из 88 642: запись под этим
+//                   номером — вектор, указывающий обратно в наш узел);
+//   {block, ref}    запись `ref` ДРУГОГО блока. Четыре байта: `0x8000 | ref`
+//                   и номер блока разностью с `tileBase` (3635 из 3635 ведут
+//                   на межблочный вектор, указывающий обратно в наш узел).
+//
 // `links` — нульвектор узла: [{level, block, ref}], см. encodeNull.
 //
 // Раскладка таблицы — прямое обращение FUN_08272410: запись i указывает на
@@ -371,7 +381,7 @@ function buildBlock(spec) {
   let id = 1;
   for (let i = 0; i < nodes.length; i++) {
     first[i] = id;
-    id += Math.max(1, (nodes[i].vectors || []).length);
+    id += Math.max(1, (nodes[i].vectors || []).length + (nodes[i].backs || []).length);
   }
   const cnt = id;
   if (cnt > 0x3fff) throw new Error('записей больше 16383 — номер не влезает в слово');
@@ -399,7 +409,8 @@ function buildBlock(spec) {
     const nodeAt = p;
     p += form;
     junctions++;
-    if (!vs.length) {                              // узел без векторов всё равно адресуем
+    const backs = n.backs || [];
+    if (!vs.length && !backs.length) {                              // узел без векторов всё равно адресуем
       word[first[i]] = p / 2;
       step[first[i]] = form / 2;
     } else {
@@ -429,6 +440,33 @@ function buildBlock(spec) {
         vectors++;
         p += b.length;
       }
+    }
+    for (let k = 0; k < backs.length; k++) {
+      const q = backs[k];
+      let b;
+      if (q.block === undefined) {
+        const owner = first[q.from];
+        if (owner === undefined) throw new Error('встречная ссылка узла ' + i + ' ведёт в никуда');
+        const e = owner + (q.at || 0);
+        if (e > 0x3fff) throw new Error('встречная ссылка узла ' + i + ': номер записи ' + e);
+        b = Buffer.alloc(2);
+        b.writeUInt16BE(0x4000 | e, 0);
+      } else {
+        const off = q.block - (spec.tileBase || 0);
+        if (off < 0 || off > 0x7fff)
+          throw new Error('встречная ссылка узла ' + i + ': блок ' + q.block +
+                          ' не лежит в 0x7fff от tileBase ' + (spec.tileBase || 0));
+        if (!(q.ref > 0 && q.ref <= 0x3fff))
+          throw new Error('встречная ссылка узла ' + i + ': запись ' + q.ref);
+        b = Buffer.alloc(4);
+        b.writeUInt16BE(0x8000 | q.ref, 0);
+        b.writeUInt16BE(off, 2);
+      }
+      body.push(b);
+      const slot = first[i] + vs.length + k;
+      word[slot] = p / 2;
+      step[slot] = (vs.length === 0 && k === 0) ? form / 2 : 0;
+      p += b.length;
     }
     if (n.links && n.links.length) {               // нульвектор идёт сразу за записями
       const nul = encodeNull(n.links);

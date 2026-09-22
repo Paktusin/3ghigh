@@ -10,20 +10,14 @@
 //   node src/xacgraph.js <файл.xac> --regen    пересобрать блоки и сверить рёбра
 //   node src/xacgraph.js --sweep [сколько]     то же по тайлам набора подряд
 //
-// Чего граф НЕ переносит:
+// Что граф переносит: рёбра внутри блока, межблочные векторы, встречные
+// ссылки обоих видов (в свой блок словом 0x4xxx и в чужой словом 0x8xxx) и
+// нульвекторы. Не переносится хвост записи вектора — его содержимое не
+// разобрано, поэтому свой блок короче заводского и дополняется нулями.
 //
-//   * межблочные векторы (бит 6 старшего байта второго слова). Их номер
-//     указывает на запись в таблице СОСЕДНЕГО блока, а наша нумерация записей
-//     своя — перенести такую ссылку некуда. По базе это 7,9 % всех векторов;
-//     пересобранный блок остаётся связным внутри себя и теряет выходы наружу.
-//   * хвост записи вектора у части векторов — его содержимое не разобрано.
-//     Поэтому свой блок занимает около 69 % байт заводского.
-//
-// Нумерация записей таблицы у завода своя: записей больше, чем «узлы плюс
-// векторы». У мальтийского блока их 12 760 против наших 10 512 — лишние
-// 2248 адресуют узлы, у которых векторы уже есть. Похоже, это ручки для
-// ссылок извне. Воспроизвести нумерацию мы пока не умеем, и это второй повод,
-// по которому межблочные ссылки не переносятся.
+// Нумерация записей теперь воспроизводится точно: у узла столько номеров,
+// сколько у него записей (векторы плюс встречные ссылки), и на 1912 блоках
+// из 1912 число записей в таблице сошлось с заводским байт в байт.
 
 const fs = require('fs');
 const xac = require('./xac');
@@ -63,28 +57,54 @@ function graphOf(s, opt) {
   }
 
   const base = s.readUInt16BE(0x36);
-  let cross = 0, local = 0, dangling = 0;
+  let cross = 0, local = 0, dangling = 0, backs = 0;
   for (let i = 1; i < cnt; i++) {
     const p = s.readUInt16BE(tab + i * 2) * 2;
-    if (p <= 0 || p + 4 > s.length) continue;
+    if (p <= 0 || p + 2 > s.length) continue;
     const w0 = (s[p] << 8) | s[p + 1];
-    if ((w0 & 0xc000) !== 0xc000) continue;          // запись — не вектор
+    const kind = (w0 & 0xc000) >>> 14;
     const src = entryNode[i];
+    if (kind === 1) {                                 // встречная ссылка: НОМЕР записи
+      if (src < 0) { dangling++; continue; }
+      backs++;
+      nodes[src].entries.push({ back: w0 & 0x3fff, old: i });
+      continue;
+    }
+    if (kind === 2 && p + 4 <= s.length) {            // встречная ссылка в другой блок
+      if (src < 0) { dangling++; continue; }
+      backs++;
+      nodes[src].entries.push({ back: w0 & 0x3fff, block: base + (s.readUInt16BE(p + 2) & 0x7fff),
+                                old: i });
+      continue;
+    }
+    if (kind !== 3 || p + 4 > s.length) continue;     // прочее в граф не идёт
     if (src < 0) { dangling++; continue; }
     const w1 = (s[p + 2] << 8) | s[p + 3];
     if (((s[p + 2] >> 6) & 1) !== 0) {                // ссылка в другой блок
       cross++;
       if (p + 6 <= s.length) {
         nodes[src].entries.push({ block: base + (s.readUInt16BE(p + 4) & 0x7fff),
-                                  ref: w0 & 0x3fff, idx: w1 & 0x07ff });
+                                  ref: w0 & 0x3fff, idx: w1 & 0x07ff, old: i });
       }
       continue;
     }
     const dst = entryNode[w0 & 0x3fff];
     if (dst < 0) { dangling++; continue; }
     nodes[src].vectors.push({ to: dst, idx: w1 & 0x07ff });
-    nodes[src].entries.push({ to: dst, idx: w1 & 0x07ff });
+    nodes[src].entries.push({ to: dst, idx: w1 & 0x07ff, old: i });
     local++;
+  }
+
+  // Куда переедет запись с прежним номером: в нашем блоке сначала идут
+  // векторы узла, потом его встречные ссылки. Номер понадобится, чтобы
+  // переписать встречные ссылки на новую нумерацию.
+  const byOld = new Map();
+  for (let i = 0; i < nodes.length; i++) {
+    const es = nodes[i].entries;
+    const vecs = es.filter((e) => e.back === undefined);
+    const brs = es.filter((e) => e.back !== undefined);
+    vecs.forEach((e, k) => { if (e.old !== undefined) byOld.set(e.old, { node: i, at: k }); });
+    brs.forEach((e, k) => { if (e.old !== undefined) byOld.set(e.old, { node: i, at: vecs.length + k }); });
   }
 
   // Нульвекторы: элемент лежит сразу за записями узла, и опознаёт его разбор
@@ -105,8 +125,8 @@ function graphOf(s, opt) {
       }
     }
   }
-  return { nodes, cnt, ox, oy, cross, local, dangling, links, entryNode, base,
-           id: s.readUInt16BE(0x34) };
+  return { nodes, cnt, ox, oy, cross, local, dangling, links, backs, entryNode, base,
+           byOld, id: s.readUInt16BE(0x34) };
 }
 
 // Номера записей, которые раздаст buildBlock: у узла с k записями занято k
@@ -210,7 +230,8 @@ function regenTile(buf, opt) {
   const list = xac.sections(buf).list;
   const raws = list.map((s) => buf.subarray(s.offset, s.offset + s.total));
   const stat = { blocks: 0, v5: 0, edgesWas: 0, edgesNow: 0, cross: 0, crossKept: 0,
-                 edgesExtra: 0, links: 0, pad: 0, nodes: 0, tooBig: 0,
+                 edgesExtra: 0, links: 0, backs: 0, pad: 0, nodes: 0, tooBig: 0,
+                 sameEntries: 0, diffEntries: 0,
                  unresolvedWas: 0, unresolvedNow: 0 };
 
   // какие разделы — блоки v5
@@ -240,10 +261,25 @@ function regenTile(buf, opt) {
     let over = false;
     for (const [k, g] of graphs) {
       if (keep.has(k)) continue;
-      const nodes = g.nodes.map((n) => ({ x: n.x, y: n.y, links: n.links, vectors: [] }));
+      const nodes = g.nodes.map((n) => ({ x: n.x, y: n.y, links: n.links, vectors: [], backs: [] }));
       for (let i = 0; i < g.nodes.length; i++) {
         for (const e of g.nodes[i].entries) {
-          if (e.to !== undefined) { nodes[i].vectors.push(e); continue; }
+          if (e.back !== undefined) {             // встречная ссылка: новый номер записи
+            if (e.block === undefined) {
+              const t = g.byOld.get(e.back);
+              if (t) nodes[i].backs.push({ from: t.node, at: t.at });
+              continue;
+            }
+            const tk = mine.get(e.block);           // ссылка в другой блок
+            if (tk === undefined) {                 // тот блок не пересобирался
+              nodes[i].backs.push({ block: e.block, ref: e.back });
+              continue;
+            }
+            const t = graphs.get(tk).byOld.get(e.back);
+            if (t) nodes[i].backs.push({ block: e.block, ref: first.get(tk)[t.node] + t.at });
+            continue;
+          }
+          if (e.to !== undefined) { nodes[i].vectors.push({ to: e.to, idx: e.idx }); continue; }
           const tk = mine.get(e.block);
           if (tk === undefined) {                 // цель не пересобиралась — ссылка та же
             nodes[i].vectors.push({ block: e.block, ref: e.ref, idx: e.idx });
@@ -264,6 +300,7 @@ function regenTile(buf, opt) {
 
   const parts = raws.slice();
   for (const [k, blk] of built) {
+    (blk.readUInt16BE(0x70) === raws[k].readUInt16BE(0x70) ? stat.sameEntries++ : stat.diffEntries++);
     const out = Buffer.alloc(list[k].total, 0);
     blk.copy(out, 0);
     out.writeUInt32BE(list[k].total - 20, 0x10);   // длина полезной части раздела
@@ -276,6 +313,7 @@ function regenTile(buf, opt) {
     stat.nodes += g.nodes.length;
     stat.cross += g.cross;
     stat.links += g.links;
+    stat.backs += g.backs;
   }
 
   const was = tileEdges(idx.map((k) => raws[k]));
@@ -319,7 +357,8 @@ function sweep(limit) {
   const root = require('./dataset').resolveRoot();
   const attr = attrOfSet();
   const sum = { tiles: 0, blocks: 0, v5: 0, nodes: 0, was: 0, now: 0, cross: 0,
-                links: 0, tooBig: 0, full: 0, extra: 0, noV5: 0 };
+                links: 0, backs: 0, tooBig: 0, full: 0, extra: 0, noV5: 0,
+                sameEntries: 0, diffEntries: 0 };
   for (const d of fs.readdirSync(path.join(root, 'pkgdb'))) {
     if (!/^XAC/.test(d)) continue;
     for (const f of fs.readdirSync(path.join(root, 'pkgdb', d))) {
@@ -333,7 +372,9 @@ function sweep(limit) {
         if (out.length !== buf.length) throw new Error('длина файла изменилась: ' + e.name);
         sum.tiles++; sum.blocks += stat.blocks; sum.v5 += stat.v5; sum.nodes += stat.nodes;
         sum.was += stat.edgesWas; sum.now += stat.edgesNow; sum.cross += stat.cross;
-        sum.links += stat.links; sum.tooBig += stat.tooBig; sum.extra += stat.edgesExtra;
+        sum.links += stat.links; sum.backs += stat.backs;
+        sum.tooBig += stat.tooBig; sum.extra += stat.edgesExtra;
+        sum.sameEntries += stat.sameEntries; sum.diffEntries += stat.diffEntries;
         if (!stat.edgesWas) sum.noV5++;
         else if (stat.edgesNow === stat.edgesWas) sum.full++;
       }
@@ -353,8 +394,10 @@ if (require.main === module) {
       ' (' + (100 * s.now / s.was).toFixed(4) + ' %)');
     console.log('тайлов со всеми рёбрами ' + s.full + ' из ' + (s.tiles - s.noV5) +
       ' (ещё ' + s.noV5 + ' без блоков v5), лишних рёбер ' + s.extra);
-    console.log('межблочных векторов ' + s.cross + ', нульвекторов ' + s.links +
-      ', блоков не влезло ' + s.tooBig);
+    console.log('межблочных векторов ' + s.cross + ', встречных ссылок ' + s.backs +
+      ', нульвекторов ' + s.links + ', блоков не влезло ' + s.tooBig);
+    console.log('число записей в таблице совпало с заводским у ' + s.sameEntries +
+      ' блоков, разошлось у ' + s.diffEntries);
     return;
   }
   const file = process.argv[2];
@@ -384,8 +427,9 @@ if (require.main === module) {
     console.log('узлов ' + stat.nodes + ', рёбер в тайле ' + stat.edgesWas +
       ', воспроизведено ' + stat.edgesNow +
       (stat.edgesWas ? ' (' + (stat.edgesNow / stat.edgesWas * 100).toFixed(3) + ' %)' : ''));
-    console.log('межблочных векторов ' + stat.cross + ', нульвекторов ' + stat.links +
-      ', лишних рёбер ' + stat.edgesExtra + ', блоков не влезло ' + stat.tooBig);
+    console.log('межблочных векторов ' + stat.cross + ', встречных ссылок ' + stat.backs +
+      ', нульвекторов ' + stat.links + ', лишних рёбер ' + stat.edgesExtra +
+      ', блоков не влезло ' + stat.tooBig);
     console.log('дополнено нулями ' + stat.pad + ' байт, длина файла ' + out.length + ' — прежняя');
     return;
   }
