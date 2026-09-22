@@ -216,10 +216,19 @@ test('модель ZE-NAMEN: имена отсортированы, списки
     named([[33.002, 35.0], [33.004, 35.0]], 'primary', { name: 'Alpha' }),
   ] };
   const r = xr.convert(fc, { attr: attrTable(), code: 'CY00', country: 113,
-                             places: ['Lefkosia'] });
-  assert.deepEqual(r.zen.names, ['ALPHA', 'LEFKOSIA', 'ZETA'], 'по возрастанию');
-  assert.equal(r.zen.refs[1], null, 'у города своей геометрии нет');
-  assert.ok(r.zen.refs[0] && r.zen.refs[2], 'у улиц ссылки есть');
+                             countryName: 'Cyprus',
+                             places: [{ name: 'Lefkosia', lon: 33.0, lat: 35.0 }] });
+  assert.deepEqual(r.zen.names, ['ALPHA', 'CYPRUS', 'LEFKOSIA', 'ZETA'], 'по возрастанию');
+  assert.equal(r.zen.refs[1], null, 'у страны своей геометрии нет');
+  assert.equal(r.zen.refs[2], null, 'у города тоже');
+  assert.ok(r.zen.refs[0] && r.zen.refs[3], 'у улиц ссылки есть');
+
+  // дерево: корень — страна, улицы висят на городе
+  assert.equal(r.zen.mmi[1].parent, null, 'корень — страна');
+  assert.equal(r.zen.mmi[2].parent, 1, 'город под страной');
+  assert.equal(r.zen.mmi[0].parent, 2, 'улица под городом');
+  assert.ok(r.zen.mmi[0].flags & 0x80, 'улица — лист');
+  assert.equal(r.zen.mmi[2].flags & 0x80, 0, 'город не лист');
 
   // модель -> раздел -> обратно
   const zen = require('./zenamen');
@@ -237,4 +246,46 @@ test('модель ZE-NAMEN: имена отсортированы, списки
   r.zen.refs.forEach((list, nid) => { if (!list) return;
     for (const g of list) { pairs++; assert.equal(seen.get(nid + '@' + g.block), g.recs.join(',')); } });
   assert.ok(pairs > 0);
+});
+
+test('дерево: одно имя в двух городах даёт две записи', () => {
+  const fc = { type: 'FeatureCollection', features: [
+    named([[33.0, 35.0], [33.002, 35.0]], 'primary', { name: 'Main Street' }),
+    named([[33.2, 35.2], [33.202, 35.2]], 'primary', { name: 'Main Street' }),
+  ] };
+  const r = xr.convert(fc, { attr: attrTable(), code: 'CY00', country: 113,
+    countryName: 'Cyprus',
+    places: [{ name: 'West', lon: 33.0, lat: 35.0 }, { name: 'East', lon: 33.2, lat: 35.2 }] });
+  const at = r.zen.names.map((n, i) => [n, r.zen.mmi[i].parent]);
+  const streets = at.filter(([n]) => n === 'MAIN STREET');
+  assert.equal(streets.length, 2, 'две записи на одно имя');
+  const cities = streets.map(([, p]) => r.zen.names[p]).sort();
+  assert.deepEqual(cities, ['EAST', 'WEST']);
+});
+
+test('тайл: разделы имён встают после блоков и в жёстком порядке', () => {
+  const fc = grid(6, 5, 33.0, 35.0, 0.002, 'primary');
+  fc.features.forEach((f, i) => { f.properties.name = 'Street ' + i; });
+  const r = xr.convert(fc, { attr: attrTable(), code: 'CY00', country: 113,
+    countryName: 'Cyprus', places: [{ name: 'Lefkosia', lon: 33.004, lat: 35.004 }] });
+  const list = xac.sections(r.file).list.map((s) => s.name);
+  assert.equal(xac.sections(r.file).complete, true, 'разделы покрывают файл');
+  const iZe = list.indexOf('ZE-NAMEN'), iMmi = list.indexOf('ZE-NAMEN-MMI');
+  const iLast = list.lastIndexOf('VEKTORBLOCK');
+  assert.ok(iLast < iZe && iZe < iMmi, 'ZE-NAMEN после блоков, MMI после него');
+
+  const zen = require('./zenamen');
+  const ze = xac.sections(r.file).list[iZe];
+  const d = r.file.subarray(ze.offset, ze.offset + ze.total);
+  const back = zen.allNames(d), gr = zen.refGroups(d);
+  assert.deepEqual(back.names, r.zen.names);
+  assert.equal(back.end, back.len, 'поток съеден ровно');
+  assert.equal(gr.err, null);
+  assert.equal(gr.end, gr.len, 'область ссылок съедена ровно');
+
+  const mm = xac.sections(r.file).list[iMmi];
+  const m = r.file.subarray(mm.offset, mm.offset + mm.total);
+  const rows = zen.mmiTree(m);
+  assert.equal(rows.length, r.zen.names.length, 'записей столько же, сколько имён');
+  assert.equal(rows.filter((x) => x.parent === null).length, 1, 'корень один');
 });

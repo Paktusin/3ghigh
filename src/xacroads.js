@@ -5,7 +5,11 @@
 //
 // Ключи:
 //   --classes motorway,trunk,primary   какие классы OSM брать (по умолчанию все)
-//   --zen <файл.bin>   выложить раздел ZE-NAMEN (имена и связь «имя -> дорога»)
+//   --zen <файл.bin>   выложить раздел ZE-NAMEN отдельным файлом
+//   --places <файл>    города с координатами: [{ name, lon, lat }] — дерево
+//                      ZE-NAMEN-MMI «страна -> город -> улица»
+//   --country-name CYPRUS   корень дерева
+//   --no-names         собрать тайл без разделов имён
 //   --code CY00        код тайла            --index 3776   номер в реестре
 //   --country 113      код страны (Кипр)    --base 0       сквозной номер первого блока
 //   --max-nodes 9000   потолок узлов в блоке (у завода не больше 9962)
@@ -297,16 +301,78 @@ function buildBlocks(graph, opt) {
   throw new Error('блоки не удалось уложить в потолки даже после деления');
 }
 
-// Список имён для раздела ZE-NAMEN: имена отсортированы (движок ищет по ключам
-// двоичным поиском), а списки блоков переставлены вместе с ними. `extra` —
-// имена без своей геометрии: страна, области, города; они идут в тот же список
-// и попадают в дерево ZE-NAMEN-MMI.
-function zenModel(graph, built, extra) {
-  const rows = graph.names.map((name, i) => ({ name, refs: built.names.refs[i] }));
-  for (const name of extra || []) rows.push({ name: latinize(name), refs: null });
-  rows.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-  return { names: rows.map((r) => r.name), refs: rows.map((r) => r.refs),
-           blocks: built.names.blocks };
+// Список имён для раздела ZE-NAMEN и дерево для ZE-NAMEN-MMI.
+//
+// Имена идут по возрастанию — движок ищет по ключам двоичным поиском. Дерево
+// у завода это «страна → область → район → город → улица»; своё мы строим в
+// три уровня, «страна → город → улица»: областей и районов у нас нет.
+//
+// Улица вешается на БЛИЖАЙШИЙ город: у дорог OSM нет ни `addr:city`, ни
+// `is_in`, а координаты городов берутся отдельным файлом (`opt.places` —
+// записи `{ name, lon, lat }`). Город ищется на КАЖДОЕ РЕБРО, поэтому одно
+// имя, встречающееся в нескольких городах, даёт несколько записей — по одной
+// на город. Так же устроены и заводские разделы: повторы имён есть у 108
+// разделов из 109 просмотренных.
+//
+// Байт флагов разобран лишь частично (бит 7 стоит только у листьев). Значения
+// взяты самые частые у завода для своей роли — корень 0x3f (66 из 70), город
+// 0x3c, улица 0xc0 — и это ДОГАДКА: что кодируют биты 0…6, не установлено.
+const MMI_ROOT = 0x3f, MMI_PLACE = 0x3c, MMI_STREET = 0xc0;
+
+function zenModel(graph, built, opt) {
+  const o = opt || {};
+  const places = (o.places || []).filter((p) => p && p.lon != null && p.lat != null)
+    .map((p) => ({ name: latinize(p.name), x: Math.round(p.lon * LON), y: Math.round(p.lat * LAT) }));
+
+  const nearest = (x, y) => {
+    if (!places.length) return -1;
+    let best = -1, bd = Infinity;
+    places.forEach((p, i) => {
+      const d = (p.x - x) * (p.x - x) + (p.y - y) * (p.y - y);
+      if (d < bd) { bd = d; best = i; }
+    });
+    return best;
+  };
+
+  // «имя в городе» -> блоки и номера записей
+  const streets = new Map();
+  graph.edges.forEach((e, ei) => {
+    if (e.name < 0) return;
+    const pos = built.names.place[ei];
+    if (!pos) return;
+    const a = graph.nodes[e.a], b = graph.nodes[e.b];
+    const pl = nearest((a.x + b.x) / 2, (a.y + b.y) / 2);
+    const key = e.name + '@' + pl;
+    let st = streets.get(key);
+    if (!st) { st = { name: graph.names[e.name], place: pl, by: new Map() }; streets.set(key, st); }
+    if (!st.by.has(pos.block)) st.by.set(pos.block, new Set());
+    st.by.get(pos.block).add(pos.rec);
+  });
+
+  // 0 — страна, дальше города, дальше улицы; порядок пока свой, сортируем ниже
+  const rows = [{ name: latinize(o.countryName || 'COUNTRY'), refs: null, kind: 'root', up: -1 }];
+  places.forEach((p) => rows.push({ name: p.name, refs: null, kind: 'place', up: 0 }));
+  for (const st of streets.values()) rows.push({
+    name: st.name, kind: 'street', up: st.place < 0 ? 0 : 1 + st.place,
+    refs: [...st.by.keys()].sort((a, b) => a - b)
+      .map((block) => ({ block, recs: [...st.by.get(block)].sort((a, b) => a - b) })),
+  });
+
+  const order = rows.map((_, i) => i)
+    .sort((a, b) => (rows[a].name < rows[b].name ? -1
+                   : rows[a].name > rows[b].name ? 1 : a - b));
+  const nid = new Array(rows.length);
+  order.forEach((from, to) => { nid[from] = to; });
+
+  const names = order.map((i) => rows[i].name);
+  const refs = order.map((i) => rows[i].refs);
+  const mmi = order.map((i) => {
+    const r = rows[i];
+    if (r.kind === 'root') return { flags: MMI_ROOT, parent: null };
+    return { flags: r.kind === 'place' ? MMI_PLACE : MMI_STREET, parent: nid[r.up] };
+  });
+  return { names, refs, mmi, blocks: built.names.blocks,
+           places: places.length, streets: streets.size };
 }
 
 // Блоки -> файл тайла. Раздел ZF-NAMEN обязателен по реестру, но может быть
@@ -329,6 +395,7 @@ function buildTileFile(blocks, opt) {
     built: o.built || '20260922120000',
     zf: tile.section('ZF-NAMEN', Buffer.alloc(o.zfSize === undefined ? 92 : o.zfSize)),
     blocks: padded,
+    extra: o.extra,
   });
 }
 
@@ -412,8 +479,18 @@ function convert(geojson, opt) {
   const graph = graphFromGeoJSON(geojson, o);
   if (!graph.nodes.length) throw new Error('в наборе дорог нет ни одной точки');
   const built = buildBlocks(graph, Object.assign({}, o, { attrIdx }));
-  const file = buildTileFile(built.blocks, o);
-  const zen = zenModel(graph, built, o.places);
+  const zen = zenModel(graph, built, o);
+  // Разделы имён идут после блоков и в жёстком порядке: ZE-NAMEN, затем
+  // ZE-NAMEN-MMI (см. цепочку разделов в docs/formats/xac.md).
+  const zn = require('./zenamen');
+  const extra = [];
+  if (o.names !== false && zen.names.length) {
+    extra.push(zn.buildSection({ names: zen.names, refs: zen.refs, blocks: zen.blocks,
+                                 version: 2, label: 'ZE-NAMEN', country: o.country || 0 }));
+    extra.push(zn.mmiBuildSection(zen.mmi));
+  }
+  const file = buildTileFile(built.blocks, Object.assign({}, o,
+    { extra: (o.extra || []).concat(extra) }));
   return { file, graph, built, zen,
            check: verify(file, graph),
            namecheck: verifyNames(file, graph, built) };
@@ -438,8 +515,12 @@ if (require.main === module) {
   const classes = flag('classes') ? flag('classes').split(',') : null;
   const t0 = Date.now();
   const fc = JSON.parse(fs.readFileSync(src, 'utf8'));
+  const placesFile = flag('places');
   const r = convert(fc, {
     classes,
+    names: !args.includes('--no-names'),
+    places: placesFile ? JSON.parse(fs.readFileSync(placesFile, 'utf8')) : null,
+    countryName: flag('country-name', 'CYPRUS'),
     code: flag('code', 'CY00'),
     index: Number(flag('index', 0)),
     country: Number(flag('country', 113)),
@@ -459,9 +540,11 @@ if (require.main === module) {
       ' (' + (100 * c.found / c.want).toFixed(4) + ' %), не разобрано ссылок ' + c.unresolved +
       ', узлов вне рамки блока ' + c.outside);
     const n = r.namecheck;
-    console.log('имена: дорог с именем ' + g.named + ' -> разных имён ' + r.zen.names.length +
+    console.log('имена: дорог с именем ' + g.named + ' -> разных имён ' + g.names.length +
       ', ссылок «имя -> дорога» ' + n.total + ', попали в запись ' + n.hit +
       ', концы совпали ' + n.coords + ' (межблочных записей ' + n.cross + ')');
+    console.log('раздел ZE-NAMEN: имён ' + r.zen.names.length + ' (городов ' + r.zen.places +
+      ', записей улиц ' + r.zen.streets + '), дерево «страна -> город -> улица»');
     console.log('за ' + ((Date.now() - t0) / 1000).toFixed(1) + ' с');
   }
   if (out) {

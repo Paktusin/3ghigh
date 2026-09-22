@@ -285,6 +285,31 @@ function allNames(d, h, opt) {
   return { names, end: p, len: stream.length, err: null };
 }
 
+// Раздел ZE-NAMEN-MMI целиком из дерева. Раскладка снята с самых коротких
+// заводских разделов, где вторая и третья области пустые (`BG0J`, `DM0Y`,
+// `FRA7`, `GI00`): шапка 60 байт, дерево по три байта на имя, выравнивание на
+// 4 и ещё четыре байта `46 42 42 78` — постоянные: они одни и те же во всех
+// 45 таких разделах базы. Поле +0x28 у завода равно 4 во всех 1405
+// просмотренных разделах — это не счётчик, а постоянное число.
+const MMI_END = 0x46424278;     // замыкающее слово четвёртой области
+
+function mmiBuildSection(rows) {
+  const tree = mmiBuildTree(rows);
+  const bOff = Math.ceil((60 + tree.length) / 4) * 4;
+  const out = Buffer.alloc(bOff + 4);
+  out.write('ZE-NAMEN-MMI'.padEnd(16, ' '), 0, 16, 'latin1');
+  out.writeUInt32BE(out.length - 20, 0x10);
+  out.writeUInt32BE(0x00020000, 0x14);
+  out.writeUInt32BE(rows.length, 0x18);
+  out.writeUInt32BE(60, 0x1c);
+  out.writeUInt32BE(tree.length, 0x20);
+  out.writeUInt32BE(bOff, 0x24);
+  out.writeUInt32BE(4, 0x28);
+  tree.copy(out, 60);
+  out.writeUInt32BE(MMI_END, bOff);
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Область ссылок «имя -> дорога» (+0x50).
 //
@@ -535,7 +560,7 @@ function buildSection(spec) {
 
 module.exports = { header, tokens, keys, perName, nameAt, checkKeys,
   unpackName, allNames, buildSection, refGroups, readPairs, pairBytes,
-  mmiHeader, mmiTree, mmiBuildTree, REC, KEY, TOK, STRIDE, MMI_REC };
+  mmiHeader, mmiTree, mmiBuildTree, mmiBuildSection, REC, KEY, TOK, STRIDE, MMI_REC };
 
 if (require.main === module && process.argv[2] !== '--build-ort') {
   const fldb = require('./fldb');

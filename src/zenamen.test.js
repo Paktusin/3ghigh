@@ -276,3 +276,18 @@ test('список блоков: три длины элемента и обра�
     assert.deepStrictEqual(ze.readPairs(b, 0).pairs, [v], 'значение ' + v);
   }
 });
+
+test('ZE-NAMEN-MMI: раздел собирается и читается тем же деревом', () => {
+  const rows = [{ flags: 0x3f, parent: null }, { flags: 0x3c, parent: 0 },
+                { flags: 0xc0, parent: 1 }, { flags: 0xc0, parent: 1 }];
+  const sec = ze.mmiBuildSection(rows);
+  // длина у завода: выравненный конец дерева плюс замыкающее слово
+  assert.strictEqual(sec.length, Math.ceil((60 + rows.length * 3) / 4) * 4 + 4);
+  assert.strictEqual(sec.readUInt32BE(0x10), sec.length - 20, 'длина в шапке');
+  assert.strictEqual(sec.readUInt32BE(0x28), 4, 'постоянное поле +0x28');
+  assert.strictEqual(sec.readUInt32BE(sec.length - 4), 0x46424278, 'замыкающее слово');
+  const back = ze.mmiTree(sec);
+  assert.deepStrictEqual(back.map((r) => r.flags), rows.map((r) => r.flags));
+  assert.deepStrictEqual(back.map((r) => r.parent), [null, 0, 1, 1]);
+  assert.deepStrictEqual(back.map((r) => r.leaf), [false, false, true, true]);
+});
