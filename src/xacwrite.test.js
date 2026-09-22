@@ -335,3 +335,146 @@ test('сборка блока: чужая опора не ломает разб�
   for (const c of coords) assert.equal(c.form, 6, 'взята шестибайтовая форма');
   assert.deepEqual(coords.map((c) => [c.x, c.y]), nodes.map((n) => [n.x, n.y]));
 });
+
+// --- межблочные векторы и нульвекторы --------------------------------------
+
+test('межблочный вектор: шесть байт, и читатель видит в них номер блока', () => {
+  const nodes = [
+    { x: X(33.30), y: Y(35.10), vectors: [{ block: 1007, ref: 9, idx: 0x2a }] },
+    { x: X(33.32), y: Y(35.11), vectors: [{ to: 0, idx: 0x2a }] },
+  ];
+  const blk = xw.buildBlock({ nodes, tileBase: 1000 });
+  const m = xw.readBlock(blk, attrTable());
+  const vecs = m.items.filter((x) => x.kind === 'vector');
+  assert.equal(vecs.length, 2, 'оба вектора на месте');
+
+  const cross = vecs[0];
+  assert.equal(cross.len, 6, 'межблочная запись длиннее на слово с номером блока');
+  assert.equal((cross.w1 >> 14) & 1, 1, 'бит 14 слова 1 взведён');
+  assert.equal(cross.node, 9, 'номер записи в чужой таблице сохранён');
+  assert.equal(blk.readUInt16BE(cross.at + 4), 7, 'номер блока записан разностью с tileBase');
+  assert.equal(cross.idx, 0x2a, 'индекс атрибута не пострадал от бита 14');
+  assert.equal(vecs[1].len, 4, 'обычная запись осталась четырёхбайтовой');
+  assert.ok(xw.writeBlock(m).equals(blk), 'байты собрались обратно точно');
+});
+
+test('межблочный вектор: чужой блок должен лежать в пределах 0x7fff от tileBase', () => {
+  const nodes = [{ x: X(33.3), y: Y(35.1), vectors: [{ block: 5, ref: 3, idx: 0x2a }] }];
+  assert.throws(() => xw.buildBlock({ nodes, tileBase: 1000 }), /не лежит в 0x7fff/);
+  assert.throws(() => xw.buildBlock({ nodes: [{ x: X(33.3), y: Y(35.1),
+    vectors: [{ block: 1000, ref: 0, idx: 0x2a }] }], tileBase: 1000 }), /запись 0/);
+});
+
+test('нульвектор: пары стоят по уровням, а бит 15 держится до последней занятой', () => {
+  const el = xw.encodeNull([{ level: 1, block: 4242, ref: 18 },
+                            { level: 2, block: 4711, ref: 40 }]);
+  assert.equal(el.length, 14, 'три пары — четырнадцать байт');
+  assert.equal(el.readUInt16BE(0), 0, 'маркер');
+  assert.equal(el.readUInt16BE(2), 4242);
+  assert.equal(el.readUInt16BE(4), 0x8000 | 18, 'у первой пары «есть ещё»');
+  assert.equal(el.readUInt16BE(6), 4711);
+  assert.equal(el.readUInt16BE(8), 40, 'у последней занятой бит 15 снят');
+  assert.equal(el.readUInt16BE(12) & 0x8000, 0, 'третья пара не обещает четвёртой');
+
+  const four = xw.encodeNull([{ level: 1, block: 1, ref: 2 }, { level: 4, block: 9, ref: 8 }]);
+  assert.equal(four.length, 18, 'связь на четвёртом уровне удлиняет элемент');
+  assert.equal(four.readUInt16BE(12) & 0x8000, 0x8000, 'третья пара обещает четвёртую');
+  assert.equal(four.readUInt16BE(6), 0, 'пропущенный уровень — пустая пара');
+  assert.equal(four.readUInt16BE(8), 0x8000, 'но цепочка не прерывается');
+});
+
+test('нульвектор: разбирается тем же читателем, что и заводские данные', () => {
+  const nv = require('./nullvec');
+  const nodes = [
+    { x: X(33.30), y: Y(35.10), vectors: [{ to: 1, idx: 0x2a }],
+      links: [{ level: 1, block: 4242, ref: 18 }, { level: 2, block: 4711, ref: 40 }] },
+    { x: X(33.32), y: Y(35.11), vectors: [] },
+  ];
+  const blk = xw.buildBlock({ nodes, tileBase: 4000, flags: 0x95 });
+  const m = xw.readBlock(blk, attrTable());
+  const el = m.items.find((x) => x.kind === 'null');
+  assert.ok(el, 'нульвектор опознан разбором блока');
+  assert.equal(el.len, 14);
+
+  const p = nv.pairs(blk, el.at, nv.wideMask(blk));
+  assert.equal(p.len, 14, 'длина сошлась с той, что берёт обходчик');
+  assert.deepEqual(p.list.filter(Boolean).map((q) => [q.level, q.block, q.ref]),
+    [[1, 4242, 18], [2, 4711, 40]]);
+  assert.ok(nv.wideMask(blk), 'при заводских флагах номер блока шестнадцатибитный');
+  assert.ok(xw.writeBlock(m).equals(blk), 'байты собрались обратно точно');
+});
+
+test('нульвектор не сбивает таблицу: узлы и рёбра читаются по-прежнему', () => {
+  const nodes = [
+    { x: X(33.30), y: Y(35.10), vectors: [{ to: 1, idx: 0x2a }],
+      links: [{ level: 1, block: 7, ref: 4 }] },
+    { x: X(33.32), y: Y(35.11), vectors: [{ to: 2, idx: 0x2a }],
+      links: [{ level: 1, block: 7, ref: 6 }, { level: 3, block: 9, ref: 2 }] },
+    { x: X(33.34), y: Y(35.12), vectors: [] },
+  ];
+  const blk = xw.buildBlock({ nodes, tileBase: 0 });
+  const edges = xv.blockEdges(blk);
+  assert.equal(edges.length, 2, 'оба ребра на месте');
+  for (const e of edges) assert.ok(e.a && e.b, 'у ребра оба конца разобраны');
+  assert.deepEqual(edges.map((e) => [e.a.x, e.a.y]), [[nodes[0].x, nodes[0].y],
+                                                      [nodes[1].x, nodes[1].y]]);
+  assert.deepEqual(edges.map((e) => [e.b.x, e.b.y]), [[nodes[1].x, nodes[1].y],
+                                                      [nodes[2].x, nodes[2].y]]);
+  const m = xw.readBlock(blk, attrTable());
+  assert.equal(m.items.filter((x) => x.kind === 'null').length, 2, 'оба нульвектора опознаны');
+  assert.equal(m.items.filter((x) => x.kind === 'coord').length, 3, 'узлы не размножились');
+});
+
+test('нульвектор: пустой список и двойной уровень отвергаются', () => {
+  assert.throws(() => xw.encodeNull([]), /без пар/);
+  assert.throws(() => xw.encodeNull([{ level: 1, block: 1, ref: 2 },
+                                     { level: 1, block: 2, ref: 4 }]), /два раза уровень/);
+  assert.throws(() => xw.encodeNull([{ level: 5, block: 1, ref: 2 }]), /уровень 5/);
+  assert.throws(() => xw.encodeNull([{ level: 1, block: 1, ref: 0 }]), /ссылка 0/);
+});
+
+test('два своих блока сшиваются: ссылка разрешается так же, как её разрешает прошивка', () => {
+  const nv = require('./nullvec');
+  // Блок A — номер 100 в сквозной нумерации, блок B — 101, тайл начинается со 100.
+  const A = [
+    { x: X(33.300), y: Y(35.100), vectors: [{ to: 1, idx: 0x2a }] },
+    { x: X(33.302), y: Y(35.101), vectors: [] },                    // узел на границе
+  ];
+  const B = [
+    { x: X(33.303), y: Y(35.1015), vectors: [{ to: 1, idx: 0x2a }] },
+    { x: X(33.305), y: Y(35.102), vectors: [] },
+  ];
+  // Сначала собираем B, чтобы узнать номера его записей в таблице.
+  const blkB = xw.buildBlock({ nodes: B, id: 101, tileBase: 100, flags: 0x95 });
+  const tabB = blkB.readUInt32BE(0x6c), cntB = blkB.readUInt16BE(0x70);
+  const refB = 1;                                    // первая запись — узел B0
+  assert.equal(xv.koord(blkB, xv.nodeOffset(blkB, tabB, cntB, refB),
+                        blkB.readInt32BE(0x28), blkB.readInt32BE(0x2c)).x, B[0].x);
+
+  // Ребро через границу блоков: узел A1 -> запись refB блока 101.
+  A[1].vectors = [{ block: 101, ref: refB, idx: 0x2a }];
+  const blkA = xw.buildBlock({ nodes: A, id: 100, tileBase: 100, flags: 0x95 });
+
+  // Разрешаем ссылку ровно так, как FUN_08272938: номер блока = поле 0x36 плюс
+  // слово 2, а ссылка — номер записи в таблице ЦЕЛЕВОГО блока.
+  const tabA = blkA.readUInt32BE(0x6c), cntA = blkA.readUInt16BE(0x70);
+  const recAt = blkA.readUInt16BE(tabA + 2 * 2) * 2;  // запись узла A1
+  assert.equal(blkA.readUInt16BE(recAt) & 0xc000, 0xc000, 'на месте записи вектора');
+  assert.equal((blkA.readUInt16BE(recAt + 2) >> 14) & 1, 1, 'она межблочная');
+  const target = blkA.readUInt16BE(0x36) + (blkA.readUInt16BE(recAt + 4) & 0x7fff);
+  assert.equal(target, 101, 'номер блока-цели восстановлен');
+
+  const got = xv.koord(blkB, xv.nodeOffset(blkB, tabB, cntB, blkA.readUInt16BE(recAt) & 0x3fff),
+                       blkB.readInt32BE(0x28), blkB.readInt32BE(0x2c));
+  assert.deepEqual([got.x, got.y], [B[0].x, B[0].y], 'ребро пришло в нужный узел чужого блока');
+
+  // Тот же узел, но связь с соседним тайлом: нульвектор на блок 900.
+  A[1].links = [{ level: 1, block: 900, ref: 2 * 3 }];
+  const blkA2 = xw.buildBlock({ nodes: A, id: 100, tileBase: 100, flags: 0x95 });
+  const m = xw.readBlock(blkA2, attrTable());
+  const el = m.items.find((x) => x.kind === 'null');
+  assert.ok(el, 'нульвектор стоит рядом с межблочной записью');
+  const pair = nv.pairs(blkA2, el.at, nv.wideMask(blkA2)).list[0];
+  assert.deepEqual([pair.block, pair.ref >> 1], [900, 3], 'номер блока и индекс записи на месте');
+  assert.ok(xw.writeBlock(m).equals(blkA2), 'байты собрались обратно точно');
+});

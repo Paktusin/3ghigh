@@ -185,6 +185,16 @@ function readBlock(s, attr) {
       } else if (t === 1) {
         items.push({ kind: 'backref', at: p, len: 2, ref: w & 0x3fff, word: w });
         p += 2;
+      } else if (w === 0 && p + 14 <= tab) {
+        // Нульвектор: связи узла с тем же узлом в соседнем тайле, по паре на
+        // уровень (см. src/nullvec.js). Длину задаёт бит 15 третьей пары —
+        // ровно так её берёт обходчик FUN_08272350. Спутать с координатой
+        // нельзя: начала узлов заверены таблицей и проверяются выше.
+        const len = (s.readUInt16BE(p + 12) & 0x8000) ? 18 : 14;
+        if (p + len > tab) return;
+        items.push({ kind: 'null', at: p, len, raw: s.subarray(p, p + len) });
+        p += len;
+        return;                                   // список узла на этом кончился
       } else return;
     }
   };
@@ -287,8 +297,50 @@ function simpleAttributes(attr) {
   return out;
 }
 
-// Построить блок v5 из графа. Узел = {x, y, vectors: [{to, idx}]}, где `to` —
-// номер узла-конца, `idx` — индекс в таблице ATTRIBUTE.
+// Нульвектор узла: маркер 0x0000 и до четырёх пар «номер блока, ссылка».
+// Пара k стоит на уровне k, поэтому массив адресуется уровнем, а не порядком.
+// Раскладка и смысл — в src/nullvec.js, снято с u_get_vecttree_of_vid_or_vinfo.
+//
+// Бит 15 второго слова означает «за этой парой есть ещё»: его надо держать до
+// последней ЗАНЯТОЙ пары, иначе разбор остановится раньше времени. Он же
+// задаёт длину элемента: обходчик списка смотрит именно на третью пару и
+// шагает 14 или 18 байт.
+function encodeNull(links) {
+  const byLevel = [];
+  for (const l of links) {
+    if (!(l.level >= 1 && l.level <= 4)) throw new Error('нульвектор: уровень ' + l.level);
+    if (byLevel[l.level]) throw new Error('нульвектор: два раза уровень ' + l.level);
+    if (!(l.ref > 0 && l.ref <= 0x7fff)) throw new Error('нульвектор: ссылка ' + l.ref);
+    if (!(l.block >= 0 && l.block <= 0xffff)) throw new Error('нульвектор: блок ' + l.block);
+    byLevel[l.level] = l;
+  }
+  let last = 0;
+  for (let k = 1; k <= 4; k++) if (byLevel[k]) last = k;
+  if (!last) throw new Error('нульвектор без пар');
+  const pairs = last > 3 ? 4 : 3;
+  const out = Buffer.alloc(2 + pairs * 4);
+  for (let k = 1; k <= pairs; k++) {
+    const l = byLevel[k];
+    out.writeUInt16BE(l ? l.block & 0xffff : 0, 2 + (k - 1) * 4);
+    out.writeUInt16BE((k < last ? 0x8000 : 0) | (l ? l.ref & 0x7fff : 0), 4 + (k - 1) * 4);
+  }
+  return out;
+}
+
+// Построить блок v5 из графа. Узел = {x, y, vectors: [...], links: [...]}.
+//
+// Вектор бывает двух видов:
+//   {to, idx}            — ребро внутри блока: `to` номер узла-конца,
+//                          `idx` индекс в таблице ATTRIBUTE;
+//   {block, ref, idx}    — ребро в ДРУГОЙ блок: `block` сквозной номер блока,
+//                          `ref` номер записи в его таблице. Пишется шестью
+//                          байтами: бит 14 слова 1 говорит «дальше слово с
+//                          номером блока», и он же для разборщика значит
+//                          «пропустить слово», так что длина сходится сама.
+//                          Номер кладётся разностью с `tileBase` — прошивка
+//                          складывает его с полем 0x36 блока.
+//
+// `links` — нульвектор узла: [{level, block, ref}], см. encodeNull.
 //
 // Раскладка таблицы — прямое обращение FUN_08272410: запись i указывает на
 // запись вектора, а байт шага говорит, на сколько СЛОВ назад от неё лежит
@@ -346,24 +398,42 @@ function buildBlock(spec) {
     body.push(c);
     const nodeAt = p;
     p += form;
+    junctions++;
     if (!vs.length) {                              // узел без векторов всё равно адресуем
       word[first[i]] = p / 2;
       step[first[i]] = form / 2;
-      junctions++;
-      continue;
+    } else {
+      for (let k = 0; k < vs.length; k++) {
+        const v = vs[k];
+        let b;
+        if (v.block === undefined) {
+          const to = first[v.to];
+          if (to === undefined) throw new Error('вектор узла ' + i + ' ведёт в никуда');
+          b = Buffer.alloc(4);
+          const [w0, w1] = encodeHeader(to, v.idx, 0, 0);
+          b.writeUInt16BE(w0, 0); b.writeUInt16BE(w1, 2);
+        } else {
+          const off = v.block - (spec.tileBase || 0);
+          if (off < 0 || off > 0x7fff)
+            throw new Error('межблочный вектор узла ' + i + ': блок ' + v.block +
+                            ' не лежит в 0x7fff от tileBase ' + (spec.tileBase || 0));
+          if (!(v.ref > 0 && v.ref <= 0x3fff))
+            throw new Error('межблочный вектор узла ' + i + ': запись ' + v.ref);
+          b = Buffer.alloc(6);
+          const [w0, w1] = encodeHeader(v.ref, v.idx, 0x40, 0);   // бит 6 старшего байта
+          b.writeUInt16BE(w0, 0); b.writeUInt16BE(w1, 2); b.writeUInt16BE(off, 4);
+        }
+        body.push(b);
+        word[first[i] + k] = p / 2;
+        step[first[i] + k] = k === 0 ? form / 2 : 0;
+        vectors++;
+        p += b.length;
+      }
     }
-    junctions++;
-    for (let k = 0; k < vs.length; k++) {
-      const to = first[vs[k].to];
-      if (to === undefined) throw new Error('вектор узла ' + i + ' ведёт в никуда');
-      const b = Buffer.alloc(4);
-      const [w0, w1] = encodeHeader(to, vs[k].idx, 0, 0);
-      b.writeUInt16BE(w0, 0); b.writeUInt16BE(w1, 2);
-      body.push(b);
-      word[first[i] + k] = p / 2;
-      step[first[i] + k] = k === 0 ? form / 2 : 0;
-      vectors++;
-      p += 4;
+    if (n.links && n.links.length) {               // нульвектор идёт сразу за записями
+      const nul = encodeNull(n.links);
+      body.push(nul);
+      p += nul.length;
     }
   }
   while (p % 4) { body.push(Buffer.alloc(1)); p++; }   // таблица выровнена на 4
@@ -399,7 +469,7 @@ function buildBlock(spec) {
 }
 
 module.exports = { readBlock, writeBlock, buildBlock, simpleAttributes, encodeCoord,
-                   coordForm, looksSub, encodeLength, encodeHeader, scaleAt,
+                   coordForm, looksSub, encodeLength, encodeHeader, encodeNull, scaleAt,
                    recordParts, HDR, SUB };
 
 if (require.main === module) {
