@@ -147,3 +147,72 @@ test('имена тайла: раздел версии 2 читается тем
   assert.deepEqual(r.names, names);
   assert.equal(r.end, r.len, 'поток съеден ровно');
 });
+
+// ---------------------------------------------------------------------------
+// Область ссылок «имя -> дорога» (+0x50).
+
+// Собрать раздел с одной только шапкой и областью ссылок.
+function refSection(names, groups) {
+  const bodies = groups.map((g) => {
+    const out = [];
+    for (const n of g.names) {
+      out.push(0x80 | (n.nid >> 8), n.nid & 0xff);
+      for (const r of n.recs) { const v = r << 1; out.push(v >> 8, v & 0xff); }
+    }
+    return Buffer.from(out);
+  });
+  const parts = [];
+  let len = 0;
+  groups.forEach((g, i) => {
+    if (len % 4) { parts.push(Buffer.alloc(4 - (len % 4))); len += 4 - (len % 4); }
+    const head = Buffer.alloc(8);
+    head.writeUInt16BE(g.block, 0);
+    head.writeUInt32BE(bodies[i].length, 4);
+    parts.push(head, bodies[i]);
+    len += 8 + bodies[i].length;
+  });
+  if (len % 4) { parts.push(Buffer.alloc(4 - (len % 4))); len += 4 - (len % 4); }
+  const tail = Buffer.alloc(8); tail.writeUInt16BE(0xffff, 0);
+  parts.push(tail); len += 8;
+  const refs = Buffer.concat(parts);
+  const out = Buffer.alloc(0x64 + refs.length);
+  out.writeUInt16BE(2, 0x14);
+  out.writeUInt32BE(names, 0x24);
+  out.writeUInt32BE(0x64, 0x50);
+  out.writeUInt32BE(refs.length, 0x54);
+  refs.copy(out, 0x64);
+  return out;
+}
+
+const groups = [
+  { block: 0, names: [{ nid: 5, recs: [3081, 3085] }, { nid: 6, recs: [17] }] },
+  { block: 1, names: [{ nid: 5, recs: [1] }] },
+];
+
+test('область ссылок читается группа за группой и съедается ровно', () => {
+  const d = refSection(190, groups);
+  const r = ze.refGroups(d);
+  assert.strictEqual(r.err, null);
+  assert.strictEqual(r.end, r.len, 'область съедена ровно');
+  assert.deepStrictEqual(r.groups.map((g) => g.block), [0, 1]);
+  assert.deepStrictEqual(r.groups[0].names, groups[0].names);
+  assert.deepStrictEqual(r.groups[1].names, groups[1].names);
+});
+
+test('ключ 0xFFFF кончает область полной восьмибайтовой шапкой', () => {
+  const d = refSection(190, groups);
+  const h = ze.header(d);
+  // тело последней группы кончается раньше области ровно на концевик
+  const r = ze.refGroups(d);
+  assert.strictEqual(r.end, h.refs.len);
+});
+
+test('список блоков имени: три длины элемента', () => {
+  // 0x05 без старшего бита — один элемент, значение 5
+  assert.deepStrictEqual(ze.readPairs(Buffer.from([0x05]), 0).pairs, [5]);
+  // старший бит — «есть следующий»
+  assert.deepStrictEqual(ze.readPairs(Buffer.from([0x81, 0x02]), 0).pairs, [1, 2]);
+  // 0x7e — значение 126 + байт1, 0x7f — 15 бит из двух байт
+  assert.deepStrictEqual(ze.readPairs(Buffer.from([0xfe, 0x0a, 0x7f, 0x01, 0x23]), 0).pairs,
+    [136, 0x123]);
+});

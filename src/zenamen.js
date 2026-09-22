@@ -21,7 +21,7 @@
 //   +0x28/2c/30 слово на имя: смещение, длина (имён x 2), число токенов (250)
 //   +0x34/38/3c таблица токенов: смещение, длина (250 x 10), число имён
 //   +0x40/44    поток имён: смещение и длина
-//   +0x48/4c    два счётчика области ссылок
+//   +0x48/4c    область ссылок: число меток имени и число ссылок на векторы
 //   +0x50/54/58 область ссылок «имя -> векторы»: смещение, длина, счётчик
 //   +0x5c/60    хвостовая область: смещение и длина
 //
@@ -286,6 +286,74 @@ function allNames(d, h, opt) {
 }
 
 // ---------------------------------------------------------------------------
+// Область ссылок «имя -> дорога» (+0x50).
+//
+// Разбор снят с get_firstvect_instreet (FUN_08271914) и его инициализатора
+// (0x08271c18). Область — цепочка групп, по одной на блок VEKTORBLOCK тайла:
+//
+//   u16 ключ   номер блока минус первый блок тайла; 0xFFFF кончает область
+//   u16        всегда 0
+//   u32 длина  длина тела
+//   тело       поток u16: слово со старшим битом меняет имя (nid), слово без
+//              него — ссылка на вектор, номер записи = (знач & 0x7FFE) >> 1
+//
+// Следующая шапка выравнена на 4 байта от начала области; концевик — полная
+// восьмибайтовая шапка с ключом 0xFFFF. Метка имени занимает три байта, если
+// имён в разделе больше 0x8000 (DAT_08271bb4).
+
+function refGroups(d, h) {
+  h = h || header(d);
+  if (!h || !h.refs.len) return null;
+  const a = h.refs.off, end = a + h.refs.len, wide = h.index.names > 0x8000;
+  const groups = [];
+  let p = a;
+  for (;;) {
+    if ((p - a) % 4) p += 4 - ((p - a) % 4);
+    if (p + 8 > end) return { groups, end: p - a, err: 'шапка за концом области' };
+    const key = d.readUInt16BE(p);
+    if (key === 0xffff) { p += 8; break; }
+    const len = d.readUInt32BE(p + 4), body = p + 8;
+    if (body + len > end) return { groups, end: p - a, err: 'тело группы за концом' };
+    const names = [];
+    let q = body, cur = null;
+    while (q < body + len) {
+      const b = d[q];
+      if (b & 0x80) {
+        const nid = wide ? ((((b & 0x7f) << 8) | d[q + 1]) << 8) | d[q + 2]
+                         : ((b & 0x7f) << 8) | d[q + 1];
+        cur = { nid, recs: [] };
+        names.push(cur);
+        q += wide ? 3 : 2;
+      } else {
+        if (!cur) return { groups, end: p - a, err: 'ссылка до метки имени' };
+        cur.recs.push((d.readUInt16BE(q) & 0x7ffe) >> 1);
+        q += 2;
+      }
+    }
+    if (q !== body + len) return { groups, end: p - a, err: 'тело группы перебежало' };
+    groups.push({ block: key, names });
+    p = body + len;
+  }
+  return { groups, end: p - a, len: h.refs.len, err: null };
+}
+
+// Список блоков у имени: тот самый список пар, который включает бит 7 байта
+// флагов. Элемент 1..3 байта, старший бит байта 0 — «есть следующий»,
+// значение = low7, либо 126 + байт1 при low7 == 0x7e, либо 15 бит при 0x7f.
+function readPairs(stream, q) {
+  const out = [];
+  for (;;) {
+    const b = stream[q];
+    if (b === undefined) return { pairs: out, end: q, err: 'поток кончился' };
+    const v = b & 0x7f;
+    if (v < 0x7e) { out.push(v); q += 1; }
+    else if (v === 0x7e) { out.push(126 + stream[q + 1]); q += 2; }
+    else { out.push(((stream[q + 1] & 0x7f) << 8) | stream[q + 2]); q += 3; }
+    if (!(b & 0x80)) return { pairs: out, end: q, err: null };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Писатель: список имён -> раздел (версия 2) или файл .ort (версия 3).
 //
 // Пишем самой простой формой, какую читает прошивка: тело имени — серия
@@ -365,7 +433,7 @@ function buildSection(spec) {
 }
 
 module.exports = { header, tokens, keys, perName, nameAt, checkKeys,
-  unpackName, allNames, buildSection,
+  unpackName, allNames, buildSection, refGroups, readPairs,
   mmiHeader, mmiTree, mmiBuildTree, REC, KEY, TOK, STRIDE, MMI_REC };
 
 if (require.main === module && process.argv[2] !== '--build-ort') {
