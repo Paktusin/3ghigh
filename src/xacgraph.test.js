@@ -108,3 +108,143 @@ test('блок, которому не хватило места, остаётс�
   const r = xg.regenBlock(blk, 64);
   assert.equal(r.tooBig, true, 'коротким разделом сборка не прикрывается');
 });
+
+// --- тайл целиком: межблочные рёбра и нульвекторы --------------------------
+
+// Таблица ATTRIBUTE: нужен один «простой» индекс, запись при нём четырёхбайтовая.
+function attrTable() {
+  const a = new Uint32Array(2048);
+  a[0x164] = 0x00000005;
+  a[0x1b2] = 0x00000005;
+  a[0x2a] = 0x00000005;
+  return a;
+}
+
+// Тайл из нескольких блоков: каждому разделу даём запас, как у заводского.
+function tileOf(blocks, room) {
+  const roomy = blocks.map((b) => {
+    const r = Buffer.concat([b, Buffer.alloc(room === undefined ? 8192 : room)]);
+    r.writeUInt32BE(r.length - 20, 0x10);
+    return r;
+  });
+  return tile.buildTile({ code: 'CY00', file: 'EJ211_CY00_1', index: 3776,
+    country: 7, built: '20260922100000', zf: tile.section('ZF-NAMEN', Buffer.alloc(96)),
+    blocks: roomy });
+}
+
+test('тайл целиком: ребро через границу блоков переживает пересборку', () => {
+  const A = grid(5, 4, 33.30, 35.10);
+  const B = grid(5, 4, 33.32, 35.10);
+  // Блоки нумеруются сквозь базу: тайл начинается со 100, значит A=100, B=101.
+  const blkB = xw.buildBlock({ nodes: B, id: 101, tileBase: 100, flags: 0x95 });
+  const refB = xg.firstEntries(B)[7];                  // первая запись узла B7
+  A[3].vectors.push({ block: 101, ref: refB, idx: 0x2a });
+  const blkA = xw.buildBlock({ nodes: A, id: 100, tileBase: 100, flags: 0x95 });
+
+  const file = tileOf([blkA, blkB]);
+  const was = xg.tileEdges([blkA, blkB]);
+  const cross = A[3].x + ',' + A[3].y + '->' + B[7].x + ',' + B[7].y;
+  assert.ok(was.edges.has(cross), 'межблочное ребро видно и до пересборки');
+
+  const { out, stat } = xg.regenTile(file, { attr: attrTable() });
+  assert.equal(stat.v5, 2, 'оба блока пересобраны');
+  assert.equal(stat.cross, 1, 'межблочный вектор снят с графа');
+  assert.equal(stat.edgesNow, stat.edgesWas, 'рёбра воспроизведены все');
+  assert.equal(stat.edgesExtra, 0, 'лишних рёбер не появилось');
+
+  const blocks = xac.sections(out).list.filter((s) => s.name === 'VEKTORBLOCK')
+    .map((s) => out.subarray(s.offset, s.offset + s.total));
+  assert.ok(xg.tileEdges(blocks).edges.has(cross), 'и после пересборки ведёт в тот же узел');
+  assert.equal(out.length, file.length, 'длина файла прежняя');
+});
+
+test('тайл целиком: ссылка переписывается, когда у цели поехали номера', () => {
+  // У блока B первый узел без векторов — его запись занимает один номер;
+  // добавим ему рёбра, чтобы наша нумерация разошлась с исходной.
+  const A = grid(4, 3, 33.30, 35.10);
+  const B = grid(4, 3, 33.32, 35.10);
+  const blkB0 = xw.buildBlock({ nodes: B, id: 101, tileBase: 100, flags: 0x95 });
+  const target = 5;
+  A[2].vectors.push({ block: 101, ref: xg.firstEntries(B)[target], idx: 0x2a });
+  const blkA = xw.buildBlock({ nodes: A, id: 100, tileBase: 100, flags: 0x95 });
+
+  const file = tileOf([blkA, blkB0]);
+  const { out, stat } = xg.regenTile(file, { attr: attrTable() });
+  assert.equal(stat.edgesNow, stat.edgesWas);
+
+  // Прочитаем ссылку из пересобранного блока A и разрешим её как прошивка.
+  const blocks = xac.sections(out).list.filter((s) => s.name === 'VEKTORBLOCK')
+    .map((s) => out.subarray(s.offset, s.offset + s.total));
+  const a2 = blocks[0], b2 = blocks[1];
+  const tabA = a2.readUInt32BE(0x6c), cntA = a2.readUInt16BE(0x70);
+  let found = null;
+  for (let i = 1; i < cntA; i++) {
+    const p = a2.readUInt16BE(tabA + i * 2) * 2;
+    if (p <= 0 || p + 6 > a2.length) continue;
+    if ((a2.readUInt16BE(p) & 0xc000) !== 0xc000) continue;
+    if (((a2[p + 2] >> 6) & 1) === 0) continue;
+    found = p; break;
+  }
+  assert.ok(found, 'межблочная запись на месте');
+  assert.equal(a2.readUInt16BE(0x36) + (a2.readUInt16BE(found + 4) & 0x7fff), 101,
+    'номер блока-цели прежний');
+  const ref = a2.readUInt16BE(found) & 0x3fff;
+  const c = xg.entryCoords(b2).coords[ref];
+  assert.deepEqual([c.x, c.y], [B[target].x, B[target].y], 'ссылка привела в тот же узел');
+});
+
+test('тайл целиком: нульвекторы переносятся как есть', () => {
+  const nv = require('./nullvec');
+  const A = grid(4, 3, 33.30, 35.10);
+  A[0].links = [{ level: 1, block: 900, ref: 12 }, { level: 2, block: 950, ref: 8 }];
+  A[5].links = [{ level: 1, block: 901, ref: 4 }];
+  const blkA = xw.buildBlock({ nodes: A, id: 100, tileBase: 100, flags: 0x95 });
+
+  const g = xg.graphOf(blkA, { attr: attrTable() });
+  assert.equal(g.links, 3, 'все три пары сняты с блока');
+
+  const file = tileOf([blkA]);
+  const { out, stat } = xg.regenTile(file, { attr: attrTable() });
+  assert.equal(stat.links, 3, 'и перенесены в пересобранный блок');
+
+  const blk = (() => {
+    const s = xac.sections(out).list.find((x) => x.name === 'VEKTORBLOCK');
+    return out.subarray(s.offset, s.offset + s.total);
+  })();
+  const m = xw.readBlock(blk, attrTable());
+  const els = m.items.filter((x) => x.kind === 'null');
+  assert.equal(els.length, 2, 'оба элемента на месте');
+  const all = els.flatMap((e) => nv.pairs(blk, e.at, nv.wideMask(blk)).list.filter(Boolean))
+    .map((q) => [q.level, q.block, q.ref]);
+  assert.deepEqual(all.sort(), [[1, 900, 12], [1, 901, 4], [2, 950, 8]].sort(),
+    'пары те же: они ведут в чужие тайлы, и переписывать их не надо');
+});
+
+test('тайл целиком: ссылку в блок, который не пересобирался, не трогают', () => {
+  const v3 = require('./xacv3');
+  // Сосед — блок версии 3: его нумерация не менялась, значит ссылка в него
+  // должна остаться прежней. Так устроена и Мальта: пять блоков v5 и четыре v3.
+  const A = grid(4, 3, 33.30, 35.10);
+  const ref = 0x123;
+  A[2].vectors.push({ block: 101, ref, idx: 0x2a });
+  const blkA = xw.buildBlock({ nodes: A, id: 100, tileBase: 100, flags: 0x95 });
+  const old = v3.buildBlock({ nodes: grid(3, 3, 33.32, 35.10), origin: [X(33.33), Y(35.11)] });
+
+  const file = tileOf([blkA, old]);
+  const { out, stat } = xg.regenTile(file, { attr: attrTable() });
+  assert.equal(stat.v5, 1, 'пересобран только блок версии 5');
+
+  const blk = xac.sections(out).list.filter((x) => x.name === 'VEKTORBLOCK')
+    .map((x) => out.subarray(x.offset, x.offset + x.total))[0];
+  const tab = blk.readUInt32BE(0x6c), cnt = blk.readUInt16BE(0x70);
+  let seen = 0;
+  for (let i = 1; i < cnt; i++) {
+    const p = blk.readUInt16BE(tab + i * 2) * 2;
+    if (p <= 0 || p + 6 > blk.length) continue;
+    if ((blk.readUInt16BE(p) & 0xc000) !== 0xc000 || ((blk[p + 2] >> 6) & 1) === 0) continue;
+    seen++;
+    assert.equal(blk.readUInt16BE(p) & 0x3fff, ref, 'номер записи в чужом блоке прежний');
+    assert.equal(blk.readUInt16BE(0x36) + (blk.readUInt16BE(p + 4) & 0x7fff), 101, 'и номер блока');
+  }
+  assert.equal(seen, 1, 'межблочная запись ровно одна');
+});
