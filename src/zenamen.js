@@ -366,13 +366,84 @@ function readPairs(stream, q) {
 //   * приставка не длиннее 31 символа и не длиннее предыдущего имени —
 //     иначе распаковщик решит, что имя совпадает с предыдущим;
 //   * байт 0x02 внутри имени невозможен: он кончает имя.
+//
+// `spec.refs` — связь «имя -> дорога»: на каждое имя либо null, либо список
+// { block, recs } с номером блока ОТ ПЕРВОГО БЛОКА ТАЙЛА и номерами записей
+// в нём. Из него выходят сразу две вещи: список блоков после тела имени
+// (бит 7 флагов) и область ссылок +0x50. `spec.blocks` задаёт, сколько групп
+// писать: у завода их ровно столько, сколько блоков VEKTORBLOCK в тайле,
+// и ключи идут плотным рядом 0…N−1, даже когда блок без имён.
 const HEAD = 0x64;              // конец шапки, дальше идут области
+const MAXREC = 0x4000;          // номер записи не влезает в маску 0x7FFE
+const WIDE = 0x8000;            // столько имён — и метка имени в три байта
+
+// Элемент списка блоков: 1..3 байта, старший бит байта 0 — «есть следующий».
+function pairBytes(v, more) {
+  const c = more ? 0x80 : 0;
+  if (v < 0x7e) return [c | v];
+  if (v <= 0x7e + 0xff) return [c | 0x7e, v - 0x7e];
+  if (v > 0x7fff) throw new Error('номер блока не влезает в список: ' + v);
+  return [c | 0x7f, (v >> 8) & 0x7f, v & 0xff];
+}
+
+// Область ссылок: группа на каждый блок, внутри метки имён по возрастанию.
+function buildRefs(refs, blockCount, wide) {
+  const byBlock = new Map();
+  let marks = 0, links = 0;
+  refs.forEach((list, nid) => {
+    if (!list) return;
+    for (const g of list) {
+      if (!byBlock.has(g.block)) byBlock.set(g.block, []);
+      byBlock.get(g.block).push({ nid, recs: g.recs });
+    }
+  });
+  const parts = [];
+  let len = 0;
+  for (let key = 0; key < blockCount; key++) {
+    const names = (byBlock.get(key) || []).sort((a, b) => a.nid - b.nid);
+    const body = [];
+    for (const n of names) {
+      if (wide) body.push(0x80 | ((n.nid >> 16) & 0x7f), (n.nid >> 8) & 0xff, n.nid & 0xff);
+      else body.push(0x80 | (n.nid >> 8), n.nid & 0xff);
+      marks++;
+      for (const r of n.recs) {
+        if (r < 0 || r >= MAXREC) throw new Error('номер записи вне маски 0x7FFE: ' + r);
+        body.push((r >> 7) & 0x7f, (r << 1) & 0xff);
+        links++;
+      }
+    }
+    if (len % 4) { const pad = 4 - (len % 4); parts.push(Buffer.alloc(pad)); len += pad; }
+    const head = Buffer.alloc(8);
+    head.writeUInt16BE(key, 0);
+    head.writeUInt32BE(body.length, 4);
+    parts.push(head, Buffer.from(body));
+    len += 8 + body.length;
+  }
+  if (len % 4) { const pad = 4 - (len % 4); parts.push(Buffer.alloc(pad)); len += pad; }
+  const tail = Buffer.alloc(8); tail.writeUInt16BE(0xffff, 0);
+  parts.push(tail);
+  return { area: Buffer.concat(parts), marks, links };
+}
 
 function buildSection(spec) {
   const names = spec.names.map((n) => Buffer.from(String(n), 'latin1'));
   for (const n of names) if (n.includes(2)) throw new Error('имя содержит байт 0x02');
   if (!names.length) throw new Error('пустой список имён');
   const keyCount = Math.ceil(names.length / STRIDE);
+  const wide = names.length > WIDE;
+
+  // связь «имя -> дорога»: списки блоков приводим к порядку по возрастанию
+  const refs = spec.refs ? spec.refs.slice(0, names.length) : null;
+  let blockCount = spec.blocks || 0;
+  if (refs) {
+    while (refs.length < names.length) refs.push(null);
+    refs.forEach((list, i) => {
+      if (!list || !list.length) { refs[i] = null; return; }
+      refs[i] = list.slice().sort((a, b) => a.block - b.block);
+      const last = refs[i][refs[i].length - 1].block;
+      if (last + 1 > blockCount) blockCount = last + 1;
+    });
+  }
 
   // поток и слова на имя
   const bodies = [], words = Buffer.alloc(names.length * 2);
@@ -391,8 +462,17 @@ function buildSection(spec) {
     rest.copy(body, 2);
     body[body.length - 1] = 2;                      // конец имени
     bodies.push(body);
-    words.writeUInt16BE(prefix & 0x1f, i * 2);      // старший байт (части) — ноль
     at += body.length;
+    // список блоков имени — сразу за телом, бит 7 флагов его включает
+    const list = refs && refs[i];
+    if (list) {
+      const bytes = [];
+      list.forEach((g, k) => bytes.push(...pairBytes(g.block, k < list.length - 1)));
+      const pl = Buffer.from(bytes);
+      bodies.push(pl);
+      at += pl.length;
+    }
+    words.writeUInt16BE((prefix & 0x1f) | (list ? 0x80 : 0), i * 2); // старший байт — ноль
     prev = n;
   });
   const stream = Buffer.concat(bodies);
@@ -401,11 +481,24 @@ function buildSection(spec) {
   const tokTab = Buffer.alloc(TOK * 250);
   tokTab[0] = 2;
 
+  // область ссылок и таблица «частей» в хвосте раздела
+  const r = refs ? buildRefs(refs, blockCount, wide) : null;
+  // Таблица частей: старший байт слова на имя даёт нибблами два номера в ней,
+  // мы пишем ноль, поэтому хватает одной записи. Счётчик лежит в +0x58, форма
+  // «записи по два байта плюс нулевое слово» — самая частая у завода.
+  // Догадка: смысл самих пар не разобран, поэтому пишем нули.
+  const parts = spec.parts || (refs ? Buffer.alloc(4) : null);
+  const partCount = spec.partCount === undefined
+    ? (parts ? Math.max(1, (parts.length >> 1) - 1) : 0)
+    : spec.partCount;
+
   const idxOff = HEAD;
   const perOff = idxOff + keyCount * REC;
   const tokOff = perOff + words.length;
   const strOff = tokOff + tokTab.length;
-  const total = strOff + stream.length;
+  const refOff = strOff + stream.length;
+  const tailOff = refOff + (r ? r.area.length : 0);
+  const total = tailOff + (parts ? parts.length : 0);
 
   const out = Buffer.alloc(total);
   out.write((spec.label || 'ORTSNAMEN').padEnd(16, ' '), 0, 16, 'latin1');
@@ -420,6 +513,12 @@ function buildSection(spec) {
   out.writeUInt32BE(tokOff, 0x34); out.writeUInt32BE(tokTab.length, 0x38);
   out.writeUInt32BE(names.length, 0x3c);
   out.writeUInt32BE(strOff, 0x40); out.writeUInt32BE(stream.length, 0x44);
+  if (r) {
+    out.writeUInt32BE(r.marks, 0x48); out.writeUInt32BE(r.links, 0x4c);
+    out.writeUInt32BE(refOff, 0x50); out.writeUInt32BE(r.area.length, 0x54);
+  }
+  out.writeUInt32BE(partCount, 0x58);
+  if (parts) { out.writeUInt32BE(tailOff, 0x5c); out.writeUInt32BE(parts.length, 0x60); }
   // ключи: восемь байт текста и смещение имени в потоке
   for (let k = 0; k < keyCount; k++) {
     const n = names[k * STRIDE];
@@ -429,11 +528,13 @@ function buildSection(spec) {
   words.copy(out, perOff);
   tokTab.copy(out, tokOff);
   stream.copy(out, strOff);
+  if (r) r.area.copy(out, refOff);
+  if (parts) parts.copy(out, tailOff);
   return out;
 }
 
 module.exports = { header, tokens, keys, perName, nameAt, checkKeys,
-  unpackName, allNames, buildSection, refGroups, readPairs,
+  unpackName, allNames, buildSection, refGroups, readPairs, pairBytes,
   mmiHeader, mmiTree, mmiBuildTree, REC, KEY, TOK, STRIDE, MMI_REC };
 
 if (require.main === module && process.argv[2] !== '--build-ort') {

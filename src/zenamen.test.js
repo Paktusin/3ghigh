@@ -216,3 +216,63 @@ test('список блоков имени: три длины элемента',
   assert.deepStrictEqual(ze.readPairs(Buffer.from([0xfe, 0x0a, 0x7f, 0x01, 0x23]), 0).pairs,
     [136, 0x123]);
 });
+
+// ---------------------------------------------------------------------------
+// Писатель области ссылок.
+
+const withRefs = {
+  names: ['ANO POLEMIDIA', 'GRIVA DIGENI', 'LEDRA STREET', 'LEMESOS'],
+  refs: [null, [{ block: 2, recs: [7] }, { block: 0, recs: [3, 4] }],
+         [{ block: 1, recs: [9] }], null],
+  blocks: 3, version: 2, label: 'ZE-NAMEN',
+};
+
+test('писатель: область ссылок читается обратно теми же группами', () => {
+  const d = ze.buildSection(withRefs);
+  const r = ze.refGroups(d);
+  assert.strictEqual(r.err, null);
+  assert.strictEqual(r.end, r.len, 'область съедена ровно');
+  assert.deepStrictEqual(r.groups.map((g) => g.block), [0, 1, 2], 'группа на каждый блок');
+  assert.deepStrictEqual(r.groups[0].names, [{ nid: 1, recs: [3, 4] }]);
+  assert.deepStrictEqual(r.groups[1].names, [{ nid: 2, recs: [9] }]);
+  assert.deepStrictEqual(r.groups[2].names, [{ nid: 1, recs: [7] }]);
+});
+
+test('писатель: список блоков имени совпадает с набором групп', () => {
+  const d = ze.buildSection(withRefs);
+  const h = ze.header(d);
+  const stream = d.subarray(h.stream.off, h.stream.off + h.stream.len);
+  const tok = ze.tokens(d, h);
+  let p = 0, prev = Buffer.alloc(0);
+  const got = [];
+  for (let i = 0; i < h.index.names; i++) {
+    const flags = d[h.perName.off + i * 2 + 1];
+    const u = ze.unpackName(stream, p, tok, prev, i % 16 === 0 ? 0 : flags & 0x1f);
+    let q = u.end;
+    if (flags & 0x80) { const z = ze.readPairs(stream, q); got.push(z.pairs); q = z.end; }
+    else got.push(null);
+    prev = Buffer.concat([u.name, Buffer.from([0])]);
+    p = q;
+  }
+  assert.strictEqual(p, stream.length, 'поток съеден ровно');
+  assert.deepStrictEqual(got, [null, [0, 2], [1], null]);
+});
+
+test('писатель: счётчики +0x48 и +0x4c считают метки и ссылки', () => {
+  const h = ze.header(ze.buildSection(withRefs));
+  assert.strictEqual(h.stream.a, 3, 'меток имени');
+  assert.strictEqual(h.stream.b, 4, 'ссылок на векторы');
+});
+
+test('писатель: номер записи вне маски 0x7FFE отвергается', () => {
+  assert.throws(() => ze.buildSection({
+    names: ['A', 'B'], refs: [null, [{ block: 0, recs: [0x4000] }]], blocks: 1, version: 2,
+  }), /вне маски/);
+});
+
+test('список блоков: три длины элемента и обратно', () => {
+  for (const v of [0, 5, 125, 126, 300, 381, 382, 0x1234, 0x7fff]) {
+    const b = Buffer.from(ze.pairBytes(v, false));
+    assert.deepStrictEqual(ze.readPairs(b, 0).pairs, [v], 'значение ' + v);
+  }
+});
