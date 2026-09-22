@@ -209,6 +209,137 @@ function housesOf(d, i, h) {
   return { rows, redirect: null, end: p };
 }
 
+// ---------------------------------------------------------------------------
+// Писатель.
+//
+// Пишем самой простой формой, какую читает прошивка, — как и в ZE-NAMEN.
+// Группа номеров: вид 1, если от = до и число влезает в байт; вид 2, если оба
+// влезают; иначе вид 6 (два u16 BE). Виды с дельтами и «семибитными» числами
+// не нужны: по всей базе номера лежат в 0…9999, отрицательных нет, записей с
+// младшим нибблом 4 нет ни одной (67 разделов выборки).
+//
+// Ссылка на дорогу: длинная форма (бит 6) задаёт и номер блока, и ссылку,
+// короткая — только сдвиг от предыдущей в том же блоке. Первой в имени всегда
+// идёт длинная (иначе состоянию неоткуда взяться), дальше берётся короткая,
+// когда блок тот же и сдвиг влезает в пять бит (−16…15) или в тринадцать
+// (−4096…4095). Состояние тянется от записи к записи внутри имени — ровно так
+// же, как его тянет читатель.
+
+const MAXREC = 0x4000;      // ссылка — 14 бит, как и везде
+const MAXBLOCK = 0x8000;    // номер блока — 15 бит
+
+// Число вида 5/14/15: первый байт в старшие разряды, дальше семибитный варинт.
+function encNum7(v) {
+  if (v < 0) throw new Error('отрицательное число дома: ' + v);
+  let k = 1;
+  while (v >> (7 * k) > 0xff) k++;
+  const out = [v >> (7 * k)];
+  for (let i = k - 1; i >= 0; i--) out.push(((v >> (7 * i)) & 0x7f) | (i ? 0x80 : 0));
+  return out;
+}
+
+// Обычный варинт: семь бит на байт, старшие разряды впереди.
+function encVarint(v) {
+  const parts = [];
+  do { parts.unshift(v & 0x7f); v >>>= 7; } while (v);
+  return parts.map((b, i) => (i < parts.length - 1 ? b | 0x80 : b));
+}
+
+// Группа номеров: возвращает { code, bytes }.
+function encGroup(pair) {
+  if (!pair || pair[0] === null || pair[0] === undefined) return { code: 0, bytes: [] };
+  const [from, to] = pair;
+  if (from < 0 || to < 0) throw new Error('отрицательный номер дома');
+  if (from === to && from < 0x100) return { code: 1, bytes: [from] };
+  if (from < 0x100 && to < 0x100) return { code: 2, bytes: [from, to] };
+  if (from < 0x10000 && to < 0x10000) {
+    return { code: 6, bytes: [from >> 8, from & 0xff, to >> 8, to & 0xff] };
+  }
+  if (from < BIG || to < BIG) throw new Error('номер дома не кодируется: ' + from + '..' + to);
+  return { code: 14, bytes: encNum7(from - BIG).concat(encNum7(to - BIG)) };
+}
+
+// Список ссылок. `state` — блок и номер записи предыдущего элемента имени.
+function encRefs(list, state) {
+  if (!list || !list.length) throw new Error('запись дома без ссылок на дорогу');
+  const out = [];
+  list.forEach((r, i) => {
+    if (r.rec < 0 || r.rec >= MAXREC) throw new Error('ссылка вне 14 бит: ' + r.rec);
+    if (r.block < 0 || r.block >= MAXBLOCK) throw new Error('номер блока вне 15 бит: ' + r.block);
+    const more = i < list.length - 1 ? 0x80 : 0;
+    const d = state.block === r.block ? r.rec - state.rec : null;
+    if (d !== null && d >= -16 && d <= 15) {
+      out.push(more | ((d + 0x10) & 0x1f));
+    } else if (d !== null && d >= -4096 && d <= 4095) {
+      const v = d + 4096;
+      out.push(more | 0x20 | ((v >> 8) & 0x1f), v & 0xff);
+    } else {
+      out.push(more | 0x40 | ((r.rec >> 8) & 0x3f), r.rec & 0xff);
+      if (r.block < 0x80) out.push(r.block);
+      else out.push(0x80 | (r.block >> 8), r.block & 0xff);
+    }
+    state.block = r.block;
+    state.rec = r.rec;
+  });
+  return out;
+}
+
+// Байты одного имени: список записей либо перенаправление.
+function encName(i, item) {
+  if (!item) return [];
+  if (item.redirect !== undefined && item.redirect !== null) {
+    const back = i - 1 - item.redirect;
+    if (back < 0) throw new Error('перенаправление вперёд: имя ' + i + ' -> ' + item.redirect);
+    return [0].concat(encVarint(back));
+  }
+  const out = [];
+  const state = { block: -1, rec: 0 };           // до первой длинной формы блока нет
+  for (const row of item) {
+    const L = encGroup(row.left), R = encGroup(row.right);
+    if (L.code === 0 && R.code === 0) throw new Error('запись дома без номеров');
+    out.push(L.code | (R.code << 4), ...L.bytes, ...R.bytes, ...encRefs(row.refs, state));
+  }
+  return out;
+}
+
+// Раздел целиком. `spec.rows` — на каждое имя ZE-NAMEN либо null, либо
+// { redirect }, либо список записей { left, right, refs }.
+function buildSection(spec) {
+  const rows = spec.rows || [];
+  const parts = [], offsets = [];
+  let at = 0;
+  for (let i = 0; i < rows.length; i++) {
+    offsets.push(at);
+    const b = Buffer.from(encName(i, rows[i]));
+    parts.push(b);
+    at += b.length;
+  }
+  offsets.push(at);                              // замыкающая запись
+  const data = Buffer.concat(parts);
+  const idx = buildIndex(offsets);
+  const head = 48;
+  const out = Buffer.alloc(head + idx.length + data.length);
+  out.write((spec.label || 'HAUSNUMMERN').padEnd(16, ' '), 0, 16, 'latin1');
+  out.writeUInt32BE(out.length - 20, 0x10);
+  out.writeUInt32BE(0x00050000, 0x14);
+  out.writeUInt32BE(offsets.length, 0x18);
+  out.writeUInt32BE(head, 0x1c);
+  out.writeUInt32BE(idx.length, 0x20);
+  // +0x24 читателю безразличен, проверяется только «больше нуля»; пишем
+  // число групп номеров — ближайшая по смыслу величина из разобранных.
+  let groups = 0;
+  for (const item of rows) {
+    if (!item || item.redirect !== undefined) continue;
+    for (const r of item) groups += (r.left ? 1 : 0) + (r.right ? 1 : 0);
+  }
+  out.writeUInt32BE(Math.max(1, groups), 0x24);
+  out.writeUInt32BE(head + idx.length, 0x28);
+  out.writeUInt32BE(data.length, 0x2c);
+  idx.copy(out, head);
+  data.copy(out, head + idx.length);
+  return out;
+}
+
 // Собрать индекс обратно: смещения по три байта, замыкающая запись — длина.
 function buildIndex(offsets) {
   const out = Buffer.alloc(offsets.length * REC);
@@ -221,4 +352,5 @@ function buildIndex(offsets) {
 }
 
 module.exports = { header, at, chunkOf, varint, buildIndex, housesOf, group, refs,
-                   num7, REC, BIG, DELTA2, MASK };
+                   num7, buildSection, encGroup, encRefs, encNum7, encVarint,
+                   REC, BIG, DELTA2, MASK, MAXREC, MAXBLOCK };

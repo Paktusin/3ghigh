@@ -135,3 +135,64 @@ test('семибитное число: первый байт идёт в ста�
   assert.strictEqual(hn.num7(B(0x02, 0x30), 0).from, (0x02 << 7) | 0x30);
   assert.strictEqual(hn.num7(B(0x01, 0x81, 0x02), 0).p, 3, 'продолжение по биту 7');
 });
+
+// ---------------------------------------------------------------------------
+// Писатель.
+
+test('писатель: раздел читается обратно той же моделью', () => {
+  const rows = [
+    null,
+    [{ left: [7, 7], right: [8, 8], refs: [{ block: 0, rec: 100 }] }],
+    { redirect: 1 },
+    [{ left: [193, 219], right: [194, 220], refs: [{ block: 2, rec: 63 }, { block: 9, rec: 1700 }] },
+     { left: [1000, 1010], right: null, refs: [{ block: 2, rec: 64 }] }],
+  ];
+  const sec = hn.buildSection({ rows });
+  const h = header(sec);
+  assert.strictEqual(h.version, 0x00050000);
+  assert.strictEqual(h.count, rows.length + 1, 'записей индекса — имён плюс одна');
+  assert.strictEqual(h.index.off, 48);
+  assert.strictEqual(at(sec, h, rows.length), h.data.len, 'замыкающая равна длине данных');
+  assert.ok(h.houses > 0, '+0x24 положительное');
+
+  assert.deepStrictEqual(hn.housesOf(sec, 0, h).rows, []);
+  const r1 = hn.housesOf(sec, 1, h);
+  assert.deepStrictEqual(r1.rows[0].left, [7, 7]);
+  assert.deepStrictEqual(r1.rows[0].right, [8, 8]);
+  assert.deepStrictEqual(r1.rows[0].refs, [{ block: 0, rec: 100 }]);
+  assert.strictEqual(hn.housesOf(sec, 2, h).redirect, 1);
+  const r3 = hn.housesOf(sec, 3, h);
+  assert.strictEqual(r3.rows.length, 2);
+  assert.deepStrictEqual(r3.rows[0].refs, [{ block: 2, rec: 63 }, { block: 9, rec: 1700 }]);
+  assert.deepStrictEqual(r3.rows[1].left, [1000, 1010]);
+  assert.deepStrictEqual(r3.rows[1].right, [null, null]);
+  assert.deepStrictEqual(r3.rows[1].refs, [{ block: 2, rec: 64 }]);
+});
+
+test('писатель: вид группы выбирается по величине номеров', () => {
+  assert.strictEqual(hn.encGroup([7, 7]).code, 1, 'одинаковые и в байт');
+  assert.strictEqual(hn.encGroup([7, 9]).code, 2, 'оба в байт');
+  assert.strictEqual(hn.encGroup([7, 900]).code, 6, 'не влезли в байт');
+  assert.strictEqual(hn.encGroup(null).code, 0, 'группы нет');
+});
+
+test('писатель: соседняя ссылка в том же блоке пишется сдвигом', () => {
+  const near = hn.buildSection({ rows: [[{ left: [1, 1], right: null,
+    refs: [{ block: 3, rec: 500 }, { block: 3, rec: 505 }, { block: 3, rec: 1200 }] }]] });
+  const far = hn.buildSection({ rows: [[{ left: [1, 1], right: null,
+    refs: [{ block: 3, rec: 500 }, { block: 4, rec: 505 }, { block: 5, rec: 1200 }] }]] });
+  assert.ok(header(near).data.len < header(far).data.len, 'сдвиг короче длинной формы');
+  const back = hn.housesOf(near, 0, header(near));
+  assert.deepStrictEqual(back.rows[0].refs,
+    [{ block: 3, rec: 500 }, { block: 3, rec: 505 }, { block: 3, rec: 1200 }]);
+});
+
+test('писатель: невозможное отвергается не молча', () => {
+  assert.throws(() => hn.buildSection({ rows: [[{ left: [1, 1], right: null,
+    refs: [{ block: 0, rec: 0x4000 }] }]] }), /вне 14 бит/);
+  assert.throws(() => hn.buildSection({ rows: [[{ left: [1, 1], right: null, refs: [] }]] }),
+    /без ссылок/);
+  assert.throws(() => hn.buildSection({ rows: [[{ left: null, right: null,
+    refs: [{ block: 0, rec: 1 }] }]] }), /без номеров/);
+  assert.throws(() => hn.buildSection({ rows: [null, { redirect: 3 }] }), /вперёд/);
+});
