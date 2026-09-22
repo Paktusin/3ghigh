@@ -108,10 +108,25 @@ function header(g) {
   return { sig, version, frame, nLevels, levels, regionEnd };
 }
 
-// заголовок уровня: размер ячейки и число бит на кластер
+// заголовок уровня: размер ячейки, число бит на кластер и СДВИГ КООРДИНАТЫ.
+//
+// Сдвиг (+82) — та самая величина, из-за которой дороги писались только в L0.
+// Точка тайла хранится не в мировых единицах, а в сдвинутых:
+//     мировая = начало_тайла + (сырая << сдвиг)
+// Прошивка берёт его так: CGdbCluster::init_nach_laden (FUN_08caf3c4) кладёт
+// в запись тайла байт уровня `level+0x78 & 0x7f`, конструктор CGdbTile
+// (FUN_08cabdb8) переносит его в заголовок тайла +0x11, а инициализация
+// декодера точек (FUN_09253334) — в поле +0x16 своего контекста, где его и
+// применяет арифметика `(сырая << сдвиг) + основа` (0x09252f..).
+// Значения по уровням: 0 3 5 6 7 9 9 10 10 11 11 12.
 function levelHead(b) {
-  return { cellX: b.readUInt32BE(0), cellY: b.readUInt32BE(4), potX: b[8], potY: b[9] };
+  return {
+    cellX: b.readUInt32BE(0), cellY: b.readUInt32BE(4), potX: b[8], potY: b[9],
+    shift: b[LEVEL_SHIFT_AT], tag: b.subarray(LEVEL_SHIFT_AT, LEVEL_SHIFT_AT + 6).toString('hex'),
+  };
 }
+
+const LEVEL_SHIFT_AT = 82;
 
 // запись таблицы кластеров считается «чистой», если это пустой маркер или
 // правдоподобный указатель в область данных (.gdb-хвост или .gd2)
@@ -328,26 +343,42 @@ const latOfCellL = (cy, cellY) => (cy * (cellY || CELL_Y) - ORIGIN_Y) / UNITS_PE
 //   1d <u32 Y> <u8 N> 8f 00 00 00 00   затем ровно N × u32
 // где 0x1d — головной байт (X-режим 1 «константа», Y-режим 0xC «читать u32»,
 // поле счётчика = 1 → счётчик следующим байтом). Каждый u32 — одна точка:
-// старшие 16 бит — x (беззнаковый), младшие — y (ЗНАКОВЫЙ i16), в мировых
-// единицах относительно начала тайла. Разбирается пока только этот вариант
-// элемента; остальные режимы головного байта не декодируются.
-function tilePoints(g, off, size, tileCellX, tileCellY) {
+// старшие 16 бит — x (беззнаковый), младшие — y (ЗНАКОВЫЙ i16). Это сырые
+// координаты; в мировые они переводятся сдвигом уровня (см. levelHead):
+//     мировая = начало_тайла + (сырая << сдвиг)
+// У L0 сдвиг равен нулю, поэтому прежние числа не меняются. Четыре u32 на
+// точку — это ширина координаты 16 бит; у грубых уровней заводские тайлы
+// бывают и на 12, и на 8 бит (байт +9 записи тайла), такие тут не разбираются.
+//
+// `lv` — {cellX, cellY, shift} уровня; без него берётся L0.
+function tilePoints(g, off, size, tileCellX, tileCellY, lv) {
   const th = tileHeader(g, off, size);
   if (!th.ok) return null;
   const s = read(g, off, size).subarray(TILE_HEAD, th.off0);
   for (let p = 0; p + 11 <= s.length; p++) {
-    if (s[p] !== 0x1d || s.readUInt32BE(p + 1) !== 0x50) continue;
-    if (s[p + 6] !== 0x8f || s.readUInt32BE(p + 7) !== 0) continue;
-    const n = s[p + 5], start = p + 11;
-    if (s.length - start !== n * 4) continue;        // строгая проверка длины
+    if (s[p] !== 0x1d) continue;
+    const n = s[p + 5];
+    // Две встреченные формы одного элемента:
+    //   A (L0): после счётчика пять байт «8f 00 00 00 00», дальше ровно N × u32
+    //           и элемент кончается вместе с потоком;
+    //   B (грубые уровни): после счётчика сразу N × u32, а за ними хвост
+    //           ceil(N/4) байт (у кипрского тайла L1: 21 байт на 82 точки и
+    //           20 на 80). Что в хвосте — не установлено.
+    let start = null;
+    if (s.readUInt32BE(p + 1) === 0x50 && s[p + 6] === 0x8f && s.readUInt32BE(p + 7) === 0
+        && s.length - (p + 11) === n * 4) start = p + 11;
+    else if (s.length - (p + 6) === n * 4 + Math.ceil(n / 4)) start = p + 6;
+    if (start === null) continue;
     const pts = [];
     for (let i = 0; i < n; i++) {
       const v = s.readUInt32BE(start + i * 4);
       const x = v >>> 16, y = ((v & 0xffff) << 16) >> 16;   // y — знаковый
       const p2 = { x, y };
       if (tileCellX !== undefined) {
-        p2.lon = lonOfCell(tileCellX + x / CELL_X);
-        p2.lat = latOfCell(tileCellY + y / CELL_Y);
+        const cx = (lv && lv.cellX) || CELL_X, cy = (lv && lv.cellY) || CELL_Y;
+        const sh = (lv && lv.shift) || 0;
+        p2.lon = lonOfCellL(tileCellX + (x * (1 << sh)) / cx, cx);
+        p2.lat = latOfCellL(tileCellY + (y * (1 << sh)) / cy, cy);
       }
       pts.push(p2);
     }
@@ -388,7 +419,7 @@ function roundTrip(g, off, size) {
 module.exports = {
   openGdb, openBuffer, read, header, levelHead, locateTable, levelGrid, slotFor, cluster,
   tileHeader, tilePoints, encodePoints, roundTrip, lonOfCell, latOfCell,
-  CELL_X, CELL_Y, TILE_HEAD, TABLE_AT, gridW, keyOrigin,
+  CELL_X, CELL_Y, TILE_HEAD, TABLE_AT, LEVEL_SHIFT_AT, gridW, keyOrigin,
   cellOfLon, cellOfLat, lonOfCellL, latOfCellL, UNITS_PER_LON, UNITS_PER_LAT,
 };
 
@@ -426,7 +457,8 @@ if (require.main === module) {
       const c = cluster(g, h, e.off, e.sz);
       console.log('тайлов ' + c.tiles.length + ', поиск-таблица с +' + c.searchStart + ' (' + c.searchBytes + ' б)');
       for (const t of c.tiles.slice(0, 12))
-        console.log('  тайл (' + t.x + ',' + t.y + ') 2^' + t.lw + '×2^' + t.lh + ' fl=' + t.flag + ' attr=' + t.attr.toString(16) + ' данные @' + t.off + ' (' + t.size + ' б)');
+        console.log('  тайл (' + t.x + ',' + t.y + ') 2^' + t.lw + '×2^' + t.lh + ' fl=' + t.flag +
+          ' ширина ' + t.attr + ' бит  данные @' + t.off + ' (' + t.size + ' б)');
       if (c.tiles.length > 12) console.log('  … ещё ' + (c.tiles.length - 12));
     }
     process.exit(0);
@@ -448,8 +480,12 @@ if (require.main === module) {
     const b = read(g, off, Math.min(size, 48));
     console.log('первые байты потока (@+10): ' + b.subarray(TILE_HEAD, Math.min(b.length, 48)).toString('hex'));
     const cellArg = opt('--cell');
+    // --level N: без него координаты переводятся по L0 (сдвиг 0)
+    const lvArgT = opt('--level');
+    const lvT = lvArgT == null ? null : levelHead(read(g, h.levels[Number(lvArgT)].offset, 100));
+    if (lvT) console.log('уровень L' + lvArgT + ': ячейка ' + lvT.cellX + '×' + lvT.cellY + ', сдвиг ' + lvT.shift);
     const pr = cellArg
-      ? tilePoints(g, off, size, Number(cellArg.split(',')[0]), Number(cellArg.split(',')[1]))
+      ? tilePoints(g, off, size, Number(cellArg.split(',')[0]), Number(cellArg.split(',')[1]), lvT)
       : tilePoints(g, off, size);
     if (pr) {
       console.log('\nточки последнего элемента: ' + pr.count + ' шт, узор @+' + pr.at + ', данные @+' + pr.pointsAt);
@@ -471,6 +507,7 @@ if (require.main === module) {
     console.log('  L' + String(L.i).padStart(2),
       'ячейка ' + String(gr.head.cellX).padStart(7) + '×' + String(gr.head.cellY).padEnd(7),
       'кластер 2^' + gr.head.potX + '×2^' + gr.head.potY,
+      ' сдвиг ' + String(gr.head.shift).padStart(2),
       ' таблица @+' + String(gr.table.start).padStart(4) + '×' + String(gr.table.count).padStart(5),
       ' реальных ' + String(gr.realClusters).padStart(5) + ' пустых ' + String(gr.emptyN).padStart(5),
       ' ' + grid);

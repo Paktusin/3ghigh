@@ -373,3 +373,70 @@ test('дороги: размер тайла внутри кластера оди
     assert.equal(set.size, 1, 'в кластере один размер тайла');
   }
 });
+
+// ── грубые уровни ──────────────────────────────────────────────────────────
+
+test('уровни: сдвиг из заголовка совпадает с первым байтом метки +82', () => {
+  for (const L of G.EUROPE_LEVELS) {
+    assert.equal(L.shift, parseInt(L.tag.slice(0, 2), 16), 'метка и сдвиг не разошлись');
+  }
+  assert.deepEqual(G.EUROPE_LEVELS.map(L => L.shift), [0, 3, 5, 6, 7, 9, 9, 10, 10, 11, 11, 12]);
+});
+
+test('уровни: тайл любого уровня влезает в u16 после сдвига', () => {
+  // (ячейка << lw) >> сдвиг — размах тайла в сырых единицах. Ровно это правило
+  // сходится у всех 4695 проверенных заводских тайлов.
+  for (const L of G.EUROPE_LEVELS) {
+    assert.ok(((L.cellX * (1 << L.lw)) >> L.shift) <= 0xffff, 'по x');
+    assert.ok(((L.cellY * (1 << L.lh)) >> L.shift) <= 0xffff, 'по y');
+  }
+});
+
+test('грубые уровни: дорога через весь Кипр возвращается из тома в градусах', () => {
+  // На L0 такая дорога не помещается: 2,1° — это 154 000 мировых единиц, а x
+  // точки — u16. На грубых уровнях её укладывает сдвиг.
+  const road = [[32.42, 34.75], [33.00, 35.10], [33.36, 35.17], [34.55, 35.65]];
+  const lines = [{ name: 'A1', cls: 'motorway', pts: road }];
+
+  assert.equal(G.roadsToLevel(lines, { level: 0 }).tiles, 0, 'на L0 не легла');
+
+  // предел разрешения уровня: половина сырой единицы в километрах по долготе
+  const limit = L => (1 << L.shift) / gm.UNITS_PER_LON * 88.9;
+  for (const lv of [1, 2, 3, 5, 8, 11]) {
+    const v = G.volumeFromRoads(lines, { levels: [lv] });
+    const g = gm.openBuffer(v.gdb, v.gd2);
+    const h = gm.header(g);
+    const hd = gm.levelHead(gm.read(g, h.levels[lv].offset, 100));
+    assert.equal(hd.shift, G.EUROPE_LEVELS[lv].shift, 'сдвиг уровня записан');
+
+    let t = null;
+    for (const cl of v.map.levels[lv].clusters) { t = cl.tiles.find(x => x.size > 40) || t; }
+    assert.ok(t, 'L' + lv + ': тайл с дорогой есть');
+
+    const rr = G.readTileRoads(gm.read(g, t.off, t.size));
+    assert.equal(rr.roads.length, 1);
+    const k0 = gm.keyOrigin(lv);
+    const back = rr.roads[0].points.map(p => [
+      gm.lonOfCellL((t.x - k0.x0) + (p.x * (1 << hd.shift)) / hd.cellX, hd.cellX),
+      gm.latOfCellL((t.y - k0.y0) + (p.y * (1 << hd.shift)) / hd.cellY, hd.cellY),
+    ]);
+    assert.equal(back.length, road.length, 'L' + lv + ': все точки на месте');
+    back.forEach((p, i) => {
+      const err = Math.hypot((p[0] - road[i][0]) * 88.9, (p[1] - road[i][1]) * 111.1);
+      assert.ok(err <= limit(G.EUROPE_LEVELS[lv]), 'L' + lv + ' точка ' + i +
+        ': ошибка ' + err.toFixed(3) + ' км при пределе ' + limit(G.EUROPE_LEVELS[lv]).toFixed(3));
+    });
+  }
+});
+
+test('грубые уровни: классы дорог отсеиваются по пирамиде', () => {
+  const lines = [
+    { name: 'A1', cls: 'motorway', pts: [[33.0, 35.0], [33.1, 35.05]] },
+    { name: 'B9', cls: 'primary', pts: [[33.0, 35.0], [33.1, 35.05]] },
+    { name: 'ул.', cls: 'residential', pts: [[33.0, 35.0], [33.1, 35.05]] },
+  ];
+  assert.equal(G.linesForLevel(lines, 0).length, 3, 'на L0 всё');
+  assert.equal(G.linesForLevel(lines, 1).length, 2, 'на L1 без жилых улиц');
+  assert.equal(G.linesForLevel(lines, 4).length, 2, 'на L4 магистрали и primary');
+  assert.equal(G.linesForLevel(lines, 11).length, 1, 'на L11 только автобаны');
+});
