@@ -62,3 +62,20 @@ test('чужая метка вместо GR отвергается не молч
   b.write('XX', 16, 'latin1');
   assert.throws(() => F.read(wrap(b)), /не GR/);
 });
+
+// `L3 GRUPPEN` — те же записи GR и ничего кроме них.
+test('L3 GRUPPEN: те же записи GR, смещение и счёт в тех же полях', () => {
+  const m = { head: Buffer.alloc(8), version: 1, tail: 0,
+              groups: [{ id: 0, tiles: [5, 6] }, { id: 1, tiles: [7] }] };
+  const b = F.buildL3(m);
+  const got = F.readL3(X.build([{ name: F.SEC_L3, data: b }]));
+  assert.equal(got.off, 20 + 8);
+  assert.deepEqual(got.groups, m.groups);
+});
+
+test('L3 GRUPPEN: хвост выравнивания сохраняется', () => {
+  const m = { head: Buffer.alloc(8), version: 1, tail: 2, groups: [{ id: 0, tiles: [1] }] };
+  const b = F.buildL3(m);
+  assert.equal(b.length, 8 + 10 + 2);
+  assert.equal(F.readL3(X.build([{ name: F.SEC_L3, data: b }])).tail, 2);
+});

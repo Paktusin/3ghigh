@@ -37,12 +37,59 @@
 const xah = require('./xah');
 
 const SEC = 'FE GRUPPEN';
+const SEC_L3 = 'L3 GRUPPEN';
 const H = { version: 0x14, grOff: 0x18, grCount: 0x1a, ldOff: 0x1c, ldCount: 0x20 };
 
 function tilesAt(b, at, count) {
   const out = new Array(count);
   for (let i = 0; i < count; i++) out[i] = b.readUInt16BE(at + i * 2);
   return out;
+}
+
+// Область записей `GR`. Устроена одинаково в `FE GRUPPEN` и в `L3 GRUPPEN`,
+// и начало с числом записей лежат в тех же полях +0x18 и +0x1a.
+function readGroupArea(b, off, count) {
+  const out = [];
+  let p = off;
+  for (let i = 0; i < count; i++) {
+    if (b.toString('latin1', p, p + 2) !== 'GR') throw new Error('не GR на ' + p);
+    const len = b.readUInt16BE(p + 2);
+    out.push({ id: b.readUInt16BE(p + 4), tiles: tilesAt(b, p + 8, b.readUInt16BE(p + 6)) });
+    p += len;
+  }
+  return { groups: out, end: p };
+}
+
+function groupBytes(g) {
+  const b = Buffer.alloc(8 + g.tiles.length * 2);
+  b.write('GR', 0, 'latin1');
+  b.writeUInt16BE(b.length, 2);
+  b.writeUInt16BE(g.id, 4);
+  b.writeUInt16BE(g.tiles.length, 6);
+  g.tiles.forEach((t, i) => b.writeUInt16BE(t, 8 + i * 2));
+  return b;
+}
+
+// `L3 GRUPPEN` — те же записи `GR` и ничего кроме них. Группа третьего уровня
+// это область: их 22, ровно столько же файлов `_3.b` и `_3.v` в контейнере, и
+// ровно это число лежит в шапке `XACDB HEADER` по +0x50.
+function readL3(xahBuf) {
+  const s = xah.section(xahBuf, SEC_L3);
+  if (!s) return null;
+  const b = s.bytes;
+  const off = b.readUInt16BE(H.grOff), count = b.readUInt16BE(H.grCount);
+  const { groups, end } = readGroupArea(b, off, count);
+  return { head: Buffer.from(b.subarray(20, off)), version: b.readUInt16BE(H.version),
+           off, tail: b.length - end, groups };
+}
+
+function buildL3(m) {
+  const recs = m.groups.map(groupBytes);
+  const off = 20 + m.head.length;
+  const head = Buffer.from(m.head);
+  head.writeUInt16BE(off, H.grOff - 20);
+  head.writeUInt16BE(m.groups.length, H.grCount - 20);
+  return Buffer.concat([head, ...recs, Buffer.alloc(m.tail === undefined ? 0 : m.tail)]);
 }
 
 function read(xahBuf) {
@@ -52,14 +99,8 @@ function read(xahBuf) {
   const grOff = b.readUInt16BE(H.grOff), grCount = b.readUInt16BE(H.grCount);
   const ldOff = b.readUInt32BE(H.ldOff), ldCount = b.readUInt16BE(H.ldCount);
 
-  const groups = [];
-  let p = grOff;
-  for (let i = 0; i < grCount; i++) {
-    if (b.toString('latin1', p, p + 2) !== 'GR') throw new Error('не GR на ' + p);
-    const len = b.readUInt16BE(p + 2);
-    groups.push({ id: b.readUInt16BE(p + 4), tiles: tilesAt(b, p + 8, b.readUInt16BE(p + 6)) });
-    p += len;
-  }
+  const { groups, end } = readGroupArea(b, grOff, grCount);
+  let p = end;
   const gap = ldOff - p;                       // выравнивание перед областью стран
 
   const lands = [];
@@ -82,15 +123,7 @@ function read(xahBuf) {
 
 // Модель обратно в байты РАЗДЕЛА (без имени и длины — их ставит xah.build).
 function build(m) {
-  const grBytes = m.groups.map((g) => {
-    const b = Buffer.alloc(8 + g.tiles.length * 2);
-    b.write('GR', 0, 'latin1');
-    b.writeUInt16BE(b.length, 2);
-    b.writeUInt16BE(g.id, 4);
-    b.writeUInt16BE(g.tiles.length, 6);
-    g.tiles.forEach((t, i) => b.writeUInt16BE(t, 8 + i * 2));
-    return b;
-  });
+  const grBytes = m.groups.map(groupBytes);
   const ldBytes = m.lands.map((l) => {
     const b = Buffer.alloc(14 + l.tiles.length * 2);
     b.write('LD', 0, 'latin1');
@@ -120,7 +153,7 @@ function build(m) {
                         Buffer.alloc(m.tail === undefined ? 0 : m.tail)]);
 }
 
-module.exports = { read, build, SEC, H };
+module.exports = { read, build, readL3, buildL3, readGroupArea, groupBytes, SEC, SEC_L3, H };
 
 if (require.main === module) {
   const st = require('./struktur');
@@ -150,7 +183,18 @@ if (require.main === module) {
 
   const want = xah.section(idx.buf, SEC).bytes.subarray(20);
   const again = build(m);
-  console.log('обратная сборка: ' + (again.equals(want) ? 'байт в байт' : 'РАСХОЖДЕНИЕ') +
+  console.log('обратная сборка ' + SEC + ': ' + (again.equals(want) ? 'байт в байт' : 'РАСХОЖДЕНИЕ') +
               ' (' + again.length + ' из ' + want.length + ')');
-  if (!again.equals(want)) process.exit(1);
+
+  const l3 = readL3(idx.buf);
+  const l3tiles = new Set();
+  l3.groups.forEach((g) => g.tiles.forEach((t) => l3tiles.add(t)));
+  console.log(SEC_L3 + ': групп ' + l3.groups.length + ', тайлов ' + l3tiles.size +
+              ' — столько же, сколько файлов _3.b в контейнере, и столько же в шапке +0x50');
+  const wantL3 = xah.section(idx.buf, SEC_L3).bytes.subarray(20);
+  const againL3 = buildL3(l3);
+  console.log('обратная сборка ' + SEC_L3 + ': ' +
+              (againL3.equals(wantL3) ? 'байт в байт' : 'РАСХОЖДЕНИЕ') +
+              ' (' + againL3.length + ' из ' + wantL3.length + ')');
+  if (!again.equals(want) || !againL3.equals(wantL3)) process.exit(1);
 }
