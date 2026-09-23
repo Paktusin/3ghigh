@@ -106,7 +106,11 @@ function plan(pois, donors, opt) {
 
 // Дерево деления -> записи узлов. Ключи раздаются обходом в глубину, корень
 // получает ноль: именно туда и указывает родитель.
-function nodes(root, origin, leafLink) {
+// nodeBlk — номер блока, в котором лежат сами узлы: на него же ссылаются
+// внутренние ветви. У заплаты в чужой слот это ROOT.block, у своего
+// контейнера — какой назначим.
+function nodes(root, origin, leafLink, nodeBlk) {
+  const NB = nodeBlk === undefined ? ROOT.block : nodeBlk;
   const list = [];
   const key = new Map();
   const order = [];
@@ -131,9 +135,9 @@ function nodes(root, origin, leafLink) {
     const a = rel(boxOf(n.a)), b = rel(boxOf(n.b));
     list.push({
       aMin: a.min, aMax: a.max,
-      a: n.a.pois ? leafLink(n.a) : [ROOT.block, key.get(n.a)],
+      a: n.a.pois ? leafLink(n.a) : [NB, key.get(n.a)],
       bMin: b.min, bMax: b.max,
-      b: n.b.pois ? leafLink(n.b) : [ROOT.block, key.get(n.b)],
+      b: n.b.pois ? leafLink(n.b) : [NB, key.get(n.b)],
       x79: null, n42: 0, x7a: null, n7b: 0,
     });
   }
@@ -156,13 +160,14 @@ function build(pois, donors, opt) {
                       pois: leaf.pois.length });
     idBase += leaf.pois.length;
   }
-  const ns = nodes(pl.root, { x: origin.x0, y: origin.y0 }, leafLink);
+  const nodeBlk = o.nodeBlk === undefined ? ROOT.block : o.nodeBlk;
+  const ns = nodes(pl.root, { x: origin.x0, y: origin.y0 }, leafLink, nodeBlk);
   const span = Math.max(origin.x1 - origin.x0, origin.y1 - origin.y0);
   const width = [8, 12, 16, 24].find((w) => span < Math.pow(2, w));
   if (!width) throw new Error('рамка Кипра не влезает в 24 бита');
   const model = { origin: { x: origin.x0, y: origin.y0 }, width: width, byte2: 0,
                   count: ns.length, dict: new Map(), tile: null, pois: [], nodes: ns };
-  out.node = { blk: ROOT.block, bytes: B.writeBlock(model, ROOT.block) };
+  out.node = { blk: nodeBlk, bytes: B.writeBlock(model, nodeBlk) };
   return out;
 }
 
