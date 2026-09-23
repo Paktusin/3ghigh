@@ -13,7 +13,8 @@ sleep 2
 touch "$V/.w" 2>/dev/null || { echo "карта заблокирована (LOCK) — сдвиньте ползунок"; exit 1; }
 rm -f "$V/.w"
 rm -rf "$V/var/ndr" "$V/.started" "$V/.done" "$V/.syslog"
-cp out/ndrprobe/run.sh "$V/run.sh"
+# Источник пробы — tools/ndrprobe/run.sh (out/ — производное и может быть пустым)
+cp tools/ndrprobe/run.sh "$V/run.sh"
 cp out/ndrprobe/copie_scr.sh "$V/copie_scr.sh"
 ditto --norsrc --noextattr --noacl out/ndrprobe/bin "$V/bin"
 ditto --norsrc --noextattr --noacl out/ndrprobe/lib "$V/lib"
