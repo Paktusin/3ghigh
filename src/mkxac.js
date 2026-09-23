@@ -42,12 +42,52 @@ const roads = require('./xacroads');
 const zenamen = require('./zenamen');
 const zfnamen = require('./zfnamen');
 const dataset = require('./dataset');
-const { rasterSection, stubLevel2, readHouses } = require('./mkcyp');
+const raster = require('./raster');
+const osmpbf = require('./osmpbf');
 
 const CYPRUS = 113;                 // код страны в шапке блока и в записи `LD`
+const ZF_SIZE = 112;                // пустой раздел ZF-NAMEN у заглушки уровня 2
 const NO_DATA = 0x7fffffff;
 const ALIGN = 2048;
 const align = (n) => Math.ceil(n / ALIGN) * ALIGN;
+
+// Маска зоны обслуживания тайла: у нас весь прямоугольник свой, поэтому все
+// ячейки нулевые (0 — ячейка отдана этому тайлу, см. src/raster.js). Рамка
+// растра шире сетки ровно на ячейку с каждой стороны.
+function rasterSection(bbox) {
+  const cell = 1000;
+  const nx = Math.max(1, Math.floor((bbox[2] - bbox[0]) / cell) - 1);
+  const ny = Math.max(1, Math.floor((bbox[3] - bbox[1]) / cell) - 1);
+  return raster.buildRaster({ cells: new Uint8Array(nx * ny), nx, ny, bbox,
+                              label: 'RASTERINFOS', version: 0x00020000 });
+}
+
+// Парный файл уровня 2: шапка плюс пустой `ZF-NAMEN`. Ровно так выглядят все
+// 347 заводских заглушек — 308 байт.
+function stubLevel2(code, name, index, built) {
+  return tile.buildTile({ code, file: name, index, country: CYPRUS, built,
+                          zf: tile.section('ZF-NAMEN', Buffer.alloc(ZF_SIZE - 20)), blocks: [] });
+}
+
+// Дома из извлечения `.osm.pbf`: точки и контуры зданий с номером и улицей.
+function readHouses(file) {
+  const idx = osmpbf.read(file, {
+    node: (t) => t['addr:housenumber'] !== undefined && t['addr:street'] !== undefined,
+    way: (t) => t['addr:housenumber'] !== undefined && t['addr:street'] !== undefined,
+  });
+  const out = [];
+  for (const p of idx.points) {
+    out.push({ lon: p.lon / 1e7, lat: p.lat / 1e7,
+               number: p.tags['addr:housenumber'], street: p.tags['addr:street'] });
+  }
+  for (const w of idx.ways) {
+    const c = osmpbf.center(idx, w.refs);
+    if (!c) continue;
+    out.push({ lon: c[0] / 1e7, lat: c[1] / 1e7,
+               number: w.tags['addr:housenumber'], street: w.tags['addr:street'] });
+  }
+  return out;
+}
 
 // ── Индекс .xah на один тайл ──────────────────────────────────────────────
 //
@@ -285,7 +325,8 @@ function mkxac(opt) {
            nodes: graph.nodes.length, edges: graph.edges.length, bbox: box };
 }
 
-module.exports = { mkxac, buildXah, buildContainer, strukturRecord, levelRow, CYPRUS };
+module.exports = { mkxac, buildXah, buildContainer, strukturRecord, levelRow,
+                   rasterSection, stubLevel2, readHouses, CYPRUS };
 
 if (require.main === module) {
   const args = process.argv.slice(2);

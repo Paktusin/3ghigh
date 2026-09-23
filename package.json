@@ -1,11 +1,27 @@
 {
   "name": "3ghigh",
   "version": "1.0.0",
-  "description": "",
+  "description": "Кипрская карта для Audi MMI 3G High: разбор формата и сборка своего образа",
   "license": "ISC",
   "author": "",
   "type": "commonjs",
   "scripts": {
-    "test": "node --test \"src/*.test.js\""
+    "test": "node --test \"src/*.test.js\"",
+
+    "build": "npm run image && npm run meta && npm run check",
+    "image": "node src/mkcyprus.js out/cyprus",
+    "meta": "node src/mkmeta.js out/cyprus --keep-pkg",
+    "check": "node src/setcheck.js out/cyprus --donor CY00",
+
+    "card": "tools/write_maps.sh cyprus",
+    "fixacios": "tools/write_fixacios.sh",
+    "probe": "tools/write_probe.sh",
+
+    "xac": "node src/mkxac.js out/cyp/CY.xac.db",
+    "gdb": "node src/gdbgen.js --roads out/cyp/roads.geojson --out out/gdb-cyprus --levels all",
+    "lit": "node src/cyplit.js --out out/cyp/CY.lit",
+    "xah": "node src/xah.js",
+    "roads": "node src/osm2geo.js out/cyp/roads.json out/cyp/roads.geojson",
+    "sums": "node src/checksum.js out/cyprus"
   }
 }

@@ -31,8 +31,8 @@
 
 const fs = require('fs');
 const path = require('path');
-const { mkxac } = require('./mkxac');
-const { readHouses } = require('./mkcyp');
+const { mkxac, readHouses, buildContainer } = require('./mkxac');
+const fldb = require('./fldb');
 const gdbgen = require('./gdbgen');
 const cyplit = require('./cyplit');
 const cyppoi = require('./cyppoi');
@@ -93,10 +93,22 @@ function mkcyprus(outDir, opt) {
   const pois = cyppoi.collect(o.pbf || 'out/cyp/cyprus-latest.osm.pbf').map((q) => Object.assign({}, q, {
     x: Math.round(q.lon * 72000), y: Math.round(q.lat * cyptree.DEG),
   }));
-  const l = cyplit.build(pois, { from: path.join(root, 'pkgdb', 'LIT',
-    fs.readdirSync(path.join(root, 'pkgdb', 'LIT')).find((f) => /\.db$/i.test(f))) });
   const litSrc = fs.readdirSync(path.join(root, 'pkgdb', 'LIT')).find((f) => /\.db$/i.test(f));
-  out.components.push(component(outDir, 'LIT', litSrc, l.buf, root, log));
+  const litPath = path.join(root, 'pkgdb', 'LIT', litSrc);
+  const l = cyplit.build(pois, { from: litPath });
+
+  // Заводский том `LIT` лежит в обёртке FLDB: контейнер с одной записью,
+  // данные со смещения 2048. (У `PIT` обёртки нет — там `Lit\x02` с нуля.)
+  // Кладём так же: имя записи и шапку берём у заводского.
+  const litDb = fldb.open(litPath);
+  const litEntry = fldb.entries(litDb)[0];
+  const litHead = Buffer.alloc(fldb.DIR_OFFSET);
+  fs.readSync(litDb.fd, litHead, 0, litHead.length, 0);
+  fs.closeSync(litDb.fd);
+  const litWrapped = buildContainer([{ name: litEntry.name, data: l.buf }], litHead);
+  log('обёртка FLDB: запись ' + litEntry.name + ', данные со смещения 2048');
+
+  out.components.push(component(outDir, 'LIT', litSrc, litWrapped, root, log));
   out.lit = { leaves: l.leaves, pois: l.pois };
   log('точек ' + l.pois + ' в ' + l.leaves + ' листьях');
 

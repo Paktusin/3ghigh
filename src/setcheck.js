@@ -193,7 +193,12 @@ function checkOwnLit(file) {
   if (at < 0) return null;
   const m = litfile.read(raw.subarray(at));
   const last = m.catalog[m.catalog.length - 1];
-  if (!last || last.off + last.size !== raw.length - at) return null;   // не самодостаточен
+  if (!last) return null;
+  // Самодостаточен, если последний блок каталога кончается внутри файла. Хвост
+  // допускается только выравнивающий: контейнер FLDB дополняет файл до границы
+  // 2048, и у заводского тома этого хвоста нет — там за концом идёт следующий том.
+  const tail = (raw.length - at) - (last.off + last.size);
+  if (tail < 0 || tail >= 2048) return null;
   const schema = S.load(file, at);
 
   const cache = new Map();
