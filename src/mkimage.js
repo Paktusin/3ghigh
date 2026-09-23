@@ -6,6 +6,7 @@
 //        [--classes motorway,trunk,primary] [--places out/cyp/places_geo.json]
 //        [--houses out/cyp/cyprus-latest.osm.pbf] [--blocks out/cyp/lit]
 //        [--levels all] [--country-name CYPRUS] [--no-poi] [--no-gdb]
+//        [--full] [--no-atlas]
 //
 // До сих пор каждый опыт ехал к машине своим набором: отдельно `XAC` (маршрут),
 // отдельно `GDB` (отрисовка), а блоки точек интереса вообще лежали в `out/cyp/lit`
@@ -31,12 +32,54 @@
 // `PIT`, `TMC`, `SDS` (от покрытия не зависят, заводские остаются на месте).
 // Австралийский набор показывает, что без `CTY`, `TER`, `GDB2` и `PIT`
 // устройство работает — см. docs/dataset.md.
+//
+// ── Ключ `--full` ─────────────────────────────────────────────────────────
+// Всё вышесказанное верно, ПОКА под образом заводская база. Если на разделе
+// лежат остатки прежних опытов, наш `XAC` с ними не согласован: индекс `.xah`
+// описывает все тайлы базы, включая лежащие в `XAC2` и `XAC3`, а сквозная
+// нумерация блоков пересчитана на всю базу.
+//
+// С `--full` в образ кладутся ОСТАЛЬНЫЕ компоненты заводскими, и одна
+// установка приводит базу к заводскому виду вместе с нашими правками. Копии
+// делаются клоном APFS, поэтому места на диске это почти не занимает.
+//
+// Образ выходит ≈19,4 ГБ вместо заводских 21,4: наш `GDB` весит 7,6 МБ вместо
+// 2,0 ГБ, а `XAC` и `LIT2` того же размера — правки в них идут по месту.
+// С `--no-atlas` не кладутся `CTY`×3 и `TER`×2 (7,0 ГБ): их никогда не писал
+// ни один наш инструмент, испортить их было нечем, и образ выходит ≈12,4 ГБ.
 
 const fs = require('fs');
 const path = require('path');
+const dataset = require('./dataset');
 const { mkcyp, readHouses } = require('./mkcyp');
 const gdbgen = require('./gdbgen');
 const { mklit } = require('./mklit');
+
+// Компоненты релиза MMI3G. Наши три собираются, прочие с `--full` кладутся
+// заводскими. Компоненты ветки MMI3GP (`TMC3GP`, `StyleDBMMI3GP_*`) сюда не
+// входят — это другой релиз, вариант 9411 и далее.
+const OURS = ['XAC', 'GDB', 'LIT2'];
+const REST = ['XAC2', 'XAC3', 'GDB2', 'LIT', 'LIT3', 'LIT4',
+              'LABEL', 'TMC', 'PIT', 'SDS'];
+const ATLAS = ['CTY', 'CTY2', 'CTY3', 'TER', 'TER2'];
+
+// Заводской компонент как есть: файлы клонируются, .conf не трогается — он
+// описывает неизменённый файл и потому остаётся верным.
+function copyFactory(outDir, name, root, log) {
+  const from = path.join(root, 'pkgdb', name);
+  if (!fs.existsSync(from)) return null;
+  const to = path.join(outDir, 'pkgdb', name);
+  fs.mkdirSync(to, { recursive: true });
+  let bytes = 0;
+  for (const f of fs.readdirSync(from)) {
+    const src = path.join(from, f), dst = path.join(to, f);
+    try { fs.copyFileSync(src, dst, fs.constants.COPYFILE_FICLONE); }
+    catch (e) { fs.copyFileSync(src, dst); }
+    bytes += fs.statSync(src).size;
+  }
+  log(name + ': заводской, ' + (bytes / 1048576).toFixed(0) + ' МБ');
+  return { name, bytes };
+}
 
 function readRoads(file) {
   const j = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -91,6 +134,20 @@ function mkimage(outDir, opt) {
     out.components.push(out.lit.name);
   }
 
+  // ---- остальные компоненты заводскими ----
+  if (o.full) {
+    log('');
+    log('=== остальные компоненты заводскими ===');
+    const root = o.root || dataset.resolveRoot();
+    const list = REST.concat(o.atlas === false ? [] : ATLAS);
+    out.factory = [];
+    for (const name of list) {
+      if (out.components.indexOf(name) >= 0) continue;   // наш, уже собран
+      const r = copyFactory(outDir, name, root, log);
+      if (r) { out.factory.push(r); out.components.push(name); }
+    }
+  }
+
   return out;
 }
 
@@ -118,6 +175,8 @@ if (require.main === module) {
     levels: flag('levels', 'all') === 'all' ? 'all' : flag('levels').split(',').map(Number),
     poi: !args.includes('--no-poi'),
     gdb: !args.includes('--no-gdb'),
+    full: args.includes('--full'),
+    atlas: !args.includes('--no-atlas'),
     log: (m) => console.log(m),
   });
   console.log();
@@ -126,6 +185,11 @@ if (require.main === module) {
               r.xac.nodes + ' узлов, ' + r.xac.edges + ' рёбер' +
               (r.gdb ? '; GDB ' + r.gdb.lines + ' дорог' : '') +
               (r.lit ? '; POI ' + r.lit.blocks.length + ' блоков' : ''));
+  if (r.factory) {
+    const gb = r.factory.reduce((a, x) => a + x.bytes, 0) / 1073741824;
+    console.log('заводскими перенесено компонентов ' + r.factory.length +
+                ', ' + gb.toFixed(1) + ' ГБ');
+  }
   console.log('дальше: node src/setcheck.js ' + outDir);
   console.log('       node src/mkmeta.js ' + outDir + ' --keep-pkg');
   console.log('после установки на машине: tools/write_fixacios.sh');
