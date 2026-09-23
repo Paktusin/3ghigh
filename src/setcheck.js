@@ -182,9 +182,68 @@ const LIT_VOLS = ['LIT', 'LIT2', 'LIT3', 'LIT4'];
 // Точки интереса: спуск от корня дерева по рамке Кипра идёт ПО НАБОРУ.
 // Тома, которых в наборе нет, берутся заводские — адресное пространство LIT
 // сквозное через все четыре, и без них каталог не прочитать.
+// Свой контейнер отличается от заплаты тем, что самодостаточен: последний блок
+// каталога кончается внутри файла, и склеивать его не с чем. Тогда и спуск
+// идёт от блока 0 — корня нашего дерева, а не от заводского корня (101099, 1).
+function checkOwnLit(file) {
+  const litfile = require('./litfile');
+  const S = require('./litschema');
+  const raw = fs.readFileSync(file);
+  const at = raw.indexOf(Buffer.from([0x4c, 0x69, 0x74, 0x02]));
+  if (at < 0) return null;
+  const m = litfile.read(raw.subarray(at));
+  const last = m.catalog[m.catalog.length - 1];
+  if (!last || last.off + last.size !== raw.length - at) return null;   // не самодостаточен
+  const schema = S.load(file, at);
+
+  const cache = new Map();
+  const get = (i) => {
+    if (cache.has(i)) return cache.get(i);
+    const b = m.blocks[i];
+    let recs = [];
+    try { recs = litvm.run(schema, b, 0, { blk: i, limit: 4000000 }).records; } catch (e) { /* пусто */ }
+    const v = { origin: { x: b.readInt32BE(4), y: b.readInt32BE(8) }, elems: litpoi.elemsOf(recs) };
+    cache.set(i, v);
+    return v;
+  };
+
+  let pois = 0, inside = 0, stops = 0;
+  const bad = [];
+  for (let i = 1; i < m.blocks.length; i++) {
+    const r = litvm.run(schema, m.blocks[i], 0, { blk: i, limit: 4000000 });
+    if (r.why === 'данные кончились' && r.pos === m.blocks[i].length) stops++;
+    else bad.push(i + ': ' + r.why + ' на ' + r.pos + ' из ' + m.blocks[i].length);
+    for (const x of litpoi.poisOf(schema, m.blocks[i], i)) {
+      pois++;
+      if (x.lon >= CYP.lon0 && x.lon <= CYP.lon1 && x.lat >= CYP.lat0 && x.lat <= CYP.lat1) inside++;
+    }
+  }
+  // спуск от корня по рамке вокруг каждой сотой точки
+  let seen = 0, hit = 0;
+  for (let i = 1; i < m.blocks.length; i++) {
+    const list = litpoi.poisOf(schema, m.blocks[i], i);
+    for (let k = 0; k < list.length; k += 100) {
+      const q = list[k]; seen++;
+      const x = Math.round(q.lon * 72000), y = Math.round(q.lat * ct.DEG);
+      const got = ct.collect(get, 0, 0, { x0: x - 72, y0: y - 111, x1: x + 72, y1: y + 111 },
+                             new Set(), 0);
+      if (got.has(i)) hit++;
+    }
+  }
+  return { own: true, blocks: m.blocks.length, leaves: m.blocks.length - 1,
+           stops, pois, inside, seen, hit, bad };
+}
+
 function checkLit(root) {
   const mine = LIT_VOLS.filter((d) => fs.existsSync(path.join(root, 'pkgdb', d)));
   if (!mine.length) return null;
+  // сперва проверяем, не свой ли это контейнер целиком
+  const dir = path.join(root, 'pkgdb', mine[0]);
+  const f = fs.readdirSync(dir).find((x) => /\.db$/i.test(x));
+  if (f) {
+    const own = checkOwnLit(path.join(dir, f));
+    if (own) return Object.assign({ vols: mine }, own);
+  }
   const base = dataset.resolveRoot();
   const dirs = LIT_VOLS.map((d) => (fs.existsSync(path.join(root, 'pkgdb', d))
     ? path.join(root, 'pkgdb', d) : path.join(base, 'pkgdb', d)));
@@ -291,7 +350,13 @@ if (require.main === module) {
     }
   }
   const poi = checkLit(root);
-  if (poi) {
+  if (poi && poi.own) {
+    console.log('POI (' + poi.vols.join(', ') + ', свой контейнер): блоков ' + poi.blocks +
+                ' — узлы и ' + poi.leaves + ' листьев, разбор дочитан до конца у ' + poi.stops);
+    console.log('точек ' + poi.pois + ', из них в рамке Кипра ' + poi.inside +
+                '; спуск от корня: проверено ' + poi.seen + ', свой лист найден у ' + poi.hit);
+    for (const b of poi.bad.slice(0, 5)) console.log('  СБОЙ ' + b);
+  } else if (poi) {
     console.log('POI (' + poi.vols.join(', ') + '): спуск от корня по рамке Кипра дал листьев ' +
                 poi.leaves + ', разбор остановлен штатно у ' + poi.stops +
                 ', хвост за разбором нулевой у ' + poi.zeroTail);
@@ -301,7 +366,8 @@ if (require.main === module) {
     for (const b of poi.bad.slice(0, 5)) console.log('  СБОЙ ' + b);
   }
   const bad = (gdb && gdb.bad) ||
-              (poi && (poi.bad.length || !poi.leaves || !poi.inside)) ||
+              (poi && (poi.bad.length || !poi.leaves || !poi.inside ||
+                       (poi.own && (poi.stops !== poi.leaves || poi.hit !== poi.seen)))) ||
               (r && (r.regBad || r.numErr || r.lost || r.fldb.anomalies ||
               (r.names && (!r.names.streamExact || !r.names.refsExact || r.names.err)) ||
               (r.houses && (r.houses.bad || !r.houses.indexOk ||
