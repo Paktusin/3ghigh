@@ -29,15 +29,26 @@ for i in 1 2 3 ; do
   pidin -p ndr >> "${OUT}/pidin_repeat.txt" 2>&1
   sleep 3
 done
+# Чтение /hbsystem БЛОКИРУЕТСЯ на заклиненной машине: 23 сентября проба умерла
+# ровно здесь, не дойдя ни до описателя, ни до .done. Теперь каждое чтение под
+# сторожем с лимитом, и снимок доходит до конца в любом случае.
+guard() {
+  s=$1; f=$2; shift 2
+  ( "$@" > "$f" 2>&1 ; echo "__ЗАВЕРШЕНО__" >> "$f" ; sync ) &
+  p=$!; n=0
+  while [ $n -lt $s ] ; do kill -0 $p 2>/dev/null || break; sleep 1; n=$((n+1)); done
+  kill -9 $p 2>/dev/null; sleep 1
+  grep -q "__ЗАВЕРШЕНО__" "$f" 2>/dev/null || echo "__ЗАВИСЛО после ${s}с__" >> "$f"
+  sync
+}
 for f in dbglvl 0 g p ; do
-  echo "--- /hbsystem/multicore/navi/$f ---" >> "${OUT}/navi_dbglvl.txt"
-  cat "/hbsystem/multicore/navi/$f"          >> "${OUT}/navi_dbglvl.txt" 2>&1
+  guard 5 "${OUT}/navi_$f.txt" cat "/hbsystem/multicore/navi/$f"
 done
 
 # --- описатель базы и нав-персистентность (флеш, не /mnt/nav — безопасно) ---
-ls -laR /HBpersistence/navi        > "${OUT}/hbp_navi_listing.txt" 2>&1
+guard 10 "${OUT}/hbp_navi_listing.txt" ls -laR /HBpersistence/navi
 mkdir -p "${OUT}/hbp_navi"
-cp -R /HBpersistence/navi/* "${OUT}/hbp_navi/" 2>/dev/null
+guard 15 "${OUT}/hbp_copy.txt" cp -R /HBpersistence/navi "${OUT}/hbp_navi/"
 for f in /HBpersistence/navi/db/acios_db.ini /HBpersistence/navi/acios_db.ini /mnt/lvm/acios_db.ini /mnt/efs-persist/acios_db.ini ; do
   [ -f "$f" ] && { echo "=== $f ===" >> "${OUT}/acios_db.txt"; cat "$f" >> "${OUT}/acios_db.txt"; echo >> "${OUT}/acios_db.txt"; }
 done

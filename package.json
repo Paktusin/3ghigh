@@ -7,16 +7,15 @@
   "type": "commonjs",
   "scripts": {
     "test": "node --test \"src/*.test.js\"",
-
     "build": "npm run image && npm run meta && npm run check",
     "image": "node src/mkcyprus.js out/cyprus",
+    "image:clean": "node src/mkcyprus.js out/cyprus --clean",
     "meta": "node src/mkmeta.js out/cyprus --keep-pkg",
     "check": "node src/setcheck.js out/cyprus --donor CY00",
-
     "card": "tools/write_maps.sh cyprus",
     "fixacios": "tools/write_fixacios.sh",
+    "fixacios:clean": "tools/write_fixacios.sh --from out/cyprus",
     "probe": "tools/write_probe.sh",
-
     "xac": "node src/mkxac.js out/cyp/CY.xac.db",
     "gdb": "node src/gdbgen.js --roads out/cyp/roads.geojson --out out/gdb-cyprus --levels all",
     "lit": "node src/cyplit.js --out out/cyp/CY.lit",
