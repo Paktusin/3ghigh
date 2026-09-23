@@ -96,7 +96,63 @@ function serialize(r, headSrc) {
   return out;
 }
 
-module.exports = { open, load, lookup, cellOf, get, set, histogram, forBBox, serialize, EMPTY, HEAD };
+// ── Сборка растра со СВОЕЙ рамкой ─────────────────────────────────────────
+//
+// Заголовок устроен как у разделов `.xah`: имя 16 байт, за ним u32 длины, а
+// дальше поля. Заводской файл:
+//
+//   +0x00 «DB RASTERINFOS  »     +0x10 u32 длина (размер файла − 20)
+//   +0x14 u32 версия 0x00010000  +0x18 4×i32 рамка xmin ymin xmax ymax
+//   +0x28 u32 nx  +0x2c u32 ny   +0x30 u32 шаг по X  +0x34 u32 шаг по Y
+//   +0x38 сетка: nx·ny слов u16 BE, индекс = cx·ny + cy, 0xFFFE — тайла нет
+//
+// Мерило писателя — обратная сборка: `build(load(файл))` даёт те же 191 062 776
+// байт, что у завода, байт в байт.
+const LABEL = 'DB RASTERINFOS';
+const VERSION = 0x00010000;
+
+// Пустая сетка под рамку: клетка задаётся шагом, размер сетки считается из
+// рамки. У завода клетка ровно 1000 единиц по обеим осям.
+function blank(spec) {
+  const step = spec.step || [1000, 1000];
+  const bbox = spec.bbox;
+  const nx = spec.nx !== undefined ? spec.nx : Math.ceil((bbox[2] - bbox[0]) / step[0]);
+  const ny = spec.ny !== undefined ? spec.ny : Math.ceil((bbox[3] - bbox[1]) / step[1]);
+  const grid = Buffer.alloc(nx * ny * 2);
+  for (let i = 0; i < nx * ny; i++) grid.writeUInt16BE(EMPTY, i * 2);
+  return { name: spec.name || (LABEL + '.ras'), label: spec.label || LABEL,
+           version: spec.version === undefined ? VERSION : spec.version,
+           bbox, nx, ny, step, grid };
+}
+
+// Занять рамкой тайла все накрытые ею ячейки. Возвращает, сколько занято и
+// сколько пропущено как уже занятые другим тайлом.
+function fill(r, bbox, value) {
+  let taken = 0, busy = 0;
+  forBBox(r, bbox, (cx, cy, v) => {
+    if (v !== EMPTY && v !== value) { busy++; return; }
+    set(r, cx, cy, value); taken++;
+  });
+  return { taken, busy };
+}
+
+// Модель в байты файла целиком: заголовок собирается, а не копируется.
+function build(r) {
+  const out = Buffer.alloc(HEAD + r.grid.length, 0x20);
+  out.write((r.label || LABEL).padEnd(16, ' '), 0, 'latin1');
+  out.writeUInt32BE(HEAD + r.grid.length - 20, 0x10);
+  out.writeUInt32BE(r.version === undefined ? VERSION : r.version, 0x14);
+  [0x18, 0x1c, 0x20, 0x24].forEach((o, i) => out.writeInt32BE(r.bbox[i], o));
+  out.writeUInt32BE(r.nx, 0x28);
+  out.writeUInt32BE(r.ny, 0x2c);
+  out.writeUInt32BE(r.step[0], 0x30);
+  out.writeUInt32BE(r.step[1], 0x34);
+  r.grid.copy(out, HEAD);
+  return out;
+}
+
+module.exports = { open, load, lookup, cellOf, get, set, histogram, forBBox, serialize,
+                   build, blank, fill, EMPTY, HEAD, LABEL, VERSION };
 
 if (require.main === module) {
   const st = require('./struktur');
