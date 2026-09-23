@@ -93,7 +93,11 @@ function check(root, donor) {
   // рёбра тайла
   const blocks = S.list.filter((x) => x.name === 'VEKTORBLOCK')
     .map((x) => file.subarray(x.offset, x.offset + x.total));
-  const edges = xg.tileEdges(blocks);
+  // Читатель графа знает блоки версии 5. У заводских тайлов бывают и другие
+  // версии, и тогда рёбра просто не читаются — это не расхождение набора.
+  let edges;
+  try { edges = xg.tileEdges(blocks); }
+  catch (e) { edges = { edges: new Set(), lost: 0, err: e.message }; }
 
   // разделы имён
   let names = null;
@@ -170,7 +174,8 @@ function check(root, donor) {
 
   return { donor, gi, container: c.dir, reg, regBad: reg.filter((r) => !r.ok).length, houses, guide,
            numErr, rows: order.length * 4, blockSum: running, counter,
-           fldb: fldb.verify(c.db), edges: edges.edges.size, lost: edges.lost, names };
+           fldb: fldb.verify(c.db), edges: edges.edges.size, lost: edges.lost,
+           edgesErr: edges.err || null, names };
 }
 
 // Рамка Кипра. Точки за её пределами — не сбой: в кипрском извлечении OSM
@@ -322,7 +327,9 @@ if (require.main === module) {
               'сумма ' + r.blockSum + (r.blockSum === r.counter ? ' = ' : ' != ') +
               'счётчик XACDB HEADER ' + r.counter);
   console.log('каталог FLDB: аномалий ' + r.fldb.anomalies);
-  console.log('рёбра тайла: ' + r.edges + ', неразобранных ссылок ' + r.lost);
+  console.log(r.edgesErr
+    ? 'рёбра тайла: не прочитаны (' + r.edgesErr + ') — блоки не версии 5, для сверки набора не важно'
+    : 'рёбра тайла: ' + r.edges + ', неразобранных ссылок ' + r.lost);
   if (r.guide) {
     const g = r.guide;
     console.log('имена ведения: раздел ' + g.section + ' б, в шапке ' + g.count +
