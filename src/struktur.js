@@ -156,7 +156,53 @@ function parseNeighbors(xahBuf) {
   return out;
 }
 
-module.exports = { parse, parseLevels, parseNeighbors, openIndex, REC, START };
+// ── Писатели ──────────────────────────────────────────────────────────────
+//
+// Модель записи — её СЫРЫЕ БАЙТЫ, а не разобранные поля. Это сознательно: в
+// записи реестра четыре поля с неустановленным назначением (+0x34, +0x38,
+// +0x4C, +0x50), и придумывать им значения мы не вправе. Зато выбрать
+// подмножество записей и поправить известные поля — можем, и сборка при этом
+// доказуемо точна: заводские таблицы собираются обратно байт в байт.
+
+// Общее чтение потайловой таблицы с записями постоянной длины.
+//   заголовок: имя 16 б, u32 длины, u32 (версия и вид), записи с 24
+function readTable(xahBuf, name, recSize) {
+  const s = xac.sections(xahBuf).list.find((x) => x.name === name);
+  if (!s) return null;
+  const b = xahBuf.subarray(s.offset, s.offset + s.total);
+  const rest = s.total - START;
+  if (rest % recSize !== 0) {
+    throw new Error(name + ': ' + rest + ' байт записей не делится на ' + recSize);
+  }
+  const records = [];
+  for (let o = START; o + recSize <= s.total; o += recSize) records.push(b.subarray(o, o + recSize));
+  return { name, head: Buffer.from(b.subarray(20, START)), recSize, records };
+}
+
+// Обратно в байты РАЗДЕЛА (без имени и длины — их ставит xah.build).
+function buildTable(model) {
+  return Buffer.concat([model.head, ...model.records]);
+}
+
+// Таблица смежности: заголовок, затем на тайл «номер, соседи…, 0xFFFF»,
+// и ещё одно 0xFFFF после последней записи.
+function buildNeighbors(lists, head) {
+  const words = [];
+  for (let i = 0; i < lists.length; i++) {
+    words.push(i);
+    for (const v of lists[i]) words.push(v);
+    words.push(0xffff);
+  }
+  words.push(0xffff);
+  const b = Buffer.alloc(4 + words.length * 2);
+  (head || Buffer.from([0, 1, 0, 0])).copy(b, 0);
+  words.forEach((w, i) => b.writeUInt16BE(w, 4 + i * 2));
+  return b;
+}
+
+module.exports = { parse, parseLevels, parseNeighbors, openIndex,
+                   readTable, buildTable, buildNeighbors,
+                   REC, START, LEVEL_REC, LEVEL_START, NO_DATA };
 
 if (require.main === module) {
   const arg = process.argv[2];
