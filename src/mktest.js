@@ -30,9 +30,59 @@ const xac = require('./xac');
 const st = require('./struktur');
 const ras = require('./rasidx');
 const { mkxah } = require('./xahmin');
+const xah = require('./xah');
+const fg = require('./fegruppen');
 const { buildContainer } = require('./mkxac');
 const conf = require('./conf');
 const dataset = require('./dataset');
+
+// Объявить грубые уровни пустыми и убрать области третьего уровня.
+//
+// Зачем. Индекс, урезанный из заводского, продолжает обещать данные уровней 3
+// и 4 — а лежат они в отдельных файлах `<П>_<область>_3.b` и `_4.b`, которых в
+// нашем контейнере нет. То же и у кипрского индекса: он объявляет одну область
+// L3, хотя файлов для неё нет и быть не может. Это первый подозреваемый в
+// отказе, и здесь он снимается: уровни 3 и 4 объявляются пустыми, список
+// областей L3 пустеет, счётчик областей в шапке обнуляется, а сквозная
+// нумерация блоков пересчитывается под новый состав.
+function dropCoarse(xahBuf, levelsKept) {
+  const keep = levelsKept === undefined ? 2 : levelsKept;   // уровни 1..keep остаются
+  const NO_DATA = 0x7fffffff;
+  const rows = [1, 2, 3, 4].map((n) => st.readTable(xahBuf, 'XAC-STRUKTUR L' + n, st.LEVEL_REC));
+  let running = 0;
+  for (let i = 0; i < rows[0].records.length; i++) {
+    for (let n = 0; n < 4; n++) {
+      const r = Buffer.from(rows[n].records[i]);
+      if (n + 1 > keep) {                      // уровень объявляется пустым
+        for (let k = 0; k < 4; k++) r.writeUInt32BE(NO_DATA, k * 4);
+        r.writeUInt16BE(0, 0x10);
+        r.writeUInt32BE(0, 0x14); r.writeUInt32BE(0, 0x18); r.writeUInt32BE(0, 0x24);
+      }
+      r.writeUInt16BE(running, 0x12);
+      running += r.readUInt16BE(0x10);
+      rows[n].records[i] = r;
+    }
+  }
+
+  const out = [];
+  for (const sec of xah.sections(xahBuf).list) {
+    const raw = xahBuf.subarray(sec.offset + 20, sec.offset + sec.total);
+    if (sec.name === 'XACDB HEADER') {
+      const h = Buffer.from(raw);
+      h.writeUInt32BE(running, xah.H.blocks - 20);
+      h.writeUInt32BE(0, 0x50 - 20);           // областей третьего уровня нет
+      out.push({ name: sec.name, data: h });
+    } else if (/^XAC-STRUKTUR L[1-4]$/.test(sec.name)) {
+      out.push({ name: sec.name, data: st.buildTable(rows[+sec.name.slice(-1) - 1]) });
+    } else if (sec.name === fg.SEC_L3) {
+      const m = fg.readL3(xahBuf);
+      out.push({ name: sec.name, data: fg.buildL3({ head: m.head, tail: 0, groups: [] }) });
+    } else {
+      out.push({ name: sec.name, data: raw });
+    }
+  }
+  return { buf: xah.build(out), blocks: running };
+}
 
 function mktest(outDir, opt) {
   const o = opt || {};
@@ -52,7 +102,12 @@ function mktest(outDir, opt) {
   const prefix = xahE.name.replace(/\.xah$/, '');
 
   // ---- индекс: тот же заводской, но с одним тайлом ----
-  const r = mkxah(xahSrc, [code]);
+  let r = mkxah(xahSrc, [code]);
+  if (o.coarse === false) {
+    const d = dropCoarse(r.buf, 2);
+    r = { buf: d.buf, blocks: d.blocks, order: r.order };
+    log('грубые уровни объявлены пустыми, областей L3 нет');
+  }
   log('индекс: тайл ' + code + ', блоков ' + r.blocks + ', ' + r.buf.length + ' б');
 
   // ---- файлы тайла: заводские, как есть ----
@@ -134,7 +189,9 @@ if (require.main === module) {
     console.error('использование: node src/mktest.js <каталог-выхода> [--tile MJ00]');
     process.exit(2);
   }
-  const r = mktest(outDir, { tile: flag('tile', 'MJ00'), log: (m) => console.log(m) });
+  const r = mktest(outDir, { tile: flag('tile', 'MJ00'),
+                             coarse: !args.includes('--no-coarse'),
+                             log: (m) => console.log(m) });
   console.log();
   console.log('готово: ' + outDir + ' — компонент XAC, ' +
               (r.size / 1048576).toFixed(2) + ' МБ, файлов ' + r.files);

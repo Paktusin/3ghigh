@@ -16,6 +16,24 @@ rm -f "${SDPATH}/.done" "${SDPATH}/.syslog"
   [ -f "${SDPATH}/lib/running.png" ] && { /tmp/showScreen "${SDPATH}/lib/running.png" & SHOWPID=$! ; }
 }
 
+# ---------- поднять уровень журнала нав-ядра ----------
+#
+# Разобрано по коду (`FUN_08e8a0f4`, строка «change NaviBox debug level to %d»):
+# уровни 0…3, и байт из файла /hbsystem/multicore/navi/dbglvl передаётся этой
+# функции ЧИСЛОМ, а не символом. Уровень 2 (нынешний) отправляет сообщения в
+# канал 1, уровень 1 включает канал 0 — тот, что попадает в sloginfo. Значит с
+# уровнем 1 жалобы ядра («XAC: …», «no valid acios_db …») станут видны.
+#
+# Пишется СЫРОЙ байт 0x01. В журнале при следующей загрузке должно появиться
+# «change NaviBox debug level to 1» — это и будет подтверждением.
+LVL=/hbsystem/multicore/navi/dbglvl
+( printf '\001' > "$LVL" ) 2>> "${OUT}/dbglvl_set.txt" &
+lp=$!; n=0
+while [ $n -lt 5 ] ; do kill -0 $lp 2>/dev/null || break; sleep 1; n=$((n+1)); done
+kill -9 $lp 2>/dev/null
+echo "записан уровень 1 в $LVL (код $?)" >> "${OUT}/dbglvl_set.txt"
+sync
+
 # ---------- безопасное: журнал и процессы (не трогает /mnt/nav) ----------
 sloginfo > "${OUT}/syslog_full.txt" 2>&1
 sync; echo syslog > "${SDPATH}/.syslog"
