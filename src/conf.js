@@ -14,7 +14,18 @@
 // производителя, но повторять её обязательно — иначе значение не сойдётся.
 // Файл короче пробы читается целиком, и все три значения совпадают.
 //
-// `checkcrc` не пересчитывается: алгоритм не вскрыт. На устройстве проверка
+// `checkcrc` СНИМАЕТСЯ, а не пересчитывается. Это прочитано в коде
+// `vdev-logvolmgr` (разбор `.conf`, `loader_filedef_read`): сумма в поле
+// +0x7b4 сверяется с посчитанной в +0x7b8 ТОЛЬКО если взведён флаг +0x7bc, а
+// ставит его сам разбор строки `checkcrc=`. Нет строки — нет сверки, и файл
+// принимается. Алгоритм суммы найден (`0x0805f940`: полином `0x04C11DB7`,
+// константа `0xC7`, слова little-endian), но над чем именно она считается, не
+// установлено, и подделывать значение мы не вправе.
+//
+// Это не мелочь: именно `logvolmgr` пишет описатель базы `acios_db.ini`, и
+// отвергнутый им набор оставляет навигацию без базы — полоса встаёт на 28 %.
+//
+// Старое примечание «на устройстве проверка
 // целостности выключена («database checking is not enabled»), а установщик его
 // не сверяет — см. README.
 //
@@ -65,8 +76,13 @@ function updateConf(confPath, dataPath) {
   t = t.replace(/^MD5=[0-9a-f]+/m, 'MD5=' + md5File(dataPath));
   t = t.replace(/^check=qa,100,[0-9a-f]+,[0-9a-f]+,[0-9a-f]+/m,
     'check=qa,100,' + qaProbes(dataPath).join(','));
+  // строка checkcrc убирается целиком: её присутствие включает сверку суммы,
+  // которую мы посчитать не умеем (см. шапку файла)
+  const hadCrc = /^checkcrc=/m.test(t);
+  t = t.replace(/^checkcrc=[0-9a-fA-F]*\r?\n?/m, '');
   fs.writeFileSync(confPath, Buffer.from(t, 'latin1'));
-  return { size, sizeBefore: before.size && Number(before.size[1]), md5Before: before.md5 && before.md5[1] };
+  return { size, sizeBefore: before.size && Number(before.size[1]),
+           md5Before: before.md5 && before.md5[1], crcDropped: hadCrc };
 }
 
 module.exports = { updateConf, md5File, qaProbes, QA };
@@ -82,5 +98,7 @@ if (require.main === module) {
   console.log('  size : ' + r.sizeBefore + ' → ' + r.size + (r.sizeBefore === r.size ? '  (не менялся)' : ''));
   console.log('  MD5  : ' + r.md5Before + ' → ' + md5File(dataPath));
   console.log('  check=qa пересчитан (3 пробы по ' + QA + ' б)');
-  console.log('  checkcrc НЕ пересчитан — алгоритм не вскрыт, на устройстве проверка выключена');
+  console.log(r.crcDropped
+    ? '  checkcrc УБРАН — без него logvolmgr сверку не делает (прочитано в коде)'
+    : '  checkcrc в файле не было');
 }

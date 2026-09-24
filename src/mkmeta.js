@@ -144,7 +144,12 @@ function rewritePkg(text, present) {
     const fd = L.match(/^filedef=([A-Z0-9_]+)$/);
     const fc = L.match(/^fdefcrc=([A-Z0-9_]+),/);
     if (fd && !present.has(fd[1])) continue;
-    if (fc && !present.has(fc[1])) continue;
+    // Строки `fdefcrc` выбрасываются ВСЕ, а не только чужие: это сумма
+    // описателя компонента, та же, что `checkcrc` в его `.conf`. Считать её мы
+    // не умеем, а заводское значение относится к заводскому файлу. По разбору
+    // `.conf` в `vdev-logvolmgr` видно, что сверка включается самим наличием
+    // строки, — значит её отсутствие безопаснее неверного значения.
+    if (fc) continue;
     out.push(raw);
   }
   return out.join(LF);
