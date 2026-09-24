@@ -61,6 +61,16 @@ else
 fi
 fi
 sync
+
+# --- уровень журнала нав-ядра: 1 включает канал, видимый в sloginfo ---
+# Разобрано по FUN_08e8a0f4 («change NaviBox debug level to %d»): уровни 0..3,
+# и байт из файла передаётся ЧИСЛОМ, а не символом.
+( printf '\001' > /hbsystem/multicore/navi/dbglvl ) 2>> "${OUT}/dbglvl.txt"
+echo "уровень 1 записан" >> "${OUT}/dbglvl.txt"
+
+# --- снимок журнала: он же и ответ, поднялась ли навигация ---
+sloginfo > "${OUT}/syslog_full.txt" 2>&1
+sync
 cp "$L" "${OUT}/fix_copy.log" 2>/dev/null
 echo done > "${SDPATH}/.done"; sync
 [ -f /tmp/showScreen ] && [ -f "${SDPATH}/lib/done.png" ] && /tmp/showScreen "${SDPATH}/lib/done.png" &
