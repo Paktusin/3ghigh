@@ -15,6 +15,7 @@
     "card": "tools/write_maps.sh cyprus",
     "fixacios": "tools/write_fixacios.sh",
     "fixacios:clean": "tools/write_fixacios.sh --from out/cyprus",
+    "fixprobe": "tools/write_fixprobe.sh --from out/cyprus",
     "probe": "tools/write_probe.sh",
     "xac": "node src/mkxac.js out/cyp/CY.xac.db",
     "gdb": "node src/gdbgen.js --roads out/cyp/roads.geojson --out out/gdb-cyprus --levels all",
