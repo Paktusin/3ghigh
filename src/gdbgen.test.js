@@ -152,9 +152,12 @@ test('том: шапка и таблица уровней читаются шт�
   assert.deepEqual(h.frame, G.FRAME);
   assert.equal(h.levels[0].offset, G.PROLOGUE, 'первый уровень идёт сразу за шапкой');
   for (let i = 1; i < 12; i++) {
-    assert.equal(h.levels[i].offset, h.levels[i - 1].offset + h.levels[i - 1].size,
-      'уровень ' + i + ' встык к предыдущему');
+    const end = h.levels[i - 1].offset + h.levels[i - 1].size;
+    assert.equal(h.levels[i].offset, Math.ceil(end / 4) * 4,
+      'уровень ' + i + ' — следующее кратное 4 смещение, как у завода');
   }
+  assert.equal(v.gdb.readUInt32BE(0x0e), 0x14, 'начало пролога');
+  assert.equal(v.gdb.readUInt16BE(0x12), G.PROLOGUE - 0x14, 'длина пролога');
   assert.equal(h.regionEnd, v.regionEnd);
   assert.equal(v.gdb.readUInt32BE(589), v.regionEnd, 'поле «начало данных» в шапке');
 });
@@ -257,7 +260,7 @@ test('том: кластер на грубом уровне получает к�
   assert.equal(gr.gridOk, gr.gridN, 'читатель признаёт сетку');
 });
 
-test('том: уровни складываются встык и все двенадцать читаются', () => {
+test('том: уровни выровнены на 4 и все двенадцать читаются', () => {
   const levels = G.EUROPE_LEVELS.map((l, i) => Object.assign({}, l, {
     clusters: [{ cx: 1, cy: 1, lw: l.lw, lh: l.lh,
       tiles: [{ ix: 0, iy: 0, lw: l.lw, lh: l.lh, blob: G.tileBlob([{ points: road(3), name: 'L' + i }]) }] }],

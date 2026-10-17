@@ -276,8 +276,10 @@ function build(spec) {
     const key0 = L.key0 || gm.keyOrigin(i);
     return { L, W, H: L.H, count, key0, size: gm.TABLE_AT + count * 6 };
   });
+  // Уровни начинаются с кратного 4 смещения — так у всех 12 уровней Европы и
+  // всех 8 Австралии (размер уровня ≡ 3 mod 4, отсюда «лишний» байт перед следующим).
   let at = PROLOGUE;
-  for (const p of plan) { p.offset = at; at += p.size; }
+  for (const p of plan) { at = Math.ceil(at / 4) * 4; p.offset = at; at += p.size; }
   const regionEnd = at;
 
   // 2. данные: общий пустой тайл, затем по кластерам — их тайлы и запись-таблица
@@ -331,6 +333,12 @@ function build(spec) {
   head.writeUInt32BE(SIG, 0);
   head.writeUInt32BE(spec.version || VERSION, 4);
   head.writeUInt32BE(spec.id === undefined ? 1711366677 : spec.id, 8);
+  // Разбор шапки в прошивке (FUN_08cb16b4): после 'f',01 идёт u32 по +0x0a, затем
+  // u32 начала пролога (+0x0e) и u16 его длины (+0x12) — 0x14 и 0x0304 у Европы и
+  // Австралии. По ним открытие тома (FUN_08cb20f0) читает каталог уровней.
+  head.writeUInt16BE(spec.idTail === undefined ? 0x0bc8 : spec.idTail, 0x0c);
+  head.writeUInt32BE(0x14, 0x0e);
+  head.writeUInt16BE(PROLOGUE - 0x14, 0x12);
   frame.forEach((v, i) => head.writeInt32BE(v, 0x14 + i * 4));
   head[0x24] = plan.length;
   plan.forEach((p, i) => {
@@ -363,7 +371,14 @@ function build(spec) {
     return b;
   });
 
-  return { gdb: Buffer.concat([head, ...levelBufs, ...chunks]), gd2: Buffer.alloc(0), map, regionEnd };
+  // между уровнями — нулевые байты до выровненного смещения следующего
+  const levelParts = [];
+  let end = PROLOGUE;
+  plan.forEach((p, i) => {
+    levelParts.push(Buffer.alloc(p.offset - end), levelBufs[i]);
+    end = p.offset + p.size;
+  });
+  return { gdb: Buffer.concat([head, ...levelParts, ...chunks]), gd2: Buffer.alloc(0), map, regionEnd };
 }
 
 // ── укладка дорог ──────────────────────────────────────────────────────────
