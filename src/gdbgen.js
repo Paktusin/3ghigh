@@ -347,7 +347,8 @@ function build(spec) {
   });
   head.writeUInt16BE(0xffff, 301);
   head.write(String(spec.stamp || '20220218092956').slice(0, 14), 303, 'latin1');
-  head.write(String(spec.name || 'EJ211').slice(0, 8), 317, 'latin1');
+  // за 14 символами метки — два нулевых байта, имя с +319 (Европа и Австралия)
+  head.write(String(spec.name || 'EJ211').slice(0, 8), 319, 'latin1');
   TAIL_576.copy(head, 576);
   head.writeUInt32BE(0, 577);          // каталога блобов у собранного тома нет
   head.writeUInt32BE(0, 581);
