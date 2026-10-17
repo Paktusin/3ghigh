@@ -57,7 +57,7 @@ test('сетка: штатное начало таблицы кластеров 
   const t = gm.locateTable(g, h, h.levels[0]);
   assert.equal(t.start, gm.TABLE_AT);
   assert.equal(t.canonical, true);
-  assert.equal(t.count, 256 * 280);
+  assert.equal(t.count, 256 * 168, 'W·H по рамке, как считает прошивка');
 });
 
 test('сетка: добавка уровня в ключах кластеров', () => {

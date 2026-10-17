@@ -268,13 +268,17 @@ function build(spec) {
   const h = { frame };
 
   // 1. размеры уровней: таблица начинается на +1163 и идёт до конца уровня
+  // Сетка — по рамке, как считает прошивка (FUN_08cb181c): W·H записей, иначе
+  // уровень не загружается. Таблица — два массива: count × {u32 смещение, u16
+  // размер} и count × {u16 тайлов в кластере, u16 0}: 10 байт на запись.
   const plan = levels.map((L, i) => {
     const W = gm.gridW(h, L);
-    const count = W * L.H;
+    const H = Math.floor((frame[3] - frame[1] - 1) / (L.cellY * (1 << L.potY))) + 1;
+    const count = W * H;
     // ключи кластеров несут добавку уровня — без неё прошивка (и наш читатель)
     // ищут кластер не в том слоте; см. gm.keyOrigin
     const key0 = L.key0 || gm.keyOrigin(i);
-    return { L, W, H: L.H, count, key0, size: gm.TABLE_AT + count * 6 };
+    return { L, W, H, count, key0, size: gm.TABLE_AT + count * 10 };
   });
   // Уровни начинаются с кратного 4 смещения — так у всех 12 уровней Европы и
   // всех 8 Австралии (размер уровня ≡ 3 mod 4, отсюда «лишний» байт перед следующим).
@@ -324,6 +328,22 @@ function build(spec) {
       entries[slot] = { off, sz: blob.length };
       placed.push({ cx: c.cx, cy: c.cy, slot, off, size: blob.length, tiles: recs });
     }
+    // Пустых слотов у завода нет: «морской» кластер — свои ключи, все тайлы
+    // ссылаются на общий пустой (у Европы и Австралии непусты все слоты).
+    const lw = p.L.lw === undefined ? p.L.potX : p.L.lw, lh = p.L.lh === undefined ? p.L.potY : p.L.lh;
+    for (let slot = 0; slot < p.count; slot++) {
+      if (entries[slot].sz) continue;
+      const cx = slot % p.W, cy = Math.floor(slot / p.W);
+      const recs = [];
+      for (let k = 0, n = 1 << (p.L.potX - lw + p.L.potY - lh); k < n; k++) {
+        let ix = 0, iy = 0;
+        for (let b = 0; b < 8; b++) { ix |= (k >> (2 * b) & 1) << b; iy |= (k >> (2 * b + 1) & 1) << b; }
+        recs.push({ x: p.key0.x0 + (cx << p.L.potX) + (ix << lw), y: p.key0.y0 + (cy << p.L.potY) + (iy << lh),
+                    lw, lh, off: emptyAt, size: empty.length });
+      }
+      const blob = clusterBlob(recs);
+      entries[slot] = { off: put(blob), sz: blob.length };
+    }
     p.entries = entries;
     map.levels.push({ i: map.levels.length, offset: p.offset, size: p.size, W: p.W, H: p.H, key0: p.key0, clusters: placed });
   }
@@ -365,9 +385,12 @@ function build(spec) {
     b.writeUInt32BE(p.L.to, 14);
     for (let k = 0; k < 16; k++) b.writeInt32BE(0x7fffffff, 18 + k * 4);
     if (p.L.tag) Buffer.from(p.L.tag, 'hex').copy(b, 82);
+    b.writeUInt32BE(p.count, gm.TABLE_AT - 4);
+    const second = gm.TABLE_AT + p.count * 6;
     p.entries.forEach((e, i) => {
       b.writeUInt32BE(e.off, gm.TABLE_AT + i * 6);
       b.writeUInt16BE(e.sz, gm.TABLE_AT + i * 6 + 4);
+      b.writeUInt16BE(e.sz / CLUSTER_REC, second + i * 4);
     });
     return b;
   });

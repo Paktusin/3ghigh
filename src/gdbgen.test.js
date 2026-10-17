@@ -179,16 +179,15 @@ test('том: заголовки уровней те же, что у EJ211 (яч
   });
 });
 
-test('том: сетка L0 — 256×280 и слот считается по формуле', () => {
+test('том: сетка L0 — 256×168 по рамке и слот считается по формуле', () => {
   const v = cyprusVolume([{ points: road(4), name: 'A1' }]);
   const g = gm.openBuffer(v.gdb, v.gd2);
   const h = gm.header(g);
   const gr = gm.levelGrid(g, h, h.levels[0]);
   assert.equal(gr.W, 256);
-  assert.equal(gr.H, 280);
+  assert.equal(gr.H, 168);
   assert.equal(gr.table.start, gm.TABLE_AT);
-  assert.equal(gr.gridOk, gr.gridN, 'все настоящие кластеры стоят в своих слотах');
-  assert.equal(gr.gridN, 1);
+  assert.equal(gr.gridOk, gr.gridN, 'все кластеры стоят в своих слотах');
   assert.equal(gm.slotFor(gr, gr.head, 14336, 7392), 57 * 256 + 112);
 });
 
@@ -218,15 +217,18 @@ test('том: тайл с дорогой лежит там, где его ище
   assert.equal(holes[0].off, v.map.emptyTile.off);
 });
 
-test('том: незанятые слоги таблицы нулевые, а не мусор', () => {
+test('том: пустых слотов нет — морской кластер ссылается на общий пустой тайл', () => {
   const v = cyprusVolume([{ points: road(2) }]);
   const g = gm.openBuffer(v.gdb, v.gd2);
   const h = gm.header(g);
   const gr = gm.levelGrid(g, h, h.levels[0]);
-  const filled = gr.entries.filter(e => e.off !== 0 || e.sz !== 0);
-  assert.equal(filled.length, 1, 'занят ровно один слот');
-  assert.equal(gr.entries[0].off, 0);
-  assert.equal(gr.entries[gr.entries.length - 1].sz, 0);
+  assert.equal(gr.entries.length, 256 * 168);
+  assert.ok(gr.entries.every(e => e.sz === 16 * G.CLUSTER_REC), 'все слоты L0 — кластеры по 16 тайлов');
+  const sea = gm.cluster(g, h, gr.entries[0].off, gr.entries[0].sz);
+  assert.ok(sea.tiles.length === 16 && sea.tiles.every(t => t.off === v.map.emptyTile.off), 'морской кластер — сплошь пустой тайл');
+  const b = gm.read(g, h.levels[0].offset, h.levels[0].size);
+  assert.equal(b.readUInt32BE(gm.TABLE_AT - 4), 256 * 168, 'число записей перед таблицей');
+  assert.equal(b.readUInt16BE(gm.TABLE_AT + 256 * 168 * 6), 16, 'второй массив: тайлов в кластере');
 });
 
 test('том: кластер вне сетки отвергается не молча', () => {
@@ -272,8 +274,7 @@ test('том: уровни выровнены на 4 и все двенадца�
     const gr = gm.levelGrid(g, h, L);
     assert.ok(gr, 'L' + i + ': таблица найдена');
     assert.equal(gr.table.start, gm.TABLE_AT, 'L' + i + ': штатное начало');
-    assert.equal(gr.gridN, 1, 'L' + i + ': один кластер');
-    assert.equal(gr.gridOk, 1, 'L' + i + ': слот сходится');
+    assert.equal(gr.gridOk, gr.gridN, 'L' + i + ': все слоты сходятся');
   });
 });
 

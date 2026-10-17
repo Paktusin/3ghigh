@@ -211,6 +211,13 @@ function locateTable(g, h, L) {
   // Штатное начало проверяется не «чистотой» записей (мусорных вариантов в
   // таблице до 0,3 %, и они сбивают любой такой фильтр), а сеточной формулой:
   // если с началом +1163 слоты сходятся с ключами, начало верное.
+  // Штатная раскладка (прошивка, FUN_08cb181c): u32 число записей по +1159
+  // (= W·H по рамке), затем count × {u32 смещение, u16 размер} и count ×
+  // {u16 тайлов в кластере, u16 0}. Сошлось на всех 20 уровнях Европы и Австралии.
+  const declared = b.readUInt32BE(TABLE_AT - 4);
+  if (declared > 0 && TABLE_AT + declared * 10 <= end) {
+    return { b, start: TABLE_AT, count: declared, potX, potY, lowGrid: false, canonical: true };
+  }
   if (end > TABLE_AT + 6 && (end - TABLE_AT) % 6 === 0) {
     const count = (end - TABLE_AT) / 6;
     const hd = levelHead(b);
