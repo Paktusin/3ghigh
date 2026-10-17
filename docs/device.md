@@ -1814,3 +1814,10 @@ installation` нет и в журнале исправной машины. По�
 остановилась на 84 %** — как в опыте с заводским XAC, где ядро было
 `FULLY_OPERABLE`, а не поднималась карта. Первый случай, когда база, целиком
 собранная нами (свой XAC, GDB, LIT), проходит старт нав-ядра.
+
+Журнал (`out/logs/2026-10-17-cyprus-84/`): `15.242 start: NDL Initialisation` →
+`16.419 FULLY_OPERABLE` → `26.707 end: NDL Initialisation`, в 00:27
+`setNavigationInitialized( true )`, в 00:54 «HMI completely started!»;
+«Navigation not initialized» больше нет. Явных ошибок карты в `sloginfo` нет —
+висит загрузка карты, её сообщения, как у ядра, в невидимом канале.
+Заметка: от старта до `end` 11 с против 2,5 с у заводской базы.
