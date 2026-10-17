@@ -105,14 +105,22 @@ function bitsAccepted(bits) {
 
 // Сборка контейнера из разделов: [{ name, data }] -> байты.
 // Имя дополняется ПРОБЕЛАМИ до 16 байт — так у завода во всех разделах.
+// Прошивка шагает по разделам, округляя длину до кратного 4 (FUN_08ebdee4),
+// и раздел с некратной длиной обрывает разбор — у завода все кратны 4.
+function padTo4(data) {
+  const pad = (4 - (data.length % 4)) % 4;
+  return pad ? Buffer.concat([data, Buffer.alloc(pad)]) : data;
+}
+
 function build(list) {
   const parts = [];
   for (const s of list) {
     if (s.name.length > NAME_LEN) throw new Error('имя раздела длиннее 16: ' + s.name);
     const head = Buffer.alloc(HEAD, 0x20);
     head.write(s.name, 0, 'latin1');
-    head.writeUInt32BE(s.data.length, NAME_LEN);
-    parts.push(head, s.data);
+    const data = padTo4(s.data);
+    head.writeUInt32BE(data.length, NAME_LEN);
+    parts.push(head, data);
   }
   return Buffer.concat(parts);
 }
@@ -134,7 +142,7 @@ function patchHeader(data, counts) {
   return b;
 }
 
-module.exports = { sections, section, header, build, explode, patchHeader,
+module.exports = { sections, section, header, build, explode, patchHeader, padTo4,
                    bitsAccepted, BITS_OK, H, HEAD, NAME_LEN };
 
 if (require.main === module) {

@@ -525,9 +525,9 @@ function buildSection(spec) {
   const tailOff = refOff + (r ? r.area.length : 0);
   const total = tailOff + (parts ? parts.length : 0);
 
-  const out = Buffer.alloc(total);
+  const out = Buffer.alloc(Math.ceil(total / 4) * 4);   // длина раздела кратна 4
   out.write((spec.label || 'ORTSNAMEN').padEnd(16, ' '), 0, 16, 'latin1');
-  out.writeUInt32BE(total - 20, 0x10);
+  out.writeUInt32BE(out.length - 20, 0x10);
   out.writeUInt16BE(spec.version === undefined ? 3 : spec.version, 0x14);
   out.writeUInt16BE(spec.country || 0, 0x16);
   out.writeUInt32BE(keyCount, 0x18);

@@ -51,3 +51,11 @@ test('счётчики шапки правятся на месте', () => {
   assert.equal(h.tiles, 9);
   assert.equal(h.blocks, 77);
 });
+
+test('длина каждого раздела добивается до кратной 4: иначе прошивка обрывает разбор', () => {
+  const buf = xah.build([{ name: 'NACHBARN', data: Buffer.alloc(10, 1) },
+                         { name: 'L3 GRUPPEN', data: Buffer.alloc(18, 2) }]);
+  const list = xah.sections(buf).list;
+  assert.deepEqual(list.map((s) => s.total % 4), [0, 0]);
+  assert.equal(list[1].offset % 4, 0, 'следующий раздел начинается с кратного 4');
+});

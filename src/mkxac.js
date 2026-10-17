@@ -189,7 +189,9 @@ function buildXah(src, spec) {
       out.push({ name, data: st.buildNeighbors([[]], raw.subarray(0, 4)) });
     } else if (name === fg.SEC) {
       const src2 = fg.read(src);
-      out.push({ name, data: fg.build({ head: src2.head, gap: 0, tail: 0,
+      // Записи стран начинаются с кратного 4 смещения, как у Австралии (gap 2).
+      const grEnd = 20 + src2.head.length + 8 + 2;   // шапка + одна группа из одного тайла
+      out.push({ name, data: fg.build({ head: src2.head, gap: (4 - grEnd % 4) % 4, tail: 0,
         groups: [{ id: 0, tiles: [0] }],
         lands: [{ id: CYPRUS, byte6: 0, flags: 2, value: 0, tiles: [0] }] }) });
     } else if (name === fg.SEC_L3) {

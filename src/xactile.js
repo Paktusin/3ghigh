@@ -103,7 +103,8 @@ function rebuild(buf) {
 }
 
 // Раздел: имя 16 байт, u32 BE длины, полезная часть.
-function section(name, payload) {
+function section(name, rawPayload) {
+  const payload = require('./xah').padTo4(rawPayload);
   const head = Buffer.alloc(20);
   head.write(name.padEnd(NAME, ' '), 0, NAME, 'ascii');
   head.writeUInt32BE(payload.length, 16);

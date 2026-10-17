@@ -318,7 +318,7 @@ function buildSection(spec) {
   const data = Buffer.concat(parts);
   const idx = buildIndex(offsets);
   const head = 48;
-  const out = Buffer.alloc(head + idx.length + data.length);
+  const out = Buffer.alloc(Math.ceil((head + idx.length + data.length) / 4) * 4);
   out.write((spec.label || 'HAUSNUMMERN').padEnd(16, ' '), 0, 16, 'latin1');
   out.writeUInt32BE(out.length - 20, 0x10);
   out.writeUInt32BE(0x00050000, 0x14);
