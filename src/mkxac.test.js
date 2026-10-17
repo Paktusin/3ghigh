@@ -52,6 +52,8 @@ test('уровни 2…4 объявляются пустыми, но счёт б
   for (const n of [2, 3, 4]) {
     const row = M.levelRow(TILE, [0, 0, 0, 0], n, null);
     assert.equal(row.readUInt32BE(0), 0x7fffffff, 'уровень ' + n + ': данных нет');
+    assert.equal(row.readUInt32BE(8), 0x80000000, 'рамка пустая, как у завода');
+    assert.equal(row.readUInt32BE(0x24), 0, 'длины заглушки здесь нет');
     assert.equal(row.readUInt16BE(0x10), 0, 'блоков нет');
     assert.equal(row.readUInt16BE(0x12), 2, 'но первый блок уже за нашими двумя');
   }

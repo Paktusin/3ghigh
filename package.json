@@ -10,7 +10,7 @@
     "build": "npm run image && npm run meta && npm run check",
     "image": "node src/mkcyprus.js out/cyprus",
     "image:clean": "node src/mkcyprus.js out/cyprus --clean",
-    "meta": "node src/mkmeta.js out/cyprus --keep-pkg",
+    "meta": "node src/mkmeta.js out/cyprus",
     "check": "node src/setcheck.js out/cyprus --donor CY00",
     "card": "tools/write_maps.sh cyprus",
     "fixacios": "tools/write_fixacios.sh",

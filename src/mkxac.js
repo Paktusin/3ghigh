@@ -149,12 +149,16 @@ function levelRow(file1, bbox, level, stub) {
     b.writeUInt32BE(zf ? zf.total : 0, 0x20);
     b.writeUInt32BE(0, 0x24);
   } else {
-    for (let k = 0; k < 4; k++) b.writeUInt32BE(NO_DATA, k * 4);
+    // Как у всех 160 заводских тайлов с заглушкой: рамка пустая (min > max),
+    // а ZF-NAMEN — раздел самой заглушки, а не файла уровня 1.
+    [NO_DATA, NO_DATA, 0x80000000, 0x80000000].forEach((v, i) => b.writeUInt32BE(v, i * 4));
     b.writeUInt16BE(0, 0x10);                       // блоков на уровне нет
     b.writeUInt16BE(vb.length, 0x12);               // но счёт уже ушёл вперёд
-    b.writeUInt32BE(hdr ? hdr.total : 0, 0x1c);
-    b.writeUInt32BE(zf ? zf.total : 0, 0x20);
-    b.writeUInt32BE(level === 2 && stub ? stub.length : 0, 0x24);
+    const stubSecs = stub ? xac.sections(stub).list : [];
+    const shdr = stubSecs.find((x) => x.name === 'XAC HEADER');
+    const szf = stubSecs.find((x) => x.name === 'ZF-NAMEN');
+    b.writeUInt32BE(shdr ? shdr.total : 0, 0x1c);
+    b.writeUInt32BE(szf ? szf.total : 0, 0x20);
   }
   return b;
 }

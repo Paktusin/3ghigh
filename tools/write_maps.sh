@@ -51,7 +51,7 @@ rm -f "$V/copie_scr.sh" "$V/run.sh" "$V/uninstall.sh"; rm -rf "$V/scripts" "$V/e
 
 # очистить только заменяемые компоненты
 for c in "${COMPS[@]}"; do
-  [ -d "$V/pkgdb/$c" ] && { echo "чищу $c"; rm -f "$V/pkgdb/$c"/*; }
+  [ -d "$V/pkgdb/$c" ] && { echo "чищу $c"; rm -rf "$V/pkgdb/$c"; }
 done
 
 echo "копирую $(du -sh "$D" | cut -f1) ..."

@@ -40,11 +40,13 @@ else
   say "=== проверяю, что все пути из описателя существуют ==="
   rm -f "${OUT}/.miss"
   miss=0
-  sed -n 's/^[A-Za-z][A-Za-z]*: *//p' "$SRC" | while read pth; do
+  # sed на машине нет: путь отделяем средствами ksh
+  while read key pth; do
+    case "$key" in [A-Za-z]*:) ;; *) continue ;; esac
     [ -n "$pth" ] || continue
     if [ -e "$pth" ]; then echo "  есть: $pth" >> "$L"
     else echo "  НЕТ:  $pth" >> "$L"; echo x >> "${OUT}/.miss"; fi
-  done
+  done < "$SRC"
   [ -f "${OUT}/.miss" ] && miss=1
   if [ "$miss" = "1" ]; then
     say "=== часть путей отсутствует — НИЧЕГО НЕ ПИШУ ==="
@@ -62,15 +64,10 @@ fi
 fi
 sync
 
-# --- уровень журнала нав-ядра: 1 включает канал, видимый в sloginfo ---
-# Разобрано по FUN_08e8a0f4 («change NaviBox debug level to %d»): уровни 0..3,
-# и байт из файла передаётся ЧИСЛОМ, а не символом.
-( printf '\001' > /hbsystem/multicore/navi/dbglvl ) 2>> "${OUT}/dbglvl.txt"
-echo "уровень 1 записан" >> "${OUT}/dbglvl.txt"
-
 # --- снимок журнала: он же и ответ, поднялась ли навигация ---
 sloginfo > "${OUT}/syslog_full.txt" 2>&1
 sync
+
 cp "$L" "${OUT}/fix_copy.log" 2>/dev/null
 echo done > "${SDPATH}/.done"; sync
 [ -f /tmp/showScreen ] && [ -f "${SDPATH}/lib/done.png" ] && /tmp/showScreen "${SDPATH}/lib/done.png" &

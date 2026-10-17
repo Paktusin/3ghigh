@@ -176,12 +176,13 @@ if (require.main === module) {
   console.log('компоненты в наборе:', [...present].join(', '));
 
   // .pkg и подпись
-  // Ключ --keep-pkg оставляет манифест оригинальным. Смысл: рядом лежит
-  // .pkg.sig на 128 байт, то есть подпись RSA-1024. При установке она не
-  // проверяется, но загрузчик базы может сверять её сам — тогда переписанный
-  // манифест сделает базу невалидной («no valid acios_db found on HDD»).
-  // С оригинальным манифестом подпись остаётся верной, зато он перечисляет
-  // компоненты, которых в наборе нет.
+  // По умолчанию манифест переписывается под состав набора. Разобрано по
+  // vdev-logvolmgr (res_package_if_ctl): при активации пакета каждый filedef
+  // из манифеста привязывается к загруженному .conf; не найден — «Failed to
+  // bind», есть fdefcrc и не сошлось — «failed CRC cross check». В обоих
+  // случаях пакет не активируется и acios_db.ini не пишется — отсюда 28 %.
+  // Подпись .pkg.sig logvolmgr только ищет (res_package_if_mount), но не
+  // проверяет: криптографии в нём нет. --keep-pkg оставлен для опытов.
   const keepPkg = process.argv.includes('--keep-pkg');
   const pkgName = fs.readdirSync(path.join(root, 'pkgdb')).find(f => /^MMI3G_.*[.]pkg$/.test(f));
   const pkgOrig = fs.readFileSync(path.join(root, 'pkgdb', pkgName), 'latin1');
