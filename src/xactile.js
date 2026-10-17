@@ -38,9 +38,11 @@ const NAME = 16;
 
 // Смещения полей шапки — от начала файла, он же начало раздела.
 const F = {
-  len: 0x10, code: 0x18, file: 0x1c, built: 0x2c, dbBuilt: 0x3c,
-  index: 0x4c, country: 0x4e, bbox: 0x54, count: 0x70, first: 0x74, size: 0x78,
-  levels: 0x7c,
+  len: 0x10, version: 0x14, code: 0x18, file: 0x1c, built: 0x2c, dbBuilt: 0x3c,
+  index: 0x4c, group: 0x4e, country: 0x50, one: 0x52, bbox: 0x54,
+  nodes: 0x64, marked: 0x68, firstBlock: 0x6c, count: 0x70, first: 0x74, size: 0x78,
+  levels: 0x7c, zfNames: 0x8c, zeNames: 0x90, houses: 0x94, localPois: 0x98,
+  bounds2: 0xa4, three: 0xb0, l3: 0xb4, bits: 0xbc, flags: 0xc0,
 };
 
 function str(buf, at, len) {
@@ -160,7 +162,43 @@ function buildTile(spec) {
   return file;
 }
 
-module.exports = { readTile, rebuild, buildTile, section, bboxOf, HDR, F };
+// Остальная шапка — по правилам, сверенным на всех 3994 тайлах Европы и
+// Австралии (17.10, docs/formats/xac.md «Шапка файла тайла разобрана»):
+// версия 9, группа FE GRUPPEN, страна, суммы полей 0x32 и 0x30 по блокам,
+// номер первого блока, счётчики разделов имён, домов и POI, область L3,
+// разрядности, и повтор границ из записи XAC-STRUKTUR (+0x04…+0x10, +0x44,
+// +0x48). Байт +0xc2 повторяет бит 1 поля 0x3c шапок блоков.
+function finishHeader(file, spec) {
+  const S = xac.sections(file).list;
+  const one = (n) => S.find((x) => x.name === n);
+  const at = (n, o) => (one(n) ? file.readUInt32BE(one(n).offset + o) : 0);
+  const vb = S.filter((x) => x.name === 'VEKTORBLOCK');
+  const sum16 = (o) => vb.reduce((a, x) => a + file.readUInt16BE(x.offset + o), 0);
+  const rec = spec.record;
+
+  file.writeUInt32BE(0x00090000, F.version);
+  file.writeUInt16BE(spec.group || 0, F.group);
+  file.writeUInt16BE(spec.country || 0, F.country);
+  file.writeUInt16BE(1, F.one);
+  file.writeUInt32BE(sum16(0x32), F.nodes);
+  file.writeUInt32BE(sum16(0x30), F.marked);
+  file.writeUInt32BE(vb.length ? file.readUInt16BE(vb[0].offset + 0x36) : 0, F.firstBlock);
+  for (let k = 0; k < 4; k++) file.writeUInt32BE(rec.readUInt32BE(4 + k * 4), F.levels + k * 4);
+  file.writeUInt32BE(at('ZF-NAMEN', 0x24), F.zfNames);
+  file.writeUInt32BE(at('ZE-NAMEN', 0x24), F.zeNames);
+  file.writeUInt32BE(at('HAUSNUMMERN', 0x24), F.houses);
+  file.writeUInt32BE(at('LOCAL POIS', 0x18), F.localPois);
+  file.writeUInt32BE(rec.readUInt32BE(0x44), F.bounds2);
+  file.writeUInt32BE(rec.readUInt32BE(0x48), F.bounds2 + 4);
+  file.writeUInt32BE(3, F.three);
+  file.writeUInt16BE(spec.l3 || 0, F.l3);
+  file.writeUInt32BE(0x2020200c, F.bits);
+  const blockFlagBit1 = vb.length && (file.readUInt16BE(vb[0].offset + 0x3c) & 2);
+  file.writeUInt32BE(blockFlagBit1 ? 0x10020300 : 0x10020100, F.flags);
+  return file;
+}
+
+module.exports = { readTile, rebuild, buildTile, finishHeader, section, bboxOf, HDR, F };
 
 if (require.main === module) {
   const fldb = require('./fldb');

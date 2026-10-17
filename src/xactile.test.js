@@ -97,3 +97,21 @@ test('образец шапки: чужие поля переносятся, с�
   assert.equal(tile.readTile(file).code, 'CY00');
   assert.equal(file.readUInt32BE(0xa4), 0xdeadbeef);
 });
+
+test('шапка дописывается по заводским правилам: версия, страна, счётчики, границы', () => {
+  const { block } = cyprusBlock();
+  const zf = tile.section('ZF-NAMEN', Buffer.alloc(96));
+  const file = tile.buildTile({ code: 'CY00', file: 'EJ211_CY00_1', built: '20260921120000',
+    zf, blocks: [block] });
+  const rec = Buffer.alloc(84);
+  [4, 8, 0xc, 0x10, 0x44, 0x48].forEach((o, k) => rec.writeUInt32BE(100 + k, o));
+  tile.finishHeader(file, { group: 0, country: 113, l3: 0, record: rec });
+  const F = tile.F;
+  assert.equal(file.readUInt32BE(F.version), 0x00090000);
+  assert.equal(file.readUInt16BE(F.country), 113);
+  assert.equal(file.readUInt16BE(F.one), 1);
+  assert.equal(file.readUInt32BE(F.nodes), block.readUInt16BE(0x32), 'сумма поля 0x32 блоков');
+  assert.equal(file.readUInt32BE(F.levels), 100, 'границы повторяют запись реестра');
+  assert.equal(file.readUInt32BE(F.bounds2 + 4), 105);
+  assert.equal(file.readUInt32BE(F.bits), 0x2020200c);
+});

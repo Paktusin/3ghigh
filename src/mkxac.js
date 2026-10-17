@@ -305,9 +305,11 @@ function mkxac(opt) {
 
   // ---- индекс ----
   const box = [bb[0] - 1000, bb[1] - 1000, bb[2] + 1000, bb[3] + 1000];
+  const reg = strukturRecord(code, file1);
+  tile.finishHeader(file1, { group: 0, country: CYPRUS, l3: 0, record: reg });
   const xahBuf = buildXah(xahSrc, {
     file1,
-    reg: strukturRecord(code, file1),
+    reg,
     rows: [1, 2, 3, 4].map((n) => levelRow(file1, box, n, file2)),
   });
   log('индекс .xah: ' + xahBuf.length + ' б (заводской ' + xahSrc.length + ')');
