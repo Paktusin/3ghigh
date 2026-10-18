@@ -59,6 +59,7 @@ const path = require('path');
 const { mkxac, readHouses, buildContainer } = require('./mkxac');
 const fldb = require('./fldb');
 const gdbgen = require('./gdbgen');
+const atlascut = require('./atlascut');
 const cyplit = require('./cyplit');
 const litaddr = require('./litaddr');
 const cyppoi = require('./cyppoi');
@@ -166,6 +167,13 @@ function mkcyprus(outDir, opt) {
   out.components.push(component(outDir, 'LIT', litSrc, litWrapped, root, log));
   out.lit = { leaves: l.leaves, pois: l.pois };
   log('точек ' + l.pois + ' в ' + l.leaves + ' листьях');
+
+  // ---- TER: рельеф только Кипра (заводские контейнеры, свой индекс) ----
+  log('');
+  log('=== TER: рельеф Кипра ===');
+  const ter = atlascut.build(root, outDir, { log });
+  ['TER', 'TER2'].forEach((name, i) => out.components.push(
+    { name, file: path.basename(ter.dst[i]), size: i ? ter.size2 : ter.size1 }));
 
   // ---- мелкие заводские компоненты и описатель: только для чистого раздела ----
   if (o.clean) {
