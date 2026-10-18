@@ -73,6 +73,7 @@ Automotive). Всё получено чтением файлов; оригина
 | [docs/formats/lit.md](docs/formats/lit.md) | `LIT`/`PIT`: база точек интереса и адресный справочник ввода цели, каталог, словарь, транскрипции |
 | [docs/formats/atlas.md](docs/formats/atlas.md) | `CTY` (трёхмерные здания) и `TER` (рельеф) |
 | [docs/formats/tmc.md](docs/formats/tmc.md) | `TMC` |
+| [docs/formats/xar.md](docs/formats/xar.md) | архив стилей карты `.xar`: цвета и ширины по классам GDB, значки POI по категориям LIT, растры; `src/xar.js` |
 | [docs/device.md](docs/device.md) | правила работы с головным устройством, установка, проверки целостности |
 | [docs/firmware.md](docs/firmware.md) | карта читателей в прошивке, инициализация NDL, разгадка зависания на 28 % |
 | [docs/tools.md](docs/tools.md) | свои скрипты в `src/` и `tools/`, чужие проекты |

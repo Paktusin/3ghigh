@@ -21,6 +21,7 @@
     "lit": "node src/cyplit.js --out out/cyp/CY.lit",
     "xah": "node src/xah.js",
     "roads": "node src/osm2geo.js out/cyp/roads.json out/cyp/roads.geojson",
-    "sums": "node src/checksum.js out/cyprus"
+    "sums": "node src/checksum.js out/cyprus",
+    "preview": "node src/preview.js out/cyprus"
   }
 }
