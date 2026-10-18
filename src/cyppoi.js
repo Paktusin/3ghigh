@@ -153,12 +153,43 @@ const BY_CATEGORY = [
 // точки на карте не видны. Решение пользователя (18.10): храмы — к памятникам
 // культуры, магазины и супермаркеты — к продуктам, одежда — к торговым центрам.
 // Строки BY_CATEGORY не трогаем, чтобы переназначение было видно и обратимо.
+// Вторая волна (18.10): у завода в дереве POI только 58 типов карты, поэтому
+// полезное переводим в ближайший видимый тип, прочее остаётся как есть.
 const REMAP = {
   'GOTTESHAUS': 'KULTURDENKMAL',
   'SUPERMARKT': 'LEBENSMITTEL',
   'FACHGESCHÄFT': 'LEBENSMITTEL',
   'BEKLEIDUNG': 'EINKAUFSZENTRUM',
+  'ARZT': 'ÄRZTL. DIENST',
+  'ZAHNARZT': 'ÄRZTL. DIENST',
+  'TIERARZT': 'ÄRZTL. DIENST',
+  'BERGGIPFEL': 'SEHENSWÜRDIGKT.',
+  'AUSSICHTSPUNKT': 'SEHENSWÜRDIGKT.',
+  'STRAND': 'PARK/ERHOLUNG',
+  'NATURRESERVAT': 'PARK/ERHOLUNG',
+  'KULTURZENTRUM': 'THEATER',
+  'KONZERTHALLE': 'THEATER',
+  'MUSIKZENTRUM': 'THEATER',
+  'SCHWIMMBAD': 'AKTIVER SPORT',
+  'WASSERSPORT': 'AKTIVER SPORT',
+  'ZOO': 'FREIZEITPARK',
+  'KINDERGARTEN': 'SCHULE',
+  'KAUFHAUS': 'EINKAUFSZENTRUM',
+  'MÖBELMARKT': 'EINKAUFSZENTRUM',
+  'SPORTGESCHÄFT': 'EINKAUFSZENTRUM',
+  'BAUMARKT': 'EINKAUFSZENTRUM',
+  'ELEKTROMARKT': 'EINKAUFSZENTRUM',
+  'BÜROARTIKEL': 'EINKAUFSZENTRUM',
+  'GETRÄNKEMARKT': 'LEBENSMITTEL',
+  'GESCHÄFT': 'LEBENSMITTEL',
+  'COFFEE SHOP': 'RESTAURANT',
+  'BAR/PUB': 'NIGHTLIFE',
+  'GÄSTEHAUS': 'HOTEL/MOTEL',
 };
+// опечатка в названии молча оставила бы точки на старом месте
+for (const [from, to] of Object.entries(REMAP))
+  for (const n of [from, to])
+    if (!P.CATEGORIES.includes(n)) throw new Error('REMAP: нет категории ' + n);
 
 const MAP = [];
 for (let rank = 0; rank < BY_CATEGORY.length; rank++)

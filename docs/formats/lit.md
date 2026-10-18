@@ -3587,3 +3587,12 @@ BEKLEIDUNG 937, FIRMENFILIALE 708, BERGGIPFEL 619, NAMENS-ORT 570, SUPERMARKT
 завода не попадают вовсе; где они хранятся для поиска (догадка: списки POI
 городов 0x33/0x34, которые мы не пишем) — не установлено. У нас в дереве лежат и
 невидимые: 8 400 из 22 676.
+
+**Переназначения (18.10, `cyppoi.REMAP`).** Полезные категории без значка
+переведены в ближайший тип карты: врачи → ÄRZTL. DIENST, вершины и смотровые →
+SEHENSWÜRDIGKT., пляжи и заповедники → PARK/ERHOLUNG, культурные и концертные
+залы → THEATER, бассейны и водный спорт → AKTIVER SPORT, зоопарк → FREIZEITPARK,
+детсады → SCHULE, непродуктовые магазины → EINKAUFSZENTRUM, напитки и прочие
+магазины → LEBENSMITTEL, кофейни → RESTAURANT, бары → NIGHTLIFE, гостевые дома →
+HOTEL/MOTEL; храмы → KULTURDENKMAL. Точечно: AlphaGrand AutoService → AUDI
+SERVICE, салоны `brand=Audi` → AUDI ZENTRUM (`cyppoi.SPECIAL`).
