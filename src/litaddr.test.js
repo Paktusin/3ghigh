@@ -70,7 +70,14 @@ function model() {
     streets.push({ name: String.fromCharCode(65 + (j % 9)) + ' STREET ' + j, place: 0, pts: [[x, y], [x + 50, y + 30]] });
   }
   for (let j = 0; j < 3; j++) streets.push({ name: 'ROAD ' + j, place: 5, pts: [[2344500, 3863500], [2344600, 3863600]] });
-  return { code: 113, iso2: 'CY', iso3: 'CYP', places, streets };
+  // индексы: 1010 — два города (0 и 5), три улицы; 2020 — одна улица города 0;
+  // 3030 — без наших улиц, в справочник не идёт
+  const postcodes = [
+    { code: '1010', pts: [[2340100, 3860100], [2344550, 3863550]], cities: [0, 5], streets: [0, 1, 120] },
+    { code: '2020', pts: [[2340300, 3860200]], cities: [0], streets: [7] },
+    { code: '3030', pts: [[2341000, 3861000]], cities: [3], streets: [] },
+  ];
+  return { code: 113, iso2: 'CY', iso3: 'CYP', places, streets, postcodes };
 }
 
 const pois = (n) => Array.from({ length: n }, (_, i) => ({
@@ -87,6 +94,10 @@ test('справочник читается обратно: страна -> 60 �
   assert.equal(rep.addr.cities.length, 60);
   assert.equal(rep.addr.streets, 123);
   assert.deepEqual(rep.addr.errors, []);
+  assert.equal(rep.addr.postcodes, 2, 'индексы с нашими улицами -> 0x04');
+  assert.equal(rep.addr.cityPostcodes, 3, '1010 в двух городах и 2020 -> 0x31');
+  assert.equal(rep.addr.centres, 60, 'у каждого города точка-центр');
+  assert.equal(rep.addr.allStreets, 123, 'все улицы страны ведут на имя в городе');
   assert.equal(rep.hit, rep.seen, 'дерево POI с заголовком слоя находится от ключа 1');
   assert.ok(!rep.bad);
 });
@@ -130,4 +141,24 @@ test('блок 1: набор стран ведёт на запись стран�
   assert.equal(rep.countrySet[0].code, 113);
   assert.equal(rep.stats, A.STAT_IDS.length);
   assert.equal(rep.tableCount.root, rep.tableCount.found);
+});
+
+// Буква длиннее 50 имён: индекс второго уровня с приставкой, каждый список
+// начинается с ветви (как NZ 3383:1227 — ведущий 0xda, приставка 'A').
+test('буква длиннее 50 имён: индекс второго уровня, все списки достижимы', () => {
+  const items = [];
+  for (let i = 0; i < 70; i++) items.push({ name: 'L' + String.fromCharCode(65 + (i % 7)) + 'X' + String(i).padStart(2, '0') });
+  for (let i = 0; i < 10; i++) items.push({ name: 'B' + i });
+  const r = A.names('t', items, 'owner');
+  const subs = r.records.filter((x) => x.sym === 't:idx:L');
+  assert.equal(subs.length, 1);
+  const t = subs[0].tokens();
+  assert.equal(t[0].u8, 0xda);
+  assert.equal(t[4].raw.toString(), 'L');
+  const lists = r.records.filter((x) => /:l\d+$/.test(x.sym));
+  const reached = new Set();
+  for (const ix of r.records.filter((x) => /idx/.test(x.sym))) {
+    for (const tk of ix.tokens()) if (typeof tk.ref === 'string') reached.add(tk.ref.split('#')[0]);
+  }
+  for (const l of lists) assert.ok(reached.has(l.sym), 'список ' + l.sym + ' без ветви');
 });

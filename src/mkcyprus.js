@@ -144,7 +144,8 @@ function mkcyprus(outDir, opt) {
   // адресный справочник: те же города и улицы, что в XAC (тот же граф, те же классы)
   const addr = litaddr.modelFromRoads(JSON.parse(fs.readFileSync(roadsFile, 'utf8')),
                                       o.places || JSON.parse(fs.readFileSync('out/cyp/places_geo.json', 'utf8')),
-                                      { classes: o.classes });
+                                      { classes: o.classes,
+                                        addrs: litaddr.readAddresses(o.pbf || 'out/cyp/cyprus-latest.osm.pbf') });
   const factory = ['LIT', 'LIT2', 'LIT3', 'LIT4'].map((d) => path.join(root, 'pkgdb', d));
   const l = cyplit.build(pois, { from: litPath, addr, factory });
   log('адреса: городов ' + l.cities + ', улиц ' + l.streets + '; части: корень ' + l.parts.root +

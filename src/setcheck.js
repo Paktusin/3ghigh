@@ -246,7 +246,10 @@ function checkOwnLit(file) {
     const r = litvm.run(schema, m.blocks[i], 0, { blk: i, limit: 4000000 });
     if (r.why === 'данные кончились' && r.pos === m.blocks[i].length) stops++;
     else bad.push(i + ': ' + r.why + ' на ' + r.pos + ' из ' + m.blocks[i].length);
-    const list = litpoi.poisOf(schema, m.blocks[i], i);
+    // лист POI начинается записью-тайлом 0x23; точки-центры городов (0x24 в
+    // блоках городов) — часть адресного справочника, а не дерева POI
+    const isLeaf = (keyed(i).els[0] || {}).type === 0x23;
+    const list = isLeaf ? litpoi.poisOf(schema, m.blocks[i], i) : [];
     if (list.length) leaves++;
     for (const x of list) {
       pois++;
@@ -256,6 +259,7 @@ function checkOwnLit(file) {
   // спуск от корня по рамке вокруг каждой сотой точки
   let seen = 0, hit = 0;
   for (let i = 1; i < m.blocks.length; i++) {
+    if ((keyed(i).els[0] || {}).type !== 0x23 && rootRec && rootRec.type === 1) continue;
     const list = litpoi.poisOf(schema, m.blocks[i], i);
     for (let k = 0; k < list.length; k += 100) {
       const q = list[k]; seen++;

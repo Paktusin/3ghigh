@@ -206,7 +206,7 @@ function buildAddr(pois, o, tpl, cap, slots) {
   return { buf: litfile.build({ head: tpl.head, ttd: tpl.ttd, blocks: list }),
            leaves: used.length, pois: used.reduce((a, l) => a + l.pois, 0),
            node: r.node.bytes.length, nodeBlk: N, poiHeader: H, countryBlk: C,
-           cities: dir.stats.cities, streets: dir.stats.streets,
+           cities: dir.stats.cities, streets: dir.stats.streets, postcodes: dir.stats.postcodes,
            bytes: list.reduce((a, b) => a + b.length, 0),
            parts: { root: list[0].length, tables: fac ? sizeOf(1, EU_TABLE_LAST_BLOCK + 1) : 0,
                     poi: sizeOf(H === null ? N : H, C), addr: sizeOf(C, total) } };
@@ -295,6 +295,8 @@ function verify(buf, r, pois) {
             rep.poisBack !== r.pois || rep.hit !== rep.seen || rep.poiPath === false ||
             (rep.countrySet && (!rep.countrySet.length || rep.countrySet.some((c) => !c.ok) ||
                                 rep.tableCount.root !== rep.tableCount.found)) ||
+            (rep.addr && ((rep.addr.postcodes || 0) !== (r.postcodes || 0) ||
+                          (rep.addr.centres || 0) !== r.cities || (rep.addr.allStreets || 0) !== r.streets)) ||
             (rep.addr && (rep.addr.errors.length > 0 || rep.addr.cities.length !== r.cities ||
                           rep.addr.streets !== r.streets));
   return rep;
@@ -313,6 +315,9 @@ function report(rep, r, log) {
     log('адреса: корень -> «' + a.countryName.join(', ') + '» -> страна ' + a.code + ' ' + a.iso.join('/') +
         ' -> городов ' + a.cities.length + ' из ' + r.cities + ' -> улиц ' + a.streets + ' из ' + r.streets +
         (a.errors.length ? ', ошибок ' + a.errors.length + ': ' + a.errors.slice(0, 3).join('; ') : ''));
+    log('  индексы страны -> 0x04: ' + (a.postcodes || 0) + ' из ' + (r.postcodes || 0) +
+        '; индексы в городах -> 0x31: ' + (a.cityPostcodes || 0) + '; точки-центры 0x24: ' + (a.centres || 0) +
+        ' из ' + r.cities + '; все улицы страны -> имя в городе: ' + (a.allStreets || 0) + ' из ' + r.streets);
   }
   if (rep.countrySet) {
     log('набор стран (0x18/7000): ' + rep.countrySet.map((c) => c.code + ' -> (' + c.pos + ')' + (c.ok ? '' : ' НЕ 0x02')).join(', ') +
@@ -341,7 +346,8 @@ if (require.main === module) {
     const A = require('./litaddr');
     opt.addr = A.modelFromRoads(JSON.parse(fs.readFileSync(flag('roads', 'out/cyp/roads.geojson'), 'utf8')),
                                 JSON.parse(fs.readFileSync(flag('places', 'out/cyp/places_geo.json'), 'utf8')),
-                                { classes: flag('classes', 'motorway,motorway_link,trunk,trunk_link,primary,primary_link').split(',') });
+                                { classes: flag('classes', 'motorway,motorway_link,trunk,trunk_link,primary,primary_link').split(','),
+                                  addrs: require('./litaddr').readAddresses(pbf) });
     opt.factory = ['LIT', 'LIT2', 'LIT3', 'LIT4'].map((d) => path.join(flag('maps', 'maps'), 'pkgdb', d));
   }
   const r = build(pois, opt);
