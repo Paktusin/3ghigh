@@ -200,6 +200,84 @@ function layer(sym, o) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Таблица 0x18 корня (0x54/0x40): записи «номер u32, блоб». Ведущий 0x92.
+//
+// id 7000 — набор стран ввода цели (CountrySet): у EU 46 записей, по одной на
+// страну, и у каждой первые 4 байта — позиция её записи 0x02 (46 из 46 сошлись
+// с блоками стран из списков корня). Кипра там нет. id 10000…10118 — для
+// каждой страны статистика символов по видам имён (u16 n, затем n пар
+// «u16 символ, u32 сколько раз»): буквы, которые предлагает клавиатура.
+
+function t18(sym, id, blob) {
+  return { sym, n: 0, tokens: () => [{ u8: 0x92 }, { u32: id }, { u16: blob.length }, { raw: blob }] };
+}
+
+// Позиция (блок, ключ) в 4 байтах: u16 младшие биты блока, u16 (старшие биты
+// блока << 13 | ключ) — так лежат все 46 заводских (AL: 00 95 20 00 = 65685).
+function pos4(blk, key) {
+  const b = Buffer.alloc(4);
+  b.writeUInt16BE(blk & 0xffff, 0);
+  b.writeUInt16BE(((blk >>> 16) << 13) | (key || 0), 2);
+  return b;
+}
+
+// Запись набора стран (216 байт). Раскладка по 46 заводским:
+//   0 позиция страны, 4 код, 6 = 0x3a, 8 = 0x205, 10 автокод (4), 14 код
+//   базы (4), 18 ISO2 (4), 24 ISO3 (8), 32 имя (20), 52 своё имя (20),
+//   72 латиницей (24), 104 центр (s32 x, y), 112 мин, 120 макс — в единицах
+//   карты (у IE центр — Дублин), 128 локаль (`en_GB`), 208 телефонный код.
+// Смысл 212…215 не установлен (у IE `B`, у GR `AL`) — пишем нули.
+function countryRecord(o) {
+  const b = o.template ? Buffer.from(o.template) : Buffer.alloc(216);
+  const put = (at, len, str) => { b.fill(0, at, at + len); b.write(str, at, len, 'utf8'); };
+  pos4(o.blk, 0).copy(b, 0);
+  b.writeUInt16BE(o.code, 4);
+  b.writeUInt16BE(o.f3a, 6);
+  b.writeUInt16BE(o.lang, 8);
+  put(10, 4, o.car); put(14, 4, o.cc); put(18, 4, o.iso2); b.fill(0, 22, 24);
+  put(24, 8, o.iso3); put(32, 20, o.name); put(52, 20, o.name); put(72, 24, o.name);
+  b.fill(0, 96, 104);
+  const xy = [o.center, o.min, o.max];
+  xy.forEach((p, i) => { b.writeInt32BE(p[0], 104 + i * 8); b.writeInt32BE(p[1], 108 + i * 8); });
+  put(128, 80, o.locale || 'en_GB');
+  put(208, 4, o.phone || '');
+  b.fill(0, 212, 216);
+  return b;
+}
+
+// Статистика символов: позиция страны, u16 n, n × (u16 символ, u32 счёт).
+function spellStats(blk, names) {
+  const cnt = new Map();
+  for (const n of names) for (const ch of n) {
+    const c = ch.codePointAt(0);
+    if (c < 0x10000) cnt.set(c, (cnt.get(c) || 0) + 1);
+  }
+  const cs = [...cnt.keys()].sort((a, b) => a - b);
+  const b = Buffer.alloc(6 + cs.length * 6);
+  pos4(blk, 0).copy(b, 0);
+  b.writeUInt16BE(cs.length, 4);
+  cs.forEach((c, i) => { b.writeUInt16BE(c, 6 + i * 6); b.writeUInt32BE(cnt.get(c), 8 + i * 6); });
+  return b;
+}
+
+// Какие имена в какой статистике. Виды — по w3 грамматики (3 — индексы,
+// 4 — города, 7 — улицы); прочее сопоставлено по набору символов у AT
+// (10003/10010/10109 — только цифры). Это догадка.
+const STAT_IDS = [10000, 10003, 10004, 10005, 10006, 10007, 10008, 10009, 10010,
+                  10013, 10017, 10101, 10105, 10109, 10118];
+function statNames(id, s) {
+  const digits = ['0123456789'];
+  switch (id) {
+    case 10003: case 10010: case 10109: return digits;
+    case 10004: case 10005: case 10105: return s.cities;
+    case 10007: case 10008: case 10009: return s.streets.length ? s.streets : s.cities;
+    case 10006: return s.cities.concat(s.streets);
+    case 10013: case 10017: case 10101: case 10118: return s.pois.length ? s.pois : s.cities;
+    default: return s.cities.concat(s.streets, s.pois);
+  }
+}
+
 // Готовые байты записей (перенос): занимают keys ключей.
 function verbatim(sym, bytes, keys) {
   return { sym, n: 0, keys, bytes };
@@ -556,6 +634,6 @@ function walk(get, opt) {
   return res;
 }
 
-module.exports = { modelFromRoads, walk, namesUnder, entriesFrom, encode, root, list, index, country, city, street, layer, verbatim,
+module.exports = { t18, pos4, countryRecord, spellStats, statNames, STAT_IDS, modelFromRoads, walk, namesUnder, entriesFrom, encode, root, list, index, country, city, street, layer, verbatim,
                    layout, assemble, transplant, names, directory, anchor, bboxOf, prefix,
                    CY_NAMES, LIST_MAX, DIRECT_MAX };

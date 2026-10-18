@@ -111,24 +111,45 @@ function factoryParts(dirs) {
   const g1 = f.get(1);
   const first = g1.els.find((e) => e.key === EU_TABLE_FIRST);
   if (!first || first.type !== 0x18) throw new Error('заводской LIT: в (1, 2961) не таблица 0x18');
-  const b1 = f.L.block(f.cat[1]);
-  const tail = b1.subarray(first.at - 1);              // от ведущего байта до конца, с 0x80
+  // Набор стран (0x18, id 7000) — в блоке 1: 46 записей EU; образец для
+  // Кипра — Ирландия (en_GB, 0x3a = 2, 0x205 = 5, как у нашей записи страны).
+  const set = g1.els.filter((e) => e.type === 0x18 && e.f['21'] === 7000);
+  const ie = set.map((e) => Buffer.from(e.f['20'])).find((b) => b.readUInt16BE(4) === 17);
   const tables = [];
   for (let i = 2; i <= EU_TABLE_LAST_BLOCK; i++) tables.push(f.L.block(f.cat[i]));
   const hb = f.L.block(f.cat[EU_POI_HEADER]);
   return {
     root: { f206: r0.f['206'], f2e: r0.f['2e'], f85: r0.f['85'], f217: r0.f['217'], f86: r0.f['86'],
             tableCount: r0.f['40'] },
-    langs, tail: { bytes: tail, keys: g1.next - EU_TABLE_FIRST },
+    langs, block1: g1.next - EU_TABLE_FIRST, countryTemplate: ie,
     tables, header: { schema: f.schema, block: hb },
   };
+}
+
+// Записи блока 1: набор стран (7000) и статистики символов для Кипра.
+function countrySet(A, model, C, pois, template) {
+  const xs = [], ys = [];
+  for (const p of model.places) { xs.push(p.x); ys.push(p.y); }
+  for (const st of model.streets) for (const q of st.pts) { xs.push(q[0]); ys.push(q[1]); }
+  const cap = model.places.find((p) => /^(NICOSIA|LEFKOSIA)$/.test(p.name));
+  const min = [Math.min(...xs), Math.min(...ys)], max = [Math.max(...xs), Math.max(...ys)];
+  const center = cap ? [cap.x, cap.y] : [Math.round((min[0] + max[0]) / 2), Math.round((min[1] + max[1]) / 2)];
+  const rec = A.countryRecord({ template, blk: C, code: model.code, f3a: 2, lang: 5,
+                                car: model.iso2, cc: model.cc || model.iso2, iso2: model.iso2,
+                                iso3: model.iso3, name: 'CYPRUS', center, min, max,
+                                locale: 'en_GB', phone: '357' });
+  const names = { cities: model.places.map((p) => p.name),
+                  streets: model.streets.map((x) => x.name),
+                  pois: pois.map((p) => p.name).filter(Boolean) };
+  return [A.t18('set:CY', 7000, rec)].concat(
+    A.STAT_IDS.map((id) => A.t18('stat:' + id, id, A.spellStats(C, A.statNames(id, names)))));
 }
 
 function buildAddr(pois, o, tpl, cap, slots) {
   const A = require('./litaddr');
   const fac = o.factory ? factoryParts(o.factory) : null;
   const blocks = [];
-  let next = 1;
+  let next = 2;                                      // блок 1 — набор стран, всегда наш
   if (fac) next = EU_TABLE_LAST_BLOCK + 1;
   const H = fac ? next++ : null;
   const N = next++;
@@ -151,16 +172,21 @@ function buildAddr(pois, o, tpl, cap, slots) {
     const nm = i === 0 ? all : [A.CY_NAMES[code] || 'CYPRUS'];
     return A.list('cn' + i, nm.map((name) => ({ name, target: country })), { direct: true, owner: null });
   });
+  const set = countrySet(A, o.addr, C, pois, fac && fac.countryTemplate);
+  const tableCount = set.length + (fac ? fac.root.tableCount - fac.block1 : 0);
   const rootRec = A.root(Object.assign({ f206: Math.floor(Date.now() / 1000), f2e: 1962872095,
                                          f85: 128, f217: 1499, f86: 37, tableCount: 0 },
                                        fac ? fac.root : {}, {
     langs, poi: H === null ? null : [H, 0], cat: null,
-    table: fac ? [1, 0] : null,
+    table: [1, 0], tableCount,
   }));
   blocks.push({ blk: 0, origin: { x: 0, y: 0 }, width: 24, records: [rootRec].concat(lists) });
+  // Блок 1 — начало общей таблицы 0x18: вместо 46 стран EU и их статистик —
+  // Кипр (набор стран 7000 и статистика символов 10000…10118). Без него
+  // CLwtCountryDetails не находит страну («couldn't find CountrySet»), и ввод
+  // города остаётся без букв и без списка.
+  blocks.push({ blk: 1, origin: { x: 0, y: 0 }, width: 24, records: set });
   if (fac) {
-    blocks.push({ blk: 1, origin: { x: 0, y: 0 }, width: 24,
-                  records: [Object.assign(A.verbatim('tables', fac.tail.bytes, fac.tail.keys), { ended: true })] });
     fac.tables.forEach((b, i) => blocks.push({ blk: 2 + i, bytes: b }));
     blocks.push({ blk: H, bytes: A.transplant(fac.header.schema, fac.header.block, EU_POI_HEADER,
                                               { blk: H, map: () => [N, 0] }) });
@@ -239,13 +265,36 @@ function verify(buf, r, pois) {
       const box = { x0: q.x - 72, y0: q.y - 111, x1: q.x + 72, y1: q.y + 111 };
       if (T.collect(get, nodeBlk, rootKey, box, new Set(), 0).size) rep.hit++;
     }
-    if (r.countryBlk !== undefined) rep.addr = A.walk(ks.get);
+    if (r.countryBlk !== undefined) {
+      rep.addr = A.walk(ks.get);
+      // набор стран: запись 7000 ведёт на запись 0x02 с тем же кодом, у каждой
+      // статистики позиция — та же страна; 0x40 корня = записей 0x18 подряд с (1, 0)
+      const root = ks.get(0).map.get(0);
+      const t = ks.get(1).els.filter((e) => e.type === 0x18);
+      const set = t.filter((e) => e.f['21'] === 7000).map((e) => Buffer.from(e.f['20']));
+      const posOf = (b) => [b.readUInt16BE(0) | ((b.readUInt16BE(2) >>> 13) << 16), b.readUInt16BE(2) & 0x1fff];
+      rep.countrySet = set.map((b) => {
+        const p = posOf(b);
+        const c = p[0] < m.blocks.length ? ks.get(p[0]).map.get(p[1]) : null;
+        return { pos: p, code: b.readUInt16BE(4), ok: !!c && c.type === 2 && c.f['201'] === b.readUInt16BE(4) };
+      });
+      rep.stats = t.filter((e) => e.f['21'] >= 10000).length;
+      let n = 0;
+      for (let i = 1; i < m.blocks.length; i++) {
+        const els = ks.get(i).els;
+        if (!els.length || els.some((e) => e.type !== 0x18)) break;
+        n += els.length;
+      }
+      rep.tableCount = { root: root.f['40'], found: n };
+    }
     ks.L.vols.forEach((v) => fs.closeSync(v.fd));
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
   rep.bad = rep.keysOk !== rep.blocks || rep.parsedOk !== rep.blocks || rep.leavesEnd !== r.leaves ||
             rep.poisBack !== r.pois || rep.hit !== rep.seen || rep.poiPath === false ||
+            (rep.countrySet && (!rep.countrySet.length || rep.countrySet.some((c) => !c.ok) ||
+                                rep.tableCount.root !== rep.tableCount.found)) ||
             (rep.addr && (rep.addr.errors.length > 0 || rep.addr.cities.length !== r.cities ||
                           rep.addr.streets !== r.streets));
   return rep;
@@ -264,6 +313,11 @@ function report(rep, r, log) {
     log('адреса: корень -> «' + a.countryName.join(', ') + '» -> страна ' + a.code + ' ' + a.iso.join('/') +
         ' -> городов ' + a.cities.length + ' из ' + r.cities + ' -> улиц ' + a.streets + ' из ' + r.streets +
         (a.errors.length ? ', ошибок ' + a.errors.length + ': ' + a.errors.slice(0, 3).join('; ') : ''));
+  }
+  if (rep.countrySet) {
+    log('набор стран (0x18/7000): ' + rep.countrySet.map((c) => c.code + ' -> (' + c.pos + ')' + (c.ok ? '' : ' НЕ 0x02')).join(', ') +
+        '; статистик символов ' + rep.stats + '; записей таблицы: в корне ' + rep.tableCount.root +
+        ', подряд с (1,0) ' + rep.tableCount.found);
   }
   log(rep.bad ? 'ЕСТЬ РАСХОЖДЕНИЯ' : 'расхождений нет');
 }

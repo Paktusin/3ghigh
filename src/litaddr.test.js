@@ -99,3 +99,35 @@ test('с заводскими частями: таблицы, заголовок
   assert.equal(rep.addr.cities.length, 60);
   assert.ok(!rep.bad);
 });
+
+// Позиция в записях набора стран: как у заводской Албании, 00 95 20 00 = (65685, 0).
+test('позиция страны в 4 байтах: старшие биты блока над ключом', () => {
+  assert.equal(A.pos4(65685, 0).toString('hex'), '00952000');
+  assert.equal(A.pos4(31, 0).toString('hex'), '001f0000');
+});
+
+test('запись набора стран и статистика символов', () => {
+  const rec = A.countryRecord({ blk: 97, code: 113, f3a: 2, lang: 5, car: 'CY', cc: 'CY', iso2: 'CY',
+                                iso3: 'CYP', name: 'CYPRUS', center: [2403000, 3909000],
+                                min: [2333757, 3849579], max: [2475188, 3955269], phone: '357' });
+  assert.equal(rec.length, 216);
+  assert.equal(rec.readUInt16BE(4), 113);
+  assert.equal(rec.toString('latin1', 24, 27), 'CYP');
+  assert.equal(rec.toString('latin1', 32, 38), 'CYPRUS');
+  assert.equal(rec.readInt32BE(104), 2403000);
+  assert.equal(rec.toString('latin1', 208, 211), '357');
+  const st = A.spellStats(97, ['AB', 'BA ']);
+  assert.equal(st.readUInt16BE(4), 3);                       // ' ', 'A', 'B'
+  assert.deepEqual([st.readUInt16BE(6), st.readUInt32BE(8)], [0x20, 1]);
+  assert.deepEqual([st.readUInt16BE(12), st.readUInt32BE(14)], [0x41, 2]);
+});
+
+test('блок 1: набор стран ведёт на запись страны, счёт таблицы сходится', { skip: !haveMaps }, () => {
+  const r = CL.build(pois(300), { template: CL.template(LIT), addr: model(), cap: 1500 });
+  const rep = CL.verify(r.buf, r, pois(300));
+  assert.equal(rep.countrySet.length, 1);
+  assert.ok(rep.countrySet[0].ok);
+  assert.equal(rep.countrySet[0].code, 113);
+  assert.equal(rep.stats, A.STAT_IDS.length);
+  assert.equal(rep.tableCount.root, rep.tableCount.found);
+});
