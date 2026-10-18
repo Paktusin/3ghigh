@@ -771,9 +771,133 @@ function listFlags(nTris, edge) {
   return f;
 }
 
+// ── подписи: реестр S1, строки S2, словарь кластера ───────────────────────
+//
+// Реестр S1 [off0, off1) — «таблица имён» (итератор FUN_0924f284, разбор в
+// пакете CGdbTileElementBag::initNameLists FUN_08cab28c): u16 число записей,
+// затем поля с тегом «старшая тетрада — поле, младшая — длина»:
+//   0x02 u16  тип щита (0 — имя; 354, 174, 173… — номер дороги)
+//   0x16 u32 u16  номер имени (nid) и индекс строки в S2
+//   0x21 u8   класс подписи (у линий завода = E0 элемента)
+//   0x32 u16  номер элемента в тайле
+//   0x41 u8   (не разобрано)
+//   0xF0      конец записи: (элемент, текущие поля) — поля держатся до смены
+// Строки S2 [off1, off2) — CGdbTile::get_string (FUN_08cac2b8): u16 число,
+// затем записи; перед каждой 256-й — длина «сверхблока», перед каждой 16-й —
+// длина блока (байт; 255 → u16; у последнего блока/сверхблока 0), запись —
+// байт (общий префикс с предыдущей строкой << 5 | длина хвоста; хвост 31 → u16)
+// и хвост. Затем CGdbTile::uncompressString (FUN_08cac1e4): каждый байт строки
+// с конца сверяется со словарём кластера (FUN_08cb0264): 255 u16 концов
+// записей, строки с +510; код 1 → [0, t[0]), код c ≥ 2 → [t[c−2], t[c−1]);
+// пустая запись — байт остаётся как есть. Строки — UTF-8, прописные.
+function readNames(blob, dict) {
+  const off0 = blob.readUInt16BE(0), off1 = blob.readUInt16BE(2), off2 = blob.readUInt16BE(4);
+  const recs = [];
+  let p = off0;
+  if (off1 - off0 >= 2) {
+    const cnt = blob.readUInt16BE(p); p += 2;
+    const cur = { f02: 0, nid: 0, nameIdx: -1, b21: 0, b41: 0 };
+    let el = -1;
+    while (p < off1 && recs.length < cnt) {
+      const t = blob[p++], hi = t >> 4, lo = t & 15;
+      if (t === 0x02) { cur.f02 = blob.readUInt16BE(p); p += 2; }
+      else if (t === 0x16) { cur.nid = blob.readUInt32BE(p); cur.nameIdx = blob.readUInt16BE(p + 4); p += 6; }
+      else if (t === 0x21) cur.b21 = blob[p++];
+      else if (t === 0x32) { el = blob.readUInt16BE(p); p += 2; }
+      else if (t === 0x41) cur.b41 = blob[p++];
+      else if (hi === 15) { recs.push(Object.assign({ el }, cur)); el = -1; }
+      else p += lo;
+    }
+  }
+  const strings = [];
+  p = off1;
+  if (off2 - off1 >= 2) {
+    const cnt = blob.readUInt16BE(p); p += 2;
+    let prev = Buffer.alloc(0);
+    const len = () => { let L = blob[p++]; if (L === 255) { L = blob.readUInt16BE(p); p += 2; } return L; };
+    for (let i = 0; i < cnt; i++) {
+      if (i % 256 === 0) len();
+      if (i % 16 === 0) len();
+      const h = blob[p++];
+      let n = h & 0x1f;
+      if (n === 0x1f) { n = blob.readUInt16BE(p); p += 2; }
+      prev = Buffer.concat([prev.subarray(0, h >> 5), blob.subarray(p, p + n)]);
+      p += n;
+      strings.push(prev);
+    }
+  }
+  const expand = buf => {
+    if (!dict || dict.length < 510) return buf;
+    const arr = [...buf];
+    const end = i => dict.readUInt16BE(i * 2);
+    for (let i = arr.length - 1; i >= 0; i--) {
+      const c = arr[i];
+      if (!c) continue;
+      const a = c === 1 ? 0 : end(c - 2), e = end(c - 1);
+      if (e > a) { const rep = [...dict.subarray(510 + a, 510 + e)]; arr.splice(i, 1, ...rep); i += rep.length; }
+    }
+    return Buffer.from(arr);
+  };
+  const text = strings.map(b => expand(b).toString('utf8'));
+  for (const r of recs) r.text = text[r.nameIdx];
+  return { records: recs, strings: text };
+}
+
+// Записать подписи: named = [[номер элемента, {text, hi, f02}, E0]…].
+// Строки — по возрастанию (hi, текст), nid = hi<<24 | номер; записи реестра
+// — по nid, как у завода (там они тоже по возрастанию nid).
+function encodeNames(named) {
+  if (!named.length) return { s1: Buffer.from([0, 0]), s2: Buffer.from([0, 0]) };
+  const keys = new Map();
+  for (const [, lb] of named) keys.set(lb.hi + '|' + lb.f02 + '|' + lb.text, lb);
+  const uniq = [...keys.values()].sort((a, b) => (a.hi - b.hi) || (a.text < b.text ? -1 : a.text > b.text ? 1 : a.f02 - b.f02));
+  const idx = new Map(uniq.map((lb, i) => [lb.hi + '|' + lb.f02 + '|' + lb.text, i]));
+  const recs = named.map(([el, lb, e9]) => ({ el, i: idx.get(lb.hi + '|' + lb.f02 + '|' + lb.text), lb, e9 }))
+    .sort((a, b) => (a.i - b.i) || (a.el - b.el));
+  const s1 = [];
+  const u16 = v => [v >> 8 & 0xff, v & 0xff];
+  s1.push(...u16(recs.length), 0x02, 0, 0);
+  let f02 = 0, b21 = 0, cur = -1;
+  for (const r of recs) {
+    if (r.lb.f02 !== f02) { s1.push(0x02, ...u16(r.lb.f02)); f02 = r.lb.f02; }
+    if (r.i !== cur) {
+      const nid = ((r.lb.hi << 24) | (r.i + 1)) >>> 0;
+      s1.push(0x16, nid >>> 24, nid >> 16 & 0xff, nid >> 8 & 0xff, nid & 0xff, ...u16(r.i));
+      cur = r.i;
+    }
+    if (r.e9 !== b21) { s1.push(0x21, r.e9 & 0xff); b21 = r.e9; }
+    s1.push(0x32, ...u16(r.el), 0xf0);
+  }
+  // S2: блоки по 16 и сверхблоки по 256 с длинами; префиксное сжатие ≤ 7
+  const ents = [];
+  let prev = Buffer.alloc(0);
+  for (const lb of uniq) {
+    const b = Buffer.from(lb.text, 'utf8');
+    let pre = 0;
+    while (pre < 7 && pre < b.length && pre < prev.length && b[pre] === prev[pre]) pre++;
+    const tail = b.subarray(pre);
+    ents.push(Buffer.concat([tail.length < 31 ? Buffer.from([pre << 5 | tail.length]) : Buffer.from([pre << 5 | 31, ...u16(tail.length)]), tail]));
+    prev = b;
+  }
+  const lenBytes = L => (L < 255 ? [L] : [255, ...u16(L)]);
+  const out = [...u16(ents.length)];
+  for (let sb = 0; sb < ents.length; sb += 256) {
+    const blocks = [];
+    for (let bk = sb; bk < Math.min(sb + 256, ents.length); bk += 16) {
+      const body = Buffer.concat(ents.slice(bk, Math.min(bk + 16, ents.length)));
+      const last = bk + 16 >= ents.length;
+      blocks.push(Buffer.concat([Buffer.from(lenBytes(last ? 0 : body.length)), body]));
+    }
+    const sbody = Buffer.concat(blocks);
+    const lastSb = sb + 256 >= ents.length;
+    out.push(...lenBytes(lastSb ? 0 : sbody.length), ...sbody);
+  }
+  return { s1: Buffer.from(s1), s2: Buffer.from(out) };
+}
+
 module.exports = {
   readElements, readBits, rawPoint, encodeLine, encodeLinePoints, encodeFrame, writeRaw,
-  polyTriangles, encodePolygon, listFlags, FACE,
+  polyTriangles, encodePolygon, listFlags, FACE, readNames, encodeNames,
   openGdb, openBuffer, read, header, levelHead, locateTable, levelGrid, slotFor, cluster,
   tileHeader, tilePoints, encodePoints, roundTrip, lonOfCell, latOfCell,
   CELL_X, CELL_Y, TILE_HEAD, TABLE_AT, LEVEL_SHIFT_AT, FRAME_X0, FRAME_Y0, gridW, keyOrigin,

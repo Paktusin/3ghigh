@@ -28,6 +28,7 @@ const path = require('path');
 const { mkxac, readHouses, buildContainer } = require('./mkxac');
 const fldb = require('./fldb');
 const gdbgen = require('./gdbgen');
+const roads = require('./xacroads');
 const atlascut = require('./atlascut');
 const placesMod = require('./places');
 const cyplit = require('./cyplit');
@@ -102,8 +103,8 @@ function mkcyprus(outDir, opt) {
   const j = JSON.parse(fs.readFileSync(roadsFile, 'utf8'));
   const lines = j.features.filter((f) => f.geometry && f.geometry.type === 'LineString').map((f) => {
     const p = f.properties || {};
-    return { name: ((p.ref || p.name || '') + '').trim().slice(0, 15) || 'CY',
-             cls: p.highway || null, pts: f.geometry.coordinates };
+    // имя улицы и номер дороги раздельно: подписи GDB (имя на L0–L2, номер на L0–L4)
+    return { name: roads.roadName(p), ref: p.ref || null, cls: p.highway || null, pts: f.geometry.coordinates };
   });
   const v = gdbgen.volumeFromRoads(lines, { name: 'EJ211',
                                             levels: gdbgen.EUROPE_LEVELS.map((_, i) => i) });

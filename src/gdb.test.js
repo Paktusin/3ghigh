@@ -282,3 +282,40 @@ test('многоугольники: список треугольников пи
     assert.deepEqual(back.tris, tris, 'W' + W + (simple ? ' прямой' : ' сжатый'));
   }
 });
+
+// ── подписи ────────────────────────────────────────────────────────────────
+
+test('подписи: заводской прибрежный тайл Кипра — суша 0x5D подписана «CYP»', () => {
+  const blob = Buffer.from('009800aa00b20002e0281d0000005d0eaf172125c87b25bf9e78f2dfc00002324be905008062087f27741efa324847f56f10723ade231a5bdd40dea028807d86ad01f108fa0a1f059406d818301d00000050108f00000000c5400003c540a3e8c1d4a0e5b7b6a249b3d49dcdb1de9721aaea97717946c6e56b00ddd55904f4c54988fb0d410b04e9370b05192e431101000111010000000200010200001681dce4f100002128320000f00001000003435950', 'hex');
+  const n = gm.readNames(blob, null);
+  assert.equal(n.records.length, 1);
+  assert.deepEqual([n.records[0].el, n.records[0].text, n.records[0].nid, n.records[0].b21], [0, 'CYP', 0x81dce4f1, 0x28]);
+});
+
+test('подписи: словарь кластера раскрывает коды, пустые записи оставляют байт', () => {
+  // словарь: код 1 → «AGIOS », код 2 → «ODOS »
+  const dict = Buffer.alloc(510 + 11);
+  dict.writeUInt16BE(6, 0); dict.writeUInt16BE(11, 2);
+  for (let i = 2; i < 255; i++) dict.writeUInt16BE(11, i * 2);
+  dict.write('AGIOS ODOS ', 510, 'latin1');
+  const { s1, s2 } = gm.encodeNames([[0, { text: '\x01NIKOLAOS', hi: 0x60, f02: 0 }, 8], [1, { text: '\x02X', hi: 0x60, f02: 0 }, 8]]);
+  const blob = Buffer.concat([Buffer.alloc(10), s1, s2]);
+  blob.writeUInt16BE(10, 0); blob.writeUInt16BE(10 + s1.length, 2); blob.writeUInt16BE(10 + s1.length + s2.length, 4);
+  const n = gm.readNames(blob, dict);
+  assert.deepEqual(n.records.map(r => [r.el, r.text]), [[0, 'AGIOS NIKOLAOS'], [1, 'ODOS X']]);
+});
+
+test('подписи: реестр и строки пишутся и читаются обратно, блоки по 16 и 256', () => {
+  const named = [];
+  for (let i = 0; i < 600; i++) named.push([i, { text: 'ODOS ' + String(i).padStart(4, '0'), hi: 0x60, f02: 0 }, 8]);
+  named.push([3, { text: 'A1', hi: 0x32, f02: 354 }, 24]);
+  const { s1, s2 } = gm.encodeNames(named);
+  const blob = Buffer.concat([Buffer.alloc(10), s1, s2]);
+  blob.writeUInt16BE(10, 0); blob.writeUInt16BE(10 + s1.length, 2); blob.writeUInt16BE(10 + s1.length + s2.length, 4);
+  const n = gm.readNames(blob, null);
+  assert.equal(n.records.length, 601);
+  const got = new Map(n.records.filter(r => !r.f02).map(r => [r.el, r.text]));
+  for (let i = 0; i < 600; i++) assert.equal(got.get(i), 'ODOS ' + String(i).padStart(4, '0'));
+  const sign = n.records.find(r => r.f02);
+  assert.deepEqual([sign.el, sign.text, sign.f02, sign.nid >>> 24, sign.b21], [3, 'A1', 354, 0x32, 24]);
+});

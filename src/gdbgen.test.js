@@ -561,3 +561,24 @@ test('слои: лес, вода и ступени рельефа ложатся
     assert.equal(seen.has((0x60 | (10 << 8)) + '/255'), lv >= 4, 'L' + lv + ': ступень 100 м');
   }
 });
+
+// ── подписи ────────────────────────────────────────────────────────────────
+
+test('подписи: имя улицы на L0…L2, номер дороги на L0…L4, E0 подписи = E0 линии', () => {
+  const lines = [{ name: 'Λεωφόρος Μακαρίου', ref: 'A1', cls: 'motorway', pts: [[33.30, 35.16], [33.31, 35.17]] }];
+  for (const lv of [0, 1, 2, 3, 4, 5]) {
+    const v = V(lines, { levels: [lv] });
+    const g = gm.openBuffer(v.gdb, v.gd2);
+    const got = [];
+    for (const cl of v.map.levels[lv].clusters) {
+      for (const t of cl.tiles) {
+        if (t.off === v.map.emptyTile.off) continue;
+        for (const r of G.readTileRoads(gm.read(g, t.off, t.size), { W: t.attr, simple: !!t.b10 }).roads) {
+          for (const lb of r.labels) { got.push(lb.text + '/' + lb.f02); assert.equal(lb.b21, r.e9); }
+        }
+      }
+    }
+    const want = new Set([...(lv <= 2 ? ['LEOFOROS MAKARIOY/0'] : []), ...(lv <= 4 ? ['A1/354'] : [])]);
+    assert.deepEqual(new Set(got), want, 'L' + lv);
+  }
+});

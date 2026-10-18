@@ -140,16 +140,18 @@ function tileBlob(roads = [], fmt = L0_FORMAT, area = null) {
   const sorted = roads.map((r, i) => Object.assign({ i }, r))
     .sort((a, b) => (a.e9 - b.e9) || (attrOf(a) - attrOf(b)) || (a.i - b.i));
   let e9 = null, attr = null;
+  const named = [];                          // [номер элемента, подпись, E0]
   sorted.forEach((r, k) => {
     const pre = [];
     if (k === 0) pre.push(0xc1);
     if (r.e9 !== e9) { pre.push(0xe0, r.e9); e9 = r.e9; attr = null; }
     const a = attrOf(r);
     const pts = r.pts || r.points.map(p => [p.x, p.y]);
+    for (const lb of r.labels || []) named.push([elems.length, lb, r.e9]);
     elems.push(Buffer.concat([Buffer.from(pre), gm.encodeLine(pts, a === attr ? null : a, f)]));
     attr = a;
   });
-  const s1 = Buffer.from([0, 0]), s2 = Buffer.from([0, 0]);
+  const { s1, s2 } = gm.encodeNames(named);
   const stream = Buffer.concat(elems);
   const off0 = gm.TILE_HEAD + stream.length, off1 = off0 + s1.length, off2 = off1 + s2.length;
   if (off2 > MAX_BLOB) throw new Error('блоб тайла не влезает в u16: ' + off2 + ' б');
@@ -422,9 +424,14 @@ function emptyTile(fmt) { return tileBlob([], fmt); }
 function readTileRoads(blob, opts = {}) {
   const r = gm.readElements(blob, { W: opts.W || 16, simple: !!opts.simple, points: true });
   if (!r.ok) throw new Error('поток элементов не сошёлся с off0: ' + r.end + ' ≠ ' + r.off0);
-  const roads = r.els.filter(e => e.type === 1).map(e => ({
-    points: e.pts.map(([x, y]) => ({ x, y })), cls: e.cls, attr: e.attr, e9: e.e9, head: e.head,
-  }));
+  const nm = gm.readNames(blob, opts.dict);
+  const byEl = new Map();
+  for (const rc of nm.records) { if (!byEl.has(rc.el)) byEl.set(rc.el, []); byEl.get(rc.el).push({ text: rc.text, f02: rc.f02, b21: rc.b21, nid: rc.nid }); }
+  const roads = [];
+  r.els.forEach((e, i) => {
+    if (e.type !== 1) return;
+    roads.push({ points: e.pts.map(([x, y]) => ({ x, y })), cls: e.cls, attr: e.attr, e9: e.e9, head: e.head, labels: byEl.get(i) || [] });
+  });
   return { count: blob.readUInt16BE(6), els: r.els, roads };
 }
 
@@ -553,22 +560,6 @@ function build(spec) {
       entries[slot] = { off, sz: blob.length };
       placed.push({ cx: c.cx, cy: c.cy, slot, off, size: blob.length, tiles: recs });
     }
-    // Заводские кластеры как есть (опыт): записи тайлов байт в байт, кроме
-    // смещения тайла, затем словарь имён кластера; его длина — второе поле слота.
-    for (const c of (p.L.raw || [])) {
-      const slot = c.cy * p.W + c.cx;
-      if (entries[slot].sz) continue;
-      const recs = Buffer.from(c.records);
-      const moved = new Map();
-      for (let o = 0; o < recs.length; o += CLUSTER_REC) {
-        const old = recs.readUInt32BE(o + 11);
-        if (!moved.has(old)) moved.set(old, put(c.tiles.get(old)));
-        recs.writeUInt32BE(moved.get(old), o + 11);
-      }
-      const blob = Buffer.concat([recs, c.dict]);
-      entries[slot] = { off: put(blob), sz: blob.length, tiles: recs.length / CLUSTER_REC, dict: c.dict.length };
-      placed.push({ cx: c.cx, cy: c.cy, slot, raw: true });
-    }
     // Пустых слотов у завода нет: «морской» кластер — свои ключи, все тайлы
     // ссылаются на общий пустой (у Европы и Австралии непусты все слоты).
     const lw = p.L.lw === undefined ? p.L.potX : p.L.lw, lh = p.L.lh === undefined ? p.L.potY : p.L.lh;
@@ -694,6 +685,30 @@ function tileSizes(L) {
   return out;
 }
 
+// ── подписи ────────────────────────────────────────────────────────────────
+//
+// Как у завода (docs/formats/gdb.md, «Подписи»): имя улицы — запись реестра
+// S1 с номером имени 0x60xxxxxx и полем 0x02 = 0; номер дороги — отдельная
+// запись с номером 0x32xxxxxx/0x33xxxxxx и полем 0x02 = тип щита (354 —
+// автомагистраль «A71», 174 — национальная дорога «74»). Имена — на L0…L2,
+// номера — на L0…L4 (на L3–L4 у завода почти одни номера).
+const SIGN_MOTORWAY = { hi: 0x32, f02: 354 }, SIGN_NATIONAL = { hi: 0x33, f02: 174 };
+const R = require('./xacroads');
+
+function labelsFor(lv, ln) {
+  const out = [];
+  if (ln.cls === 'river') return out;
+  const name = ln.name ? R.latinize(ln.name) : '';
+  if (lv <= 2 && name && name !== 'CY') out.push({ text: name, hi: 0x60, f02: 0 });
+  if (lv <= 4 && ln.ref) {
+    for (const ref of String(ln.ref).split(';').map(x => R.latinize(x).replace(/\s+/g, '')).filter(Boolean)) {
+      const sg = /^A\d/.test(ref) ? SIGN_MOTORWAY : SIGN_NATIONAL;
+      out.push({ text: ref, hi: sg.hi, f02: sg.f02 });
+    }
+  }
+  return out;
+}
+
 // Класс линии и значение E0 по уровню — сняты с заводского тома: какие классы
 // и E0 лежат на известных дорогах Баварии (A9 у Ингольштадта, B13, B16; ж/д
 // Мюнхен—Нюрнберг вдоль A9 — класс 8), см. docs/formats/gdb.md.
@@ -783,7 +798,7 @@ function roadsToLevel(lines, opts = {}) {
     for (const run of splitGrid(cells, CW, CH)) {
       const k = run.gx + ',' + run.gy;
       if (!perCluster.has(k)) perCluster.set(k, { cx: run.gx, cy: run.gy, pieces: [] });
-      perCluster.get(k).pieces.push({ cells: run.pts, cls: c.cls, e9: c.e9 });
+      perCluster.get(k).pieces.push({ cells: run.pts, cls: c.cls, e9: c.e9, labels: Array.isArray(ln) ? [] : labelsFor(lvNr, ln) });
     }
   }
 
@@ -800,7 +815,7 @@ function roadsToLevel(lines, opts = {}) {
       }
     }
   }
-  let landTiles = 0;
+  let landTiles = 0, unlabeled = 0;
 
   // 2. на каждый кластер — самый крупный размер тайла, при котором блобы влезают
   const clusters = [];
@@ -820,74 +835,79 @@ function roadsToLevel(lines, opts = {}) {
       }).filter(Boolean);
     const cland = cut(land);
     const clayers = layers.map(ly => Object.assign({}, ly, { rings: cut(ly.rings) })).filter(ly => ly.rings.length);
-    for (const [lw, lh] of tileSizes(L)) {
-      // размер кластера в таблице уровня — u16: не больше 3449 записей по 19 байт
-      if ((L.potX - lw) + (L.potY - lh) > 11) break;
-      const f = tileFormat(L, lw, lh);
-      const step = [1 << lw, 1 << lh];
-      const byTile = new Map();
-      let out = 0;
-      for (const pc of c.pieces) {
-        for (const run of splitGrid(pc.cells, step[0], step[1])) {
-          const tx = run.gx * step[0], ty = run.gy * step[1];
-          const raw = [];
-          for (const [x, y] of run.pts) {
-            const q = [Math.min(f.X, Math.max(0, Math.round((x - tx) * L.cellX / u))),
-                       Math.min(f.Y, Math.max(0, Math.round((y - ty) * L.cellY / u)))];
-            const last = raw[raw.length - 1];
-            if (!last || last[0] !== q[0] || last[1] !== q[1]) raw.push(q);
-          }
-          // на грубых уровнях единица крупная: кусок может схлопнуться в точку
-          if (raw.length < 2) { out++; continue; }
-          for (let s = 0; s < raw.length - 1; s += 0xfffe) {
-            const k = tx + ',' + ty;
-            if (!byTile.has(k)) byTile.set(k, { tx, ty, roads: [] });
-            byTile.get(k).roads.push({ pts: raw.slice(s, s + 0xffff), cls: pc.cls, e9: pc.e9 });
-          }
-        }
-      }
-      // суша: каждый тайл кластера, которого касаются кольца или который
-      // целиком внутри суши
-      const areas = new Map();
-      if (cland.length) {
-        for (let ix = 0; ix < (1 << (L.potX - lw)); ix++) {
-          for (let iy = 0; iy < (1 << (L.potY - lh)); iy++) {
-            const tx = c.cx * CW + (ix << lw), ty = c.cy * CH + (iy << lh);
-            const tx0 = tx * L.cellX / u, ty0 = ty * L.cellY / u;
-            const near = cland.filter(r => r.bbox[0] <= tx0 + f.X && r.bbox[2] >= tx0 && r.bbox[1] <= ty0 + f.Y && r.bbox[3] >= ty0);
-            let a;
-            if (near.length) a = landArea(shiftRings(near, tx0, ty0), f.X, f.Y);
-            else a = windingAt(cland.map(r => r.whole), tx0 + f.X / 2, ty0 + f.Y / 2) ? { full: true } : { empty: true };
-            if (a.empty) continue;
-            // слои поверх суши: ступени рельефа, лес, застройка, вода …
-            a.layers = [];
-            for (const ly of clayers) {
-              const nearL = ly.rings.filter(r => r.bbox[0] <= tx0 + f.X && r.bbox[2] >= tx0 && r.bbox[1] <= ty0 + f.Y && r.bbox[3] >= ty0);
-              let q;
-              if (nearL.length) q = regionTris(shiftRings(nearL, tx0, ty0), f.X, f.Y);
-              else q = windingAt(ly.rings.map(r => r.whole), tx0 + f.X / 2, ty0 + f.Y / 2) ? { full: true } : { empty: true };
-              if (q.empty) continue;
-              a.layers.push({ attr: ly.attr, e9: ly.e9, tris: q.full ? rectTris(f.X, f.Y) : q.inside });
+    // если ни один размер не влез — вторая попытка без подписей (лучше дороги
+    // без имён, чем без дорог)
+    for (let attempt = 0; attempt < 2 && !chosen; attempt++) {
+      if (attempt === 1) { for (const pc of c.pieces) pc.labels = []; unlabeled++; }
+      for (const [lw, lh] of tileSizes(L)) {
+        // размер кластера в таблице уровня — u16: не больше 3449 записей по 19 байт
+        if ((L.potX - lw) + (L.potY - lh) > 11) break;
+        const f = tileFormat(L, lw, lh);
+        const step = [1 << lw, 1 << lh];
+        const byTile = new Map();
+        let out = 0;
+        for (const pc of c.pieces) {
+          for (const run of splitGrid(pc.cells, step[0], step[1])) {
+            const tx = run.gx * step[0], ty = run.gy * step[1];
+            const raw = [];
+            for (const [x, y] of run.pts) {
+              const q = [Math.min(f.X, Math.max(0, Math.round((x - tx) * L.cellX / u))),
+                         Math.min(f.Y, Math.max(0, Math.round((y - ty) * L.cellY / u)))];
+              const last = raw[raw.length - 1];
+              if (!last || last[0] !== q[0] || last[1] !== q[1]) raw.push(q);
             }
-            const k = tx + ',' + ty;
-            areas.set(k, a);
-            if (!byTile.has(k)) byTile.set(k, { tx, ty, roads: [] });
+            // на грубых уровнях единица крупная: кусок может схлопнуться в точку
+            if (raw.length < 2) { out++; continue; }
+            for (let s = 0; s < raw.length - 1; s += 0xfffe) {
+              const k = tx + ',' + ty;
+              if (!byTile.has(k)) byTile.set(k, { tx, ty, roads: [] });
+              byTile.get(k).roads.push({ pts: raw.slice(s, s + 0xffff), cls: pc.cls, e9: pc.e9, labels: pc.labels });
+            }
           }
         }
+        // суша: каждый тайл кластера, которого касаются кольца или который
+        // целиком внутри суши
+        const areas = new Map();
+        if (cland.length) {
+          for (let ix = 0; ix < (1 << (L.potX - lw)); ix++) {
+            for (let iy = 0; iy < (1 << (L.potY - lh)); iy++) {
+              const tx = c.cx * CW + (ix << lw), ty = c.cy * CH + (iy << lh);
+              const tx0 = tx * L.cellX / u, ty0 = ty * L.cellY / u;
+              const near = cland.filter(r => r.bbox[0] <= tx0 + f.X && r.bbox[2] >= tx0 && r.bbox[1] <= ty0 + f.Y && r.bbox[3] >= ty0);
+              let a;
+              if (near.length) a = landArea(shiftRings(near, tx0, ty0), f.X, f.Y);
+              else a = windingAt(cland.map(r => r.whole), tx0 + f.X / 2, ty0 + f.Y / 2) ? { full: true } : { empty: true };
+              if (a.empty) continue;
+              // слои поверх суши: ступени рельефа, лес, застройка, вода …
+              a.layers = [];
+              for (const ly of clayers) {
+                const nearL = ly.rings.filter(r => r.bbox[0] <= tx0 + f.X && r.bbox[2] >= tx0 && r.bbox[1] <= ty0 + f.Y && r.bbox[3] >= ty0);
+                let q;
+                if (nearL.length) q = regionTris(shiftRings(nearL, tx0, ty0), f.X, f.Y);
+                else q = windingAt(ly.rings.map(r => r.whole), tx0 + f.X / 2, ty0 + f.Y / 2) ? { full: true } : { empty: true };
+                if (q.empty) continue;
+                a.layers.push({ attr: ly.attr, e9: ly.e9, tris: q.full ? rectTris(f.X, f.Y) : q.inside });
+              }
+              const k = tx + ',' + ty;
+              areas.set(k, a);
+              if (!byTile.has(k)) byTile.set(k, { tx, ty, roads: [] });
+            }
+          }
+        }
+        let fits = true;
+        const tiles = [];
+        for (const t of byTile.values()) {
+          let blob;
+          const area = areas.get(t.tx + ',' + t.ty) || null;
+          try { blob = tileBlob(t.roads, f, area); } catch (e) { fits = false; break; }
+          if (blob.length > budget) { fits = false; break; }
+          tiles.push({
+            ix: (t.tx - c.cx * CW) >> lw, iy: (t.ty - c.cy * CH) >> lh,
+            lw, lh, blob, attr: f.W, b10: f.simple ? 1 : 0, lines: t.roads.length, land: area ? (area.full ? 'full' : 'coast') : null,
+          });
+        }
+        if (fits) { chosen = { lw, lh, tiles, out }; break; }
       }
-      let fits = true;
-      const tiles = [];
-      for (const t of byTile.values()) {
-        let blob;
-        const area = areas.get(t.tx + ',' + t.ty) || null;
-        try { blob = tileBlob(t.roads, f, area); } catch (e) { fits = false; break; }
-        if (blob.length > budget) { fits = false; break; }
-        tiles.push({
-          ix: (t.tx - c.cx * CW) >> lw, iy: (t.ty - c.cy * CH) >> lh,
-          lw, lh, blob, attr: f.W, b10: f.simple ? 1 : 0, lines: t.roads.length, land: area ? (area.full ? 'full' : 'coast') : null,
-        });
-      }
-      if (fits) { chosen = { lw, lh, tiles, out }; break; }
     }
     if (!chosen) { skipped += c.pieces.length; continue; }
     dropped += chosen.out;
@@ -901,7 +921,7 @@ function roadsToLevel(lines, opts = {}) {
   const elements = clusters.reduce((a, c) => a + c.tiles.reduce((b, t) => b + t.lines, 0), 0);
   const sizes = {};
   for (const c of clusters) sizes['2^' + c.lw + 'x2^' + c.lh] = (sizes['2^' + c.lw + 'x2^' + c.lh] || 0) + 1;
-  return { level: L, tiles, clusters: clusters.length, skipped, dropped, elements, sizes, landTiles };
+  return { level: L, tiles, clusters: clusters.length, skipped, dropped, elements, sizes, landTiles, unlabeled };
 }
 
 // Классы дорог по уровням — та же пирамида, что у завода: чем мельче масштаб,
@@ -940,6 +960,7 @@ function defaultLand() {
 }
 
 const DEFAULT_AREAS = 'out/cyp/areas.json', DEFAULT_BANDS = 'out/cyp/bands.json';
+
 const readJson = (f, k) => { try { return JSON.parse(fs.readFileSync(f, 'utf8'))[k]; } catch (e) { return null; } };
 
 function volumeFromRoads(lines, opts = {}) {
@@ -958,8 +979,7 @@ function volumeFromRoads(lines, opts = {}) {
   }
   const levels = EUROPE_LEVELS.map((L, i) => (stats.has(i)
     ? stats.get(i).level
-    : Object.assign({}, L, { clusters: [] })))
-    .map((L, i) => (opts.raw && opts.raw[i] ? Object.assign({}, L, { raw: opts.raw[i] }) : L));
+    : Object.assign({}, L, { clusters: [] })));
   const r = stats.get(want[0]);
   return Object.assign({}, build(Object.assign({}, opts, { levels })), {
     stat: r, stats: [...stats.values()],
@@ -996,7 +1016,7 @@ module.exports = {
   PROLOGUE, SIG, VERSION, FRAME, MAGIC, MAX_BLOB, FRAME_ELEMENT, EUROPE_LEVELS, CLUSTER_REC,
   tileBlob, emptyTile, readTileRoads, tileFormat, classFor, splitGrid, mortonIndex, clusterBlob, build,
   degToTile, degToTileL, cellX, cellY, cellXL, cellYL, roadsToLevel, volumeFromRoads,
-  linesForLevel, LEVEL_CLASSES, TILE_CELLS, TILE_SIZES, tileSizes, component,
+  linesForLevel, labelsFor, LEVEL_CLASSES, TILE_CELLS, TILE_SIZES, tileSizes, component,
 };
 
 if (require.main === module) {
@@ -1021,11 +1041,7 @@ if (require.main === module) {
     const j = JSON.parse(fs.readFileSync(roadsFile, 'utf8'));
     lines = j.features.filter(f => f.geometry && f.geometry.type === 'LineString').map(f => {
       const p = f.properties || {};
-      return {
-        name: ((p.ref || p.name || '') + '').trim().slice(0, 15) || 'CY',
-        cls: p.highway || null,
-        pts: f.geometry.coordinates,
-      };
+      return { name: R.roadName(p), ref: p.ref || null, cls: p.highway || null, pts: f.geometry.coordinates };
     });
   }
 
@@ -1047,6 +1063,7 @@ if (require.main === module) {
       ', тайлов ' + String(st.tiles).padStart(4) + ', кластеров ' + String(st.clusters).padStart(3) +
       ', линий ' + st.elements + (st.skipped ? ', пропущено ' + st.skipped : '') +
       (st.dropped ? ', схлопнулось ' + st.dropped : '') + ', тайлов с сушей ' + st.landTiles +
+      (st.unlabeled ? ', кластеров без подписей ' + st.unlabeled : '') +
       '  размер тайла: ' + Object.entries(st.sizes).map(([k, n]) => k + '×' + n).join(' '));
   }
   console.log('область уровней до ' + v.regionEnd + ', том ' + v.gdb.length + ' б (' +

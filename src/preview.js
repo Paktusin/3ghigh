@@ -85,16 +85,21 @@ function levelData(g, h, li, box) {
   const u = 1 << hd.shift;
   const chunks = [], count = { p: {}, l: {} }, stat = { tiles: tiles.length, bad: 0, illegal: 0, els: 0 };
   for (const t of tiles) {
-    let r;
-    try { r = gm.readElements(gm.read(g, t.off, t.size), { W: t.attr, simple: !!t.b10, points: true }); }
-    catch (e) { stat.bad++; continue; }
+    let r, names = new Map();
+    try {
+      const blob = gm.read(g, t.off, t.size);
+      r = gm.readElements(blob, { W: t.attr, simple: !!t.b10, points: true });
+      // подписи линий: имя (поле 0x02 = 0) раньше номера дороги
+      for (const rc of gm.readNames(blob, null).records) if (!names.has(rc.el) || !rc.f02) names.set(rc.el, rc.text);
+    } catch (e) { stat.bad++; continue; }
     if (!r.ok) stat.bad++;
     const geo = ([x, y]) => [
       Math.round(gm.lonOfCellL((t.x - k0.x0) + (x * u) / hd.cellX, hd.cellX) * 1e5),
       Math.round(gm.latOfCellL((t.y - k0.y0) + (y * u) / hd.cellY, hd.cellY) * 1e5),
     ];
-    const p = {}, l = {}, all = [];
-    for (const el of r.els) {
+    const p = {}, l = {}, all = [], n = [];
+    const seenName = new Set();
+    for (const [ei, el] of r.els.entries()) {
       if (!el.pts) continue;
       stat.els++;
       if (el.type === 0) {
@@ -109,6 +114,8 @@ function levelData(g, h, li, box) {
         const pts = el.pts.map(geo);
         all.push(...pts);
         (l[el.cls] || (l[el.cls] = [])).push(pts);
+        const nm = names.get(ei);
+        if (nm && !seenName.has(nm)) { seenName.add(nm); n.push([...pts[pts.length >> 1], nm]); }
       }
     }
     if (!all.length) continue;
@@ -117,7 +124,7 @@ function levelData(g, h, li, box) {
     const rel = v => [v[0] - b[0], v[1] - b[1]];
     for (const k of Object.keys(p)) p[k] = p[k].flatMap(rel);
     for (const k of Object.keys(l)) l[k] = l[k].map(pts => pts.flatMap(rel));
-    chunks.push({ b, p, l });
+    chunks.push({ b, p, l, n: n.map(([x, y, t]) => [x - b[0], y - b[1], t]) });
   }
   return { chunks, count, stat };
 }
@@ -365,7 +372,7 @@ function chunkPaths(li) {
       for (const q of ls) { P.moveTo(ox + q[0], oy + q[1]); for (let i = 2; i < q.length; i += 2) P.lineTo(ox + q[i], oy + q[i + 1]); }
       l[k] = P;
     }
-    return { b: c.b, p, l };
+    return { b: c.b, p, l, n: (c.n || []).map(([x, y, t]) => [ox + x, oy + y, t]) };
   });
 }
 const snap = document.createElement('canvas');
@@ -396,6 +403,16 @@ function draw() {
     cx.strokeStyle = s.color; cx.lineWidth = s.width / 2 * unit; for (const c of vis) if (c.l[k]) cx.stroke(c.l[k]);
   }
   cx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  // подписи линий из реестра S1/S2 — только при крупном масштабе, без поворота
+  if (!off.has('names') && view.s * kx > 0.02) {
+    cx.font = '11px sans-serif'; cx.fillStyle = '#222'; cx.strokeStyle = 'rgba(255,255,255,0.8)'; cx.lineWidth = 3;
+    const used = [];
+    for (const c of vis) for (const [x0, y0, t] of c.n) {
+      const x = x0 * kx * view.s + view.x, y = view.y - y0 * view.s;
+      if (x < 0 || y < 0 || x > w || y > h || used.some(q => Math.abs(q[0] - x) < 60 && Math.abs(q[1] - y) < 14)) continue;
+      used.push([x, y]); cx.strokeText(t, x, y); cx.fillText(t, x, y);
+    }
+  }
   if (M.pois) {
     const sx = v => v * kx * view.s + view.x, sy = v => view.y - v * view.s;
     for (const p of M.pois.list) {
