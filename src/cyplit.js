@@ -293,9 +293,13 @@ function verify(buf, r, pois) {
       // и FUN_08ccd098: код страны -> набор стран 7000 -> имя в списке языка
       const LC = require('./litcity');
       const em = LC.cities([dir], 'CYPRUS');
-      const byCode = LC.countryByCode([dir], 113, 3);
+      const nl = ks.get(0).els.filter((x) => x.type === 1).length;   // корень и его витки
+      const codes = [];
+      for (let l = 0; l < nl; l++) codes.push(LC.countryByCode([dir], 113, l));
+      const bad = codes.filter((c) => c.why !== 'ок');
       rep.emul = { cities: em.cities.length, notCity: em.cities.filter((c) => c.type !== 3).length,
-                   byCode: byCode.why, name: byCode.name };
+                   byCode: bad.length ? bad[0].why : 'ок', name: codes.map((c) => c.name).filter(Boolean)[1] || codes[0].name,
+                   langs: codes.length, langsOk: codes.length - bad.length };
     }
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -330,7 +334,7 @@ function report(rep, r, log) {
         ' из ' + r.cities + '; все улицы страны -> имя в городе: ' + (a.allStreets || 0) + ' из ' + r.streets);
   }
   if (rep.emul) log('путь прошивки (litcity): CYPRUS -> городов ' + rep.emul.cities + ' (не 0x03: ' + rep.emul.notCity +
-                    '); FUN_08ccd098(113, язык 3) -> «' + rep.emul.name + '» — ' + rep.emul.byCode);
+                    '); FUN_08ccd098(113): языков ' + rep.emul.langsOk + ' из ' + rep.emul.langs + ' (напр. «' + rep.emul.name + '») — ' + rep.emul.byCode);
   if (rep.countrySet) {
     log('набор стран (0x18/7000): ' + rep.countrySet.map((c) => c.code + ' -> (' + c.pos + ')' + (c.ok ? '' : ' НЕ 0x02')).join(', ') +
         '; статистик символов ' + rep.stats + '; записей таблицы: в корне ' + rep.tableCount.root +
