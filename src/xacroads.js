@@ -65,6 +65,16 @@ const FRC = {
   service: 7, track: 7, pedestrian: 7,
 };
 
+// Биты 3…4 описателя — направление проезда (по коду: `kdv_calc`
+// `FUN_08ed3fdc` сравнивает `(описатель >> 3) & 3` со стороной вектора и при
+// `сторона + 1` берёт обратную; подбор цели с флагом 0x10 отбрасывает
+// значение 3, «проезда нет»). 0 — в обе стороны, 1 и 2 — одностороннее, какое
+// из них «по оцифровке», не установлено. OSM-признак `oneway` до сюда не
+// доезжает, поэтому все наши дороги — двусторонние: до 19.10 «первый простой
+// индекс» для FRC 0 и 1 был со значением 2, и 7194 безымянных ребра
+// магистралей и съездов оказались односторонними в случайную сторону.
+const twoWay = (v) => ((v >>> 3) & 3) === 0;
+
 // Первый «простой» индекс таблицы ATTRIBUTE для каждого FRC. Нулевое значение
 // не берём: это описатель без единого признака, и дорогой он быть не может.
 // В заводской таблице нулей нет вовсе (0 из 2048), так что правило ничего не
@@ -73,7 +83,7 @@ const FRC = {
 function attrByFrcNamed(attr) {
   const out = {};
   for (const i of xw.nameAttributes(attr)) {
-    if (!attr[i]) continue;
+    if (!attr[i] || !twoWay(attr[i])) continue;
     const frc = attr[i] & 7;
     if (out[frc] === undefined) out[frc] = i;
   }
@@ -83,7 +93,7 @@ function attrByFrcNamed(attr) {
 function attrByFrc(attr) {
   const out = {};
   for (const i of xw.simpleAttributes(attr)) {
-    if (!attr[i]) continue;
+    if (!attr[i] || !twoWay(attr[i])) continue;
     const frc = attr[i] & 7;
     if (out[frc] === undefined) out[frc] = i;
   }

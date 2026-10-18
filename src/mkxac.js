@@ -20,6 +20,8 @@
 //                    `HAUSNUMMERN`, `RASTERINFOS`
 //   EJ211_CY00_2.xac заглушка уровня 2 — так же поступает завод у 347 тайлов
 //   EJ211_0.ort      имена городов Кипра
+//   EJ211_0_3.b/.v, EJ211_0_4.b/.v, EJ211_4.b
+//                    файлы области L3 без блоков — без них не строится маршрут
 //
 // ── Про `.plz` и `.poi` ───────────────────────────────────────────────────
 // Эти два файла на страну КЛАДУТСЯ, хотя формат их мы не разбирали. Основание
@@ -35,8 +37,8 @@
 // форма пустого файла.
 //
 // ── Чего в контейнере нет ─────────────────────────────────────────────────
-// Уровней 3 и 4 (`.b`/`.v`): данных для них мы не собираем, и в строках
-// уровней стоит «данных нет».
+// Блоков уровней 2…4: данных для них мы не собираем, в строках уровней стоит
+// «данных нет», а файлы области L3 несут только оглавление и пустые места.
 //
 // На устройстве такой контейнер не проверялся ни разу.
 
@@ -57,7 +59,6 @@ const raster = require('./raster');
 const osmpbf = require('./osmpbf');
 
 const CYPRUS = 113;                 // код страны в шапке блока и в записи `LD`
-const ZF_SIZE = 112;                // пустой раздел ZF-NAMEN у заглушки уровня 2
 const NO_DATA = 0x7fffffff;
 const ALIGN = 2048;
 const align = (n) => Math.ceil(n / ALIGN) * ALIGN;
@@ -73,11 +74,86 @@ function rasterSection(bbox) {
                               label: 'RASTERINFOS', version: 0x00020000 });
 }
 
+// Пустой `ZF-NAMEN` в 112 байт — форма, а не данные: заводские заглушки
+// `_2.xac` (80 из 80 в контейнере `XAC`) и пустое место тайла `GR1T` в
+// `EJ211_7_3.b`/`_7_4.b` несут ровно эти байты (версия 3, одна служебная
+// запись). До 19.10 здесь писались 92 нуля.
+const EMPTY_ZF = Buffer.from(
+  '5a462d4e414d454e20202020202020200000005c00030000000000010000004c0000000c' +
+  '000000020000005800000004000000020000005c00000012363da0280000000000000070' +
+  '000000004453543d4e4f5f44000000000d000d0064dc013db4015f64d6e9fc013db4015f' +
+  'e9fb0000', 'hex');
+
 // Парный файл уровня 2: шапка плюс пустой `ZF-NAMEN`. Ровно так выглядят все
 // 347 заводских заглушек — 308 байт.
 function stubLevel2(code, name, index, built) {
   return tile.buildTile({ code, file: name, index, country: CYPRUS, built,
-                          zf: tile.section('ZF-NAMEN', Buffer.alloc(ZF_SIZE - 20)), blocks: [] });
+                          zf: Buffer.from(EMPTY_ZF), blocks: [] });
+}
+
+// ── Файлы области третьего уровня: `<П>_<i>_3.b/.v`, `<П>_<i>_4.b/.v`, `<П>_4.b`
+//
+// Их открывает DBM при подготовке маршрута, а не при запуске:
+// `prepare_full_scout` (`FUN_08eb4b00`) и `acdbm_load_binary_scout`
+// (`FUN_08eb3e6c`) зовут `load_layer_234` (`FUN_08ec8c24` → `FUN_08ec8a20`),
+// а та для области L3 стартового и целевого тайла — `FUN_08eafea4(fe, 3)`:
+// имя `%s_%d_%d.B`, загрузка `FUN_08eaf658` → `dbm_scan_file`. Нет файла —
+// ошибка, `load_layer_234 failed`, подготовка маршрута падает, маршрута нет.
+// Флаг «полный скаут без подгрузки» (`FUN_08eb4c78`) тоже требует
+// «l3_group: layer 3 loaded». Уровень 4 ищется в `%s_%d_4.B`, без него — в
+// общем `%s_4.B`.
+//
+// Раскладка снята с заводских файлов (Австралия, Европа):
+//   `VERYSMART XAC HD`: u32 длина = 4 + n·W, u16 1, u16 n, затем n записей
+//     .b (W = 16): u16 тайл, u16 0, u32 смещение данных (сразу за его
+//                  `SMART XAC HEADER`), u32 размер VEKTORBLOCK, u32 размер ZF-NAMEN
+//     .v (W = 12): u16 тайл, u16 0, u32 смещение, u32 размер LAYER 1 VERWEISE
+//   далее по тайлу: `SMART XAC HEADER` (u32 4, u16 1, u16 тайл) и его разделы.
+// Тайл без блоков уровня у завода (GR1T, BE00, FI0R…) несёт в `.b` один
+// пустой `ZF-NAMEN`, в `.v` — только `SMART XAC HEADER`. Так и пишем: у нас
+// уровней 3 и 4 нет вовсе. Общий `_4.b` — как у Австралии, где уровня 4 нет:
+// только оглавление на все тайлы базы, записи нулевые.
+function verySmart(entries, W) {
+  const head = Buffer.alloc(24 + entries.length * W);
+  head.write('VERYSMART XAC HD', 0, 'latin1');
+  head.writeUInt32BE(4 + entries.length * W, 16);
+  head.writeUInt16BE(1, 20);
+  head.writeUInt16BE(entries.length, 22);
+  entries.forEach((e, k) => e.forEach((v, j) => {
+    const o = 24 + k * W + j * 4;
+    if (j === 0) head.writeUInt16BE(v, o); else head.writeUInt32BE(v, o);
+  }));
+  return head;
+}
+
+function smartHeader(tileNo) {
+  const b = Buffer.alloc(24);
+  b.write('SMART XAC HEADER', 0, 'latin1');
+  b.writeUInt32BE(4, 16);
+  b.writeUInt16BE(1, 20);
+  b.writeUInt16BE(tileNo, 22);
+  return b;
+}
+
+// Область из тайлов без блоков уровня: пара файлов .b/.v.
+function emptyAreaFiles(tiles) {
+  let at = 24 + tiles.length * 16;
+  const be = [], bp = [];
+  for (const t of tiles) {
+    at += 24;
+    be.push([t, at, 0, EMPTY_ZF.length]);
+    bp.push(smartHeader(t), EMPTY_ZF);
+    at += EMPTY_ZF.length;
+  }
+  let av = 24 + tiles.length * 12;
+  const ve = [], vp = [];
+  for (const t of tiles) { av += 24; ve.push([t, av, 0]); vp.push(smartHeader(t)); }
+  return { b: Buffer.concat([verySmart(be, 16)].concat(bp)),
+           v: Buffer.concat([verySmart(ve, 12)].concat(vp)) };
+}
+
+function globalL4(tileCount) {
+  return verySmart(Array.from({ length: tileCount }, () => [0, 0, 0, 0]), 16);
 }
 
 // Дома из извлечения `.osm.pbf`: точки и контуры зданий с номером и улицей.
@@ -343,6 +419,14 @@ function mkxac(opt) {
   }
   files.push({ name: name1 + '.xac', data: file1 });
   files.push({ name: prefix + '_' + code + '_2.xac', data: file2 });
+  // Область L3 номер 0 из одного тайла 0 (так объявлено в `L3 GRUPPEN`,
+  // `+0x50` шапки и `+0xb4` шапки тайла).
+  const area = emptyAreaFiles([0]);
+  for (const L of [3, 4]) {
+    files.push({ name: prefix + '_0_' + L + '.b', data: area.b });
+    files.push({ name: prefix + '_0_' + L + '.v', data: area.v });
+  }
+  files.push({ name: prefix + '_4.b', data: globalL4(1) });
   files.sort((a, b) => (a.name < b.name ? -1 : 1));
 
   const container = buildContainer(files, headSrc);
@@ -351,7 +435,8 @@ function mkxac(opt) {
 }
 
 module.exports = { mkxac, buildXah, buildContainer, strukturRecord, levelRow,
-                   rasterSection, stubLevel2, readHouses, CYPRUS };
+                   rasterSection, stubLevel2, readHouses, emptyAreaFiles, globalL4,
+                   EMPTY_ZF, CYPRUS };
 
 if (require.main === module) {
   const args = process.argv.slice(2);

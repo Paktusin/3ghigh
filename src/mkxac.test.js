@@ -85,3 +85,27 @@ test('контейнер FLDB собирается из файлов в памя
   assert.ok(db.dbinfo.indexOf('DB=1/1') >= 0, 'контейнер один, значит 1/1');
   require('fs').unlinkSync(tmp);
 });
+
+test('файлы области L3: оглавление VERYSMART и пустые места по заводскому образцу', () => {
+  const xac = require('./xac');
+  const a = M.emptyAreaFiles([0]);
+  // .b: оглавление на один тайл, затем SMART XAC HEADER и пустой ZF-NAMEN
+  assert.deepEqual(xac.sections(a.b).list.map((s) => s.name.trim()),
+                   ['VERYSMART XAC HD', 'SMART XAC HEADER', 'ZF-NAMEN']);
+  assert.equal(a.b.readUInt32BE(16), 4 + 16, 'длина оглавления');
+  assert.equal(a.b.readUInt16BE(22), 1, 'тайлов в области');
+  const off = a.b.readUInt32BE(28);
+  assert.equal(a.b.toString('latin1', off, off + 8), 'ZF-NAMEN', 'смещение — сразу за SMART XAC HEADER');
+  assert.equal(a.b.readUInt32BE(32), 0, 'блоков уровня нет');
+  assert.equal(a.b.readUInt32BE(36), 112, 'пустой ZF-NAMEN');
+  assert.equal(a.b.readUInt16BE(off - 2), 0, 'номер тайла в SMART XAC HEADER');
+  // .v: оглавление и SMART XAC HEADER без разделов, смещение — конец файла
+  assert.deepEqual(xac.sections(a.v).list.map((s) => s.name.trim()),
+                   ['VERYSMART XAC HD', 'SMART XAC HEADER']);
+  assert.equal(a.v.readUInt32BE(28), a.v.length);
+  assert.equal(a.v.readUInt32BE(32), 0);
+  for (const b of [a.b, a.v, M.globalL4(1)]) assert.equal(b.length % 4, 0, 'длины кратны 4');
+  assert.equal(M.globalL4(3).length, 24 + 3 * 16);
+  assert.equal(M.EMPTY_ZF.length, 112);
+  assert.equal(M.EMPTY_ZF.readUInt32BE(16) + 20, 112);
+});
