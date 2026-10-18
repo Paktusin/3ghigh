@@ -87,6 +87,8 @@ src/xar.js        архив стилей MapStyles: разделы, растр�
                   по классам GDB, значки POI
 src/preview.js    предпросмотр GDB в HTML (npm run preview): элементы читаются как у
                   прошивки, цвета и каймы — из MapStyles по индексу масштаба
+src/catalog.js    каталог стилей (npm run catalog): все значки POI по категориям, стили
+                  линий и площадей, растры архива, наши теги OSM для каждого вида
 src/nodes.js      узлы и связи из блоков v3/v4/v5, выгрузка в GeoJSON
 src/gjcheck.js    проверка GeoJSON и рисунок сети в терминале
 tools/ndrprobe/   SD-скрипт: состояния потоков ndr и журнал с зависшей машины

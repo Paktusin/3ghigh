@@ -417,7 +417,9 @@ test('грубые уровни: классы и E0 по уровню', () => {
   assert.deepEqual(G.classFor(0, 'residential'), { cls: 4, e9: 8 });
   assert.deepEqual(G.classFor(0, 'motorway_link'), { cls: 1, e9: 20 });
   assert.deepEqual(G.classFor(2, 'secondary'), { cls: 3, e9: 15 });
-  assert.deepEqual(G.classFor(5, 'primary'), { cls: 9, e9: 25 });
+  // класс 9 — река (GDB_FLUSS), дорогой на обзорных уровнях быть не может
+  assert.deepEqual(G.classFor(5, 'primary'), { cls: 2, e9: 30 });
+  assert.deepEqual(G.classFor(2, 'river'), { cls: 9, e9: 18 });
   assert.deepEqual(G.classFor(7, 'motorway'), { cls: 0, e9: 40 });
   assert.deepEqual(G.classFor(11, 'motorway'), { cls: 0, e9: 0xff });
 });

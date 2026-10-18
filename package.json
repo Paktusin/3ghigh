@@ -22,6 +22,7 @@
     "xah": "node src/xah.js",
     "roads": "node src/osm2geo.js out/cyp/roads.json out/cyp/roads.geojson",
     "sums": "node src/checksum.js out/cyprus",
-    "preview": "node src/preview.js out/cyprus"
+    "preview": "node src/preview.js out/cyprus",
+    "catalog": "node src/catalog.js"
   }
 }

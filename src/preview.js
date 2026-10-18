@@ -73,13 +73,15 @@ function tilesInBox(g, h, li, box) {
   return { hd, tiles: tiles.filter(t => !(empty && empty[1] > 1 && t.off === empty[0] && t.size < 64)) };
 }
 
-// Уровень → { polys: {attr: [плоский массив треугольников]}, lines: {класс: [[…]…]}, stat }
-// Координаты — целые 1e-5° (компактно и с запасом точности).
+// Уровень → куски по тайлам: { b: [x0,y0,x1,y1], p: {attr: [треугольники]},
+// l: {класс: [[линия]…]} } — координаты целые 1e-5°, от угла b (так короче).
+// Куски нужны странице, чтобы рисовать только видимое и собирать контуры
+// один раз.
 function levelData(g, h, li, box) {
   const { hd, tiles } = tilesInBox(g, h, li, box);
   const k0 = gm.keyOrigin(li);
   const u = 1 << hd.shift;
-  const polys = {}, lines = {}, stat = { tiles: tiles.length, bad: 0, illegal: 0, els: 0 };
+  const chunks = [], count = { p: {}, l: {} }, stat = { tiles: tiles.length, bad: 0, illegal: 0, els: 0 };
   for (const t of tiles) {
     let r;
     try { r = gm.readElements(gm.read(g, t.off, t.size), { W: t.attr, simple: !!t.b10, points: true }); }
@@ -89,6 +91,7 @@ function levelData(g, h, li, box) {
       Math.round(gm.lonOfCellL((t.x - k0.x0) + (x * u) / hd.cellX, hd.cellX) * 1e5),
       Math.round(gm.latOfCellL((t.y - k0.y0) + (y * u) / hd.cellY, hd.cellY) * 1e5),
     ];
+    const p = {}, l = {}, all = [];
     for (const el of r.els) {
       if (!el.pts) continue;
       stat.els++;
@@ -96,14 +99,25 @@ function levelData(g, h, li, box) {
         const q = gm.polyTriangles(el.pts, el.flags || []);
         stat.illegal += q.illegal;
         const key = '0x' + el.attr.toString(16);
-        const arr = polys[key] || (polys[key] = []);
-        for (const tri of q.tris) for (const p of tri) arr.push(...geo(p));
+        count.p[key] = (count.p[key] || 0) + q.tris.length;
+        const arr = p[key] || (p[key] = []);
+        for (const tri of q.tris) for (const pt of tri) { const v = geo(pt); arr.push(v); all.push(v); }
       } else if (el.type === 1) {
-        (lines[el.cls] || (lines[el.cls] = [])).push(el.pts.flatMap(geo));
+        count.l[el.cls] = (count.l[el.cls] || 0) + 1;
+        const pts = el.pts.map(geo);
+        all.push(...pts);
+        (l[el.cls] || (l[el.cls] = [])).push(pts);
       }
     }
+    if (!all.length) continue;
+    const b = [Math.min(...all.map(v => v[0])), Math.min(...all.map(v => v[1])),
+               Math.max(...all.map(v => v[0])), Math.max(...all.map(v => v[1]))];
+    const rel = v => [v[0] - b[0], v[1] - b[1]];
+    for (const k of Object.keys(p)) p[k] = p[k].flatMap(rel);
+    for (const k of Object.keys(l)) l[k] = l[k].map(pts => pts.flatMap(rel));
+    chunks.push({ b, p, l });
   }
-  return { polys, lines, stat };
+  return { chunks, count, stat };
 }
 
 function legend() {
@@ -249,18 +263,18 @@ function legend() {
   const d = M.data[lv];
   $('st').textContent = 'тайлов ' + d.stat.tiles + ', элементов ' + d.stat.els + (d.stat.bad ? ', не дочитано ' + d.stat.bad : '') + (d.stat.illegal ? ', запрещённых переходов ' + d.stat.illegal : '');
   $('lp').innerHTML = ''; $('ll').innerHTML = '';
-  for (const a of polyOrder(Object.keys(d.polys))) {
+  for (const a of polyOrder(Object.keys(d.count.p))) {
     const s = polyStyle(a), id = 'p' + a;
     const l = document.createElement('label');
-    l.innerHTML = '<input type="checkbox"' + (off.has(id) ? '' : ' checked') + '><span class="sw" style="background:' + s.color + '"></span>' + a + ' ' + s.name + '<span class="n">' + (d.polys[a].length / 6 | 0) + '</span>';
-    l.querySelector('input').onchange = e => { e.target.checked ? off.delete(id) : off.add(id); draw(); };
+    l.innerHTML = '<input type="checkbox"' + (off.has(id) ? '' : ' checked') + '><span class="sw" style="background:' + s.color + '"></span>' + a + ' ' + s.name + '<span class="n">' + d.count.p[a] + '</span>';
+    l.querySelector('input').onchange = e => { e.target.checked ? off.delete(id) : off.add(id); redraw(); };
     $('lp').append(l);
   }
-  for (const c of Object.keys(d.lines).sort((a, b) => a - b)) {
+  for (const c of Object.keys(d.count.l).sort((a, b) => a - b)) {
     const s = lineStyle(c), id = 'l' + c;
     const l = document.createElement('label');
-    l.innerHTML = '<input type="checkbox"' + (off.has(id) ? '' : ' checked') + '><span class="ln" style="border-color:' + s.color + '"></span>' + c + ' ' + s.name + '<span class="n">' + d.lines[c].length + '</span>';
-    l.querySelector('input').onchange = e => { e.target.checked ? off.delete(id) : off.add(id); draw(); };
+    l.innerHTML = '<input type="checkbox"' + (off.has(id) ? '' : ' checked') + '><span class="ln" style="border-color:' + s.color + '"></span>' + c + ' ' + s.name + '<span class="n">' + d.count.l[c] + '</span>';
+    l.querySelector('input').onchange = e => { e.target.checked ? off.delete(id) : off.add(id); redraw(); };
     $('ll').append(l);
   }
 }
@@ -273,48 +287,84 @@ function fit() {
   const s = Math.min(w / ((lon1 - lon0) * kx), h / (lat1 - lat0)) * 0.95 / 1e5;
   view = { s, x: w / 2 - ((lon0 + lon1) / 2 * 1e5) * kx * s, y: h / 2 + ((lat0 + lat1) / 2 * 1e5) * s };
 }
-const X = v => v * kx * view.s + view.x, Y = v => view.y - v * view.s;
+// Контуры собираются один раз на кусок и класс (Path2D в мировых единицах),
+// дальше их двигает и масштабирует преобразование холста; рисуются только
+// куски, попавшие в окно. Пока карту тянут, сдвигается готовый снимок.
+const paths = {};
+function chunkPaths(li) {
+  if (paths[li]) return paths[li];
+  return paths[li] = M.data[li].chunks.map(c => {
+    const [ox, oy] = c.b, p = {}, l = {};
+    for (const [a, t] of Object.entries(c.p)) {
+      const P = new Path2D();
+      for (let i = 0; i < t.length; i += 6) { P.moveTo(ox + t[i], oy + t[i + 1]); P.lineTo(ox + t[i + 2], oy + t[i + 3]); P.lineTo(ox + t[i + 4], oy + t[i + 5]); P.closePath(); }
+      p[a] = P;
+    }
+    for (const [k, ls] of Object.entries(c.l)) {
+      const P = new Path2D();
+      for (const q of ls) { P.moveTo(ox + q[0], oy + q[1]); for (let i = 2; i < q.length; i += 2) P.lineTo(ox + q[i], oy + q[i + 1]); }
+      l[k] = P;
+    }
+    return { b: c.b, p, l };
+  });
+}
+const snap = document.createElement('canvas');
 function draw() {
-  const dpr = devicePixelRatio || 1;
-  cv.width = cv.clientWidth * dpr; cv.height = cv.clientHeight * dpr;
-  cx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  cx.fillStyle = getComputedStyle(document.body).getPropertyValue('--bg'); cx.fillRect(0, 0, cv.clientWidth, cv.clientHeight);
-  const d = M.data[lv];
-  for (const a of polyOrder(Object.keys(d.polys))) {
+  const dpr = devicePixelRatio || 1, w = cv.clientWidth, h = cv.clientHeight;
+  if (cv.width !== w * dpr || cv.height !== h * dpr) { cv.width = w * dpr; cv.height = h * dpr; }
+  cx.setTransform(1, 0, 0, 1, 0, 0);
+  cx.fillStyle = getComputedStyle(document.body).getPropertyValue('--bg'); cx.fillRect(0, 0, cv.width, cv.height);
+  // видимая рамка в мировых единицах
+  const vx0 = (0 - view.x) / view.s / kx, vx1 = (w - view.x) / view.s / kx;
+  const vy1 = (view.y - 0) / view.s, vy0 = (view.y - h) / view.s;
+  const vis = chunkPaths(lv).filter(c => c.b[2] >= vx0 && c.b[0] <= vx1 && c.b[3] >= vy0 && c.b[1] <= vy1);
+  cx.setTransform(dpr * view.s * kx, 0, 0, -dpr * view.s, dpr * view.x, dpr * view.y);
+  const unit = 1 / (view.s * Math.sqrt(kx));
+  for (const a of polyOrder(Object.keys(M.data[lv].count.p))) {
     if (off.has('p' + a)) continue;
-    const t = d.polys[a]; cx.fillStyle = polyStyle(a).color; cx.beginPath();
-    for (let i = 0; i < t.length; i += 6) { cx.moveTo(X(t[i]), Y(t[i + 1])); cx.lineTo(X(t[i + 2]), Y(t[i + 3])); cx.lineTo(X(t[i + 4]), Y(t[i + 5])); cx.closePath(); }
-    cx.fill(); cx.strokeStyle = cx.fillStyle; cx.lineWidth = 0.5; cx.stroke();
+    // обводка в цвет заливки закрывает волосяные щели сглаживания между треугольниками
+    cx.fillStyle = cx.strokeStyle = polyStyle(a).color; cx.lineWidth = 0.8 * unit;
+    for (const c of vis) if (c.p[a]) { cx.fill(c.p[a]); cx.stroke(c.p[a]); }
   }
   cx.lineJoin = cx.lineCap = 'round';
-  for (const c of Object.keys(d.lines).sort((a, b) => b - a)) {
-    if (off.has('l' + c)) continue;
-    const s = lineStyle(c);
+  for (const k of Object.keys(M.data[lv].count.l).sort((a, b) => b - a)) {
+    if (off.has('l' + k)) continue;
+    const s = lineStyle(k);
     if (!s.width) continue;
-    cx.beginPath();
-    for (const p of d.lines[c]) { cx.moveTo(X(p[0]), Y(p[1])); for (let i = 2; i < p.length; i += 2) cx.lineTo(X(p[i]), Y(p[i + 1])); }
     // толщины в архиве — пиксели экрана MMI; здесь вдвое тоньше, чтобы обзор не слипался
-    if (s.casing) { cx.strokeStyle = s.casing; cx.lineWidth = s.cw / 2; cx.stroke(); }
-    cx.strokeStyle = s.color; cx.lineWidth = s.width / 2; cx.stroke();
+    if (s.casing) { cx.strokeStyle = s.casing; cx.lineWidth = s.cw / 2 * unit; for (const c of vis) if (c.l[k]) cx.stroke(c.l[k]); }
+    cx.strokeStyle = s.color; cx.lineWidth = s.width / 2 * unit; for (const c of vis) if (c.l[k]) cx.stroke(c.l[k]);
   }
+  cx.setTransform(1, 0, 0, 1, 0, 0);
 }
-$('lvl').onchange = e => { lv = e.target.value; sc = LVL_SCALE[lv] || 0; $('sc').value = sc; legend(); draw(); };
-$('sc').onchange = e => { sc = +e.target.value; legend(); draw(); };
+let queued = false;
+const redraw = () => { if (queued) return; queued = true; requestAnimationFrame(() => { queued = false; draw(); }); };
+$('lvl').onchange = e => { lv = e.target.value; sc = LVL_SCALE[lv] || 0; $('sc').value = sc; legend(); redraw(); };
+$('sc').onchange = e => { sc = +e.target.value; legend(); redraw(); };
 $('sc').value = sc;
 let drag = null;
-cv.onpointerdown = e => { drag = [e.clientX, e.clientY]; cv.setPointerCapture(e.pointerId); };
-cv.onpointerup = () => { drag = null; };
+let moved = [0, 0];
+cv.onpointerdown = e => {
+  drag = [e.clientX, e.clientY]; moved = [0, 0]; cv.setPointerCapture(e.pointerId);
+  snap.width = cv.width; snap.height = cv.height; snap.getContext('2d').drawImage(cv, 0, 0);
+};
+cv.onpointerup = () => { if (drag) { drag = null; redraw(); } };
 cv.onpointermove = e => {
   const r = cv.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
   $('info').textContent = (((px - view.x) / view.s / kx) / 1e5).toFixed(4) + '°E ' + (((view.y - py) / view.s) / 1e5).toFixed(4) + '°N';
-  if (!drag) return; view.x += e.clientX - drag[0]; view.y += e.clientY - drag[1]; drag = [e.clientX, e.clientY]; draw();
+  if (!drag) return;
+  const dx = e.clientX - drag[0], dy = e.clientY - drag[1];
+  view.x += dx; view.y += dy; moved[0] += dx; moved[1] += dy; drag = [e.clientX, e.clientY];
+  const dpr = devicePixelRatio || 1;
+  cx.fillStyle = getComputedStyle(document.body).getPropertyValue('--bg'); cx.fillRect(0, 0, cv.width, cv.height);
+  cx.drawImage(snap, moved[0] * dpr, moved[1] * dpr);
 };
 cv.onwheel = e => {
   e.preventDefault();
   const r = cv.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top, f = Math.exp(-e.deltaY * 0.0015);
-  view.x = px - (px - view.x) * f; view.y = py - (py - view.y) * f; view.s *= f; draw();
+  view.x = px - (px - view.x) * f; view.y = py - (py - view.y) * f; view.s *= f; redraw();
 };
-addEventListener('resize', draw);
+addEventListener('resize', redraw);
 fit(); legend(); draw();
 </script></body></html>`;
 }

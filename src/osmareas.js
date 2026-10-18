@@ -12,18 +12,23 @@
 const fs = require('fs');
 const osm = require('./osmpbf');
 
-// тег → [атрибут, E0]; E0 уточняется по площади (у завода вода 18/25/34)
+// Слой по тегам OSM: первая подошедшая строка. Таблицу читает и каталог стилей
+// (src/catalog.js), поэтому она данными, а не условиями в коде.
+const AREA_TAGS = [
+  ['water', ['natural=water', 'waterway=riverbank', 'landuse=reservoir', 'landuse=basin', 'natural=salt_pond', 'landuse=salt_pond']],
+  ['forest', ['landuse=forest', 'natural=wood']],
+  ['park', ['leisure=park', 'leisure=garden', 'leisure=golf_course', 'leisure=nature_reserve', 'boundary=national_park']],
+  ['built', ['landuse=residential', 'landuse=commercial', 'landuse=retail']],
+  ['industrial', ['landuse=industrial', 'landuse=port']],
+  ['airport', ['aeroway=aerodrome']],
+  ['apron', ['aeroway=apron']],
+];
+
 function classify(t) {
   if (!t) return null;
-  if (t.natural === 'water' || t.waterway === 'riverbank' || t.landuse === 'reservoir' || t.landuse === 'basin' ||
-      t.natural === 'salt_pond' || t.landuse === 'salt_pond') return 'water';
-  if (t.landuse === 'forest' || t.natural === 'wood') return 'forest';
-  if (t.leisure === 'park' || t.leisure === 'garden' || t.leisure === 'golf_course' || t.leisure === 'nature_reserve' ||
-      t.boundary === 'national_park') return 'park';
-  if (t.landuse === 'residential' || t.landuse === 'commercial' || t.landuse === 'retail') return 'built';
-  if (t.landuse === 'industrial' || t.landuse === 'port') return 'industrial';
-  if (t.aeroway === 'aerodrome') return 'airport';
-  if (t.aeroway === 'apron') return 'apron';
+  for (const [layer, sels] of AREA_TAGS) {
+    if (sels.some(sel => { const [k, v] = sel.split('='); return t[k] === v; })) return layer;
+  }
   return null;
 }
 
@@ -93,7 +98,7 @@ function readAreas(pbf) {
   return out;
 }
 
-module.exports = { readAreas, classify, signedArea, stitch };
+module.exports = { readAreas, classify, signedArea, stitch, AREA_TAGS };
 
 if (require.main === module) {
   const args = process.argv.slice(2);

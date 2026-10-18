@@ -705,8 +705,9 @@ function tileSizes(L) {
 //   L0 мелочь: класс 6 (E0 8) — tertiary, класс 4 (E0 8) — улицы
 // Соответствие тегов OSM этим классам — догадка по плотности и геометрии.
 function classFor(lv, hw) {
-  // реки: линия класса 10, E0 18 — так у завода на L1…L3 (Гвадиана)
-  if (hw === 'river') return { cls: 10, e9: 18 };
+  // реки: класс 9 — в прошивке GDB_FLUSS (таблица 0x09a5f208, docs/formats/xar.md);
+  // у завода реки идут им на всех уровнях с E0 18…40. Класс 10 — канал.
+  if (hw === 'river') return { cls: 9, e9: 18 };
   const k = String(hw || '').replace(/_link$/, '');
   const link = /_link$/.test(String(hw || ''));
   if (k === 'motorway') {
@@ -720,8 +721,11 @@ function classFor(lv, hw) {
     if (k === 'tertiary') return { cls: 6, e9: 8 };
     return { cls: 4, e9: 8 };
   }
-  if (lv === 11) return { cls: 9, e9: 0xff };
-  return { cls: 9, e9: k === 'primary' ? 25 : 34 };
+  // Обзорные уровни: класс 9 здесь НЕ дорога (это река, GDB_FLUSS) — прежняя
+  // привязка к B16 спутала дорогу с идущим рядом Дунаем. У завода на L4+
+  // дороги — магистрали 0/1 и редкие 2/3 с E0 30; главные дороги пишем 2/30.
+  if (lv === 11) return { cls: 2, e9: 0xff };
+  return { cls: k === 'secondary' ? 3 : 2, e9: 30 };
 }
 
 // Разрезать ломаную по сетке шага sx×sy (в тех же единицах): точки пересечения
