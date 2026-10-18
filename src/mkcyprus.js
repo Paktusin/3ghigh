@@ -60,6 +60,7 @@ const { mkxac, readHouses, buildContainer } = require('./mkxac');
 const fldb = require('./fldb');
 const gdbgen = require('./gdbgen');
 const cyplit = require('./cyplit');
+const litaddr = require('./litaddr');
 const cyppoi = require('./cyppoi');
 const cyptree = require('./cyptree');
 const conf = require('./conf');
@@ -139,7 +140,17 @@ function mkcyprus(outDir, opt) {
   }));
   const litSrc = fs.readdirSync(path.join(root, 'pkgdb', 'LIT')).find((f) => /\.db$/i.test(f));
   const litPath = path.join(root, 'pkgdb', 'LIT', litSrc);
-  const l = cyplit.build(pois, { from: litPath });
+  // адресный справочник: те же города и улицы, что в XAC (тот же граф, те же классы)
+  const addr = litaddr.modelFromRoads(JSON.parse(fs.readFileSync(roadsFile, 'utf8')),
+                                      o.places || JSON.parse(fs.readFileSync('out/cyp/places_geo.json', 'utf8')),
+                                      { classes: o.classes });
+  const factory = ['LIT', 'LIT2', 'LIT3', 'LIT4'].map((d) => path.join(root, 'pkgdb', d));
+  const l = cyplit.build(pois, { from: litPath, addr, factory });
+  log('адреса: городов ' + l.cities + ', улиц ' + l.streets + '; части: корень ' + l.parts.root +
+      ' б, таблицы 0x18 ' + l.parts.tables + ' б, POI ' + l.parts.poi + ' б, адреса ' + l.parts.addr + ' б');
+  const rep = cyplit.verify(l.buf, l, pois);
+  cyplit.report(rep, l, log);
+  if (rep.bad) throw new Error('LIT не прошёл сверку');
 
   // Заводский том `LIT` лежит в обёртке FLDB: контейнер с одной записью,
   // данные со смещения 2048. (У `PIT` обёртки нет — там `Lit\x02` с нуля.)

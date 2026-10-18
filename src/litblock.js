@@ -33,6 +33,7 @@ const LEAD_NODE = 0x95;                    // весь байт — призна
 const LEAD_TILE = 0x96;                    // весь байт — признак записи-тайла
 const LEAD_POI = 0xa8;                     // старшие пять бит записи точки
 const LEAD_END = 0x80;                     // запись-конец: структура 0x80
+const LEAD_LAYER = 0x94;                   // заголовок слоя POI: структура 0x21
 const RESET = 0xff;                        // сброс дельта-кодека (поле 0x36)
 
 const F_FOOD = 1;                          // бит 0 — вид кухни
@@ -198,10 +199,19 @@ function writeNode(n, width, st) {
   ]);
 }
 
+// Заголовок слоя POI (структура 0x21, правила 119…126): 0x4c, 0x41, затем
+// «следующий элемент» (0x5f, байт не читает — это корень дерева сразу за ним),
+// ссылки 0x62 и 0x2b. У завода (101099, 0): 2, 3999970, (101201, 0), (118088, 0).
+function writeLayer(l, st) {
+  return Buffer.concat([Buffer.from([LEAD_LAYER]), E.encFixed(l.f4c, 2), E.encFixed(l.f41, 4),
+                        writeLink(l.b || null, st), writeLink(l.plus || null, st)]);
+}
+
 // Блок целиком. `blk` — его номер в каталоге: им засевается база дельта-кодека.
 function writeBlock(m, blk) {
   const st = { x: blk, y: 0, base: blk, first: true };
   const parts = [writeHeader(m)];
+  if (m.layer) parts.push(writeLayer(m.layer, st));
   if (m.tile) parts.push(writeTile(m.tile, m.pois));
   for (const p of m.pois) parts.push(writePoi(p, m.width, st));
   for (const n of m.nodes || []) parts.push(writeNode(n, m.width, st));
@@ -268,8 +278,8 @@ function model(pois, opt) {
 }
 
 module.exports = { readBlock, writeBlock, writeHeader, writeTile, writePoi,
-                   writeNode, writeLink, model, detailText, fit,
-                   LEAD_NODE, LEAD_TILE, LEAD_POI, LEAD_END, RESET,
+                   writeNode, writeLink, writeLayer, model, detailText, fit,
+                   LEAD_NODE, LEAD_TILE, LEAD_POI, LEAD_END, LEAD_LAYER, RESET,
                    F_FOOD, F_TAIL, F_FULL };
 
 // Сверка: прочитать заводской блок в модель, собрать обратно и сравнить байты.

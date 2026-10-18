@@ -13,7 +13,8 @@
 //
 //   GDB   том открывается штатным читателем: шапка, число уровней, сетка
 //         каждого уровня, кластеры за границей области уровней;
-//   LIT   спуск по дереву точек интереса от КОРНЯ всего дерева по рамке Кипра.
+//   LIT   спуск по дереву точек интереса от КОРНЯ всего дерева по рамке Кипра;
+//         у своего контейнера — ещё и обход адресов страна -> город -> улица.
 //         Собранные листья читаются машиной грамматики: разбор обязан
 //         остановиться на метке конца блока, а всё, что за ней, — быть нулями
 //         (наши блоки короче слотов и дополнены нулями, см. src/mklit.js).
@@ -217,13 +218,37 @@ function checkOwnLit(file) {
     return v;
   };
 
-  let pois = 0, inside = 0, stops = 0;
+  // Раскладка: с адресным справочником в (0,0) лежит корень 0x01, и дерево POI
+  // ищется путём прошивки — корень 0x4a -> заголовок 0x20 -> слой 0x21 (ключ 0),
+  // корень дерева — ключ 1. Без справочника корень дерева — (0,0).
+  const KS = require('./litkeys');
+  const keyed = (i) => KS.keyed(schema, m.blocks[i], i);
+  const g0 = keyed(0);
+  const rootRec = g0.els[0];
+  let start = { blk: 0, key: 0 }, addr = null, poiPath = null;
+  if (rootRec && rootRec.type === 1) {
+    const h = rootRec.f['4a'];
+    const hdr = h && h[0] >= 0 ? keyed(h[0]).els.find((e) => e.f['3c']) : null;
+    const layer = hdr ? hdr.f['3c'] : null;
+    poiPath = !!(layer && keyed(layer[0]).els[0].type === 0x21);
+    if (poiPath) start = { blk: layer[0], key: 1 };
+    const cache = new Map();
+    const get = (i) => {
+      if (!cache.has(i)) { const g = keyed(i); g.map = KS.index(g.els); cache.set(i, g); }
+      return cache.get(i);
+    };
+    addr = require('./litaddr').walk(get);
+  }
+
+  let pois = 0, inside = 0, stops = 0, leaves = 0;
   const bad = [];
-  for (let i = 1; i < m.blocks.length; i++) {
+  for (let i = 0; i < m.blocks.length; i++) {
     const r = litvm.run(schema, m.blocks[i], 0, { blk: i, limit: 4000000 });
     if (r.why === 'данные кончились' && r.pos === m.blocks[i].length) stops++;
     else bad.push(i + ': ' + r.why + ' на ' + r.pos + ' из ' + m.blocks[i].length);
-    for (const x of litpoi.poisOf(schema, m.blocks[i], i)) {
+    const list = litpoi.poisOf(schema, m.blocks[i], i);
+    if (list.length) leaves++;
+    for (const x of list) {
       pois++;
       if (x.lon >= CYP.lon0 && x.lon <= CYP.lon1 && x.lat >= CYP.lat0 && x.lat <= CYP.lat1) inside++;
     }
@@ -235,13 +260,13 @@ function checkOwnLit(file) {
     for (let k = 0; k < list.length; k += 100) {
       const q = list[k]; seen++;
       const x = Math.round(q.lon * 72000), y = Math.round(q.lat * ct.DEG);
-      const got = ct.collect(get, 0, 0, { x0: x - 72, y0: y - 111, x1: x + 72, y1: y + 111 },
+      const got = ct.collect(get, start.blk, start.key, { x0: x - 72, y0: y - 111, x1: x + 72, y1: y + 111 },
                              new Set(), 0);
       if (got.has(i)) hit++;
     }
   }
-  return { own: true, blocks: m.blocks.length, leaves: m.blocks.length - 1,
-           stops, pois, inside, seen, hit, bad };
+  return { own: true, blocks: m.blocks.length, leaves, stops, pois, inside, seen, hit, bad,
+           start, poiPath, addr };
 }
 
 function checkLit(root) {
@@ -363,10 +388,18 @@ if (require.main === module) {
   }
   const poi = checkLit(root);
   if (poi && poi.own) {
-    console.log('POI (' + poi.vols.join(', ') + ', свой контейнер): блоков ' + poi.blocks +
-                ' — узлы и ' + poi.leaves + ' листьев, разбор дочитан до конца у ' + poi.stops);
+    console.log('LIT (' + poi.vols.join(', ') + ', свой контейнер): блоков ' + poi.blocks +
+                ', с точками ' + poi.leaves + ', разбор дочитан до конца у ' + poi.stops);
+    if (poi.poiPath !== null) console.log('путь к дереву POI: корень 0x4a -> 0x20 -> 0x21: ' +
+                                          (poi.poiPath ? 'есть, корень дерева (' + poi.start.blk + ', 1)' : 'НЕТ'));
     console.log('точек ' + poi.pois + ', из них в рамке Кипра ' + poi.inside +
                 '; спуск от корня: проверено ' + poi.seen + ', свой лист найден у ' + poi.hit);
+    if (poi.addr) {
+      const a = poi.addr;
+      console.log('адреса: корень -> «' + a.countryName.join(', ') + '» -> страна ' + a.code + ' ' +
+                  a.iso.join('/') + ' -> городов ' + a.cities.length + ' -> улиц ' + a.streets +
+                  (a.errors.length ? ', ОШИБОК ' + a.errors.length + ': ' + a.errors.slice(0, 3).join('; ') : ''));
+    }
     for (const b of poi.bad.slice(0, 5)) console.log('  СБОЙ ' + b);
   } else if (poi) {
     console.log('POI (' + poi.vols.join(', ') + '): спуск от корня по рамке Кипра дал листьев ' +
@@ -379,7 +412,8 @@ if (require.main === module) {
   }
   const bad = (gdb && gdb.bad) ||
               (poi && (poi.bad.length || !poi.leaves || !poi.inside ||
-                       (poi.own && (poi.stops !== poi.leaves || poi.hit !== poi.seen)))) ||
+                       (poi.own && (poi.stops !== poi.blocks || poi.hit !== poi.seen ||
+                                    poi.poiPath === false || (poi.addr && poi.addr.errors.length))))) ||
               (r && (r.regBad || r.numErr || r.lost || r.fldb.anomalies ||
               (r.names && (!r.names.streamExact || !r.names.refsExact || r.names.err)) ||
               (r.houses && (r.houses.bad || !r.houses.indexOk ||

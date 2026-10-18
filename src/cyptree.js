@@ -109,14 +109,15 @@ function plan(pois, donors, opt) {
 // nodeBlk — номер блока, в котором лежат сами узлы: на него же ссылаются
 // внутренние ветви. У заплаты в чужой слот это ROOT.block, у своего
 // контейнера — какой назначим.
-function nodes(root, origin, leafLink, nodeBlk) {
+function nodes(root, origin, leafLink, nodeBlk, keyBase) {
+  const KB = keyBase || 0;
   const NB = nodeBlk === undefined ? ROOT.block : nodeBlk;
   const list = [];
   const key = new Map();
   const order = [];
   (function walk(n) {                            // сперва раздать ключи
     if (n.pois) return;
-    key.set(n, order.length);
+    key.set(n, KB + order.length);
     order.push(n);
     walk(n.a);
     walk(n.b);
@@ -161,12 +162,16 @@ function build(pois, donors, opt) {
     idBase += leaf.pois.length;
   }
   const nodeBlk = o.nodeBlk === undefined ? ROOT.block : o.nodeBlk;
-  const ns = nodes(pl.root, { x: origin.x0, y: origin.y0 }, leafLink, nodeBlk);
+  // layer — заголовок слоя 0x21 ключом 0 перед узлами (свой контейнер): тогда
+  // корень дерева получает ключ 1, как у завода (101099, 1).
+  const kb = o.layer ? 1 : 0;
+  const ns = nodes(pl.root, { x: origin.x0, y: origin.y0 }, leafLink, nodeBlk, kb);
   const span = Math.max(origin.x1 - origin.x0, origin.y1 - origin.y0);
   const width = [8, 12, 16, 24].find((w) => span < Math.pow(2, w));
   if (!width) throw new Error('рамка Кипра не влезает в 24 бита');
   const model = { origin: { x: origin.x0, y: origin.y0 }, width: width, byte2: 0,
-                  count: ns.length, dict: new Map(), tile: null, pois: [], nodes: ns };
+                  count: ns.length + kb, dict: new Map(), tile: null, pois: [], nodes: ns,
+                  layer: o.layer || null };
   out.node = { blk: nodeBlk, bytes: B.writeBlock(model, nodeBlk) };
   return out;
 }
