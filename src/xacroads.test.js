@@ -511,3 +511,51 @@ test('одностороннее: теги OSM -> признак oneway', () => 
   assert.equal(onewayOf({ highway: 'trunk', junction: 'circular' }), 1);
   assert.equal(onewayOf({ highway: 'primary', oneway: 'reversible' }), 0);
 });
+
+// ---------------------------------------------------------------------------
+// Скорости: класс — биты 5…7 описателя (ETA-KOSTEN[категория][уровень][класс]).
+
+test('скорость: ограничение -> класс', () => {
+  const c = xr.speedClass;
+  assert.deepEqual([null, 140, 130, 110, 100, 80, 65, 50, 30, 10].map(c), [0, 0, 1, 1, 2, 3, 4, 5, 6, 7]);
+});
+
+test('скорость: maxspeed из тегов OSM', () => {
+  const { maxspeedOf } = require('./osm2geo');
+  assert.equal(maxspeedOf({ maxspeed: '50' }), 50);
+  assert.equal(maxspeedOf({ maxspeed: '30 mph' }), 48);
+  assert.equal(maxspeedOf({ 'maxspeed:type': 'CY:urban' }), 50);
+  assert.equal(maxspeedOf({ 'maxspeed:type': 'CY:rural' }), 80);
+  assert.equal(maxspeedOf({ 'maxspeed:forward': '60', 'maxspeed:backward': '40' }), 40);
+  assert.equal(maxspeedOf({ maxspeed: 'none' }), null);
+  assert.equal(maxspeedOf({}), null);
+});
+
+test('скорость: умолчания Кипра — магистраль 100, вне города 80, в городе 50', () => {
+  const f = (hw, ms) => ({ properties: { highway: hw, maxspeed: ms || null },
+                          geometry: { coordinates: [[33, 35], [33.001, 35]] } });
+  assert.equal(xr.speedFor(f('primary', 65), 'primary'), 65, 'OSM главнее');
+  assert.equal(xr.speedFor(f('motorway'), 'motorway'), 100);
+  assert.equal(xr.speedFor(f('primary'), 'primary', () => false), 80);
+  assert.equal(xr.speedFor(f('primary'), 'primary', () => true), 50);
+  assert.equal(xr.speedFor(f('residential'), 'residential', () => false), 50, 'жилая улица — всегда город');
+});
+
+test('скорость: индекс подбирается с нужным классом, направление сохраняется', () => {
+  const a = new Uint32Array(2048);
+  let i = 0x100;
+  for (let cls = 0; cls < 8; cls++) {
+    a[i++] = 0x1000 | (cls << 5) | 2;          // уровень 2, в обе стороны
+    a[i++] = 0x1000 | (cls << 5) | 0x08 | 2;   // уровень 2, только A→B
+  }
+  const t = xr.attrByFrc(a);
+  for (const [kmh, cls] of [[100, 2], [80, 3], [50, 5], [30, 6]]) {
+    for (const dir of [0, 1]) {
+      const v = a[t.speed(2, dir, xr.speedClass(kmh))];
+      assert.equal((v >>> 5) & 7, cls, kmh + ' км/ч');
+      assert.equal((v >>> 3) & 3, dir);
+      assert.equal(v & 7, 2);
+    }
+  }
+  assert.deepEqual(t.speed.inexact, {});
+});

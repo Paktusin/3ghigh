@@ -112,7 +112,66 @@ function pairByFrc(attr, family) {
   }
   Object.defineProperty(two, 'one', { value: one });
   Object.defineProperty(two, 'inexact', { value: inexact });
+  Object.defineProperty(two, 'speed', { value: speedPicker(attr, list, two) });
   return two;
+}
+
+// Скоростной класс — биты 5…7 описателя. По коду (`FUN_082722d8`): время
+// ребра = длина × ETA-KOSTEN[категория (биты 10…12)][уровень (биты 0…2)][класс],
+// таблица 8×8×8 из `.xah` (`xac_set_eta_kosten`, `FUN_0827e350`). Отдельного
+// поля скорости в записи нет (при флаге блока 1 — у нас и у 208 из 216
+// заводских блоков — слов длины и времени в записи нет вовсе).
+// Класс по ограничению, км/ч (границы — по заводским данным DE/UK/MJ, см.
+// docs/formats/xac.md «Скорости»; это вывод, а не прочитанная таблица):
+//   0 — без ограничения (>130), 1 — 110…130, 2 — 100…109, 3 — 80…99,
+//   4 — 60…79, 5 — 40…59, 6 — 20…39, 7 — <20.
+function speedClass(kmh) {
+  if (!kmh) return 0;
+  if (kmh > 130) return 0;
+  if (kmh >= 110) return 1;
+  if (kmh >= 100) return 2;
+  if (kmh >= 80) return 3;
+  if (kmh >= 60) return 4;
+  if (kmh >= 40) return 5;
+  if (kmh >= 20) return 6;
+  return 7;
+}
+
+// Индекс под (уровень, направление, класс): точный класс, той же категории,
+// что двусторонний индекс уровня по умолчанию, и ближайший к нему по битам.
+// Нет точного класса — ближайший класс (при равенстве — медленнее). Счёт
+// неточностей — в `picker.inexact` по ключу «уровень:направление:класс».
+// Категории 0 (автомагистраль) и 5 (съезд) несут смысл: подбор цели
+// `sort_add_vectors_at_coord` их отбрасывает, а обходчик маршрута считает по
+// ним «Motorway». Чужую категорию 0/5 берём только в крайнем случае.
+const catCost = (c, want) => (c === want ? 0 : (c === 0 || c === 5) ? 5000 : 100);
+
+function speedPicker(attr, list, base) {
+  const cache = new Map(), inexact = {};
+  const pick = (frc, dir, cls, wantCat) => {
+    const key = frc + ':' + dir + ':' + cls + (wantCat === undefined ? '' : ':c' + wantCat);
+    if (cache.has(key)) return cache.get(key);
+    const b = base[frc] === undefined ? null : attr[base[frc]] >>> 0;
+    let best = null;
+    const want = wantCat === undefined ? (b === null ? 0 : CAT(b)) : wantCat;
+    if (b !== null) {
+      const ref = ((b & ~0x1cf8) | (dir << 3) | (cls << 5) | (want << 10)) >>> 0;
+      for (const i of list) {
+        const v = attr[i] >>> 0;
+        if ((v & 7) !== frc || DIR(v) !== dir) continue;
+        const c = (v >>> 5) & 7;
+        const sc = 1000 * Math.abs(c - cls) - (c > cls ? 1 : 0) +
+                   catCost(CAT(v), want) + bits(v ^ ref);
+        if (!best || sc < best.sc) best = { i, sc, c, cat: CAT(v) !== want ? CAT(v) : false };
+      }
+    }
+    const idx = best ? best.i : null;
+    if (best && (best.c !== cls || best.cat)) inexact[key] = { got: best.c, cat: best.cat };
+    cache.set(key, idx);
+    return idx;
+  };
+  pick.inexact = inexact;
+  return pick;
 }
 
 // То же из индексов, у которых в хвосте записи лежит список имён ведения.
@@ -164,6 +223,27 @@ function roadName(props) {
 
 // --- граф --------------------------------------------------------------------
 
+// Скорость ребра, км/ч: `maxspeed` из OSM (src/osm2geo.js), иначе
+// умолчания Кипра — автомагистраль 100, вне населённого пункта 80, в нём 50.
+// Жилая улица (residential, road, service) — всегда 50: по определению OSM
+// она в населённом пункте, а полигонов застройки у многих сёл нет (с проверкой
+// по застройке 290 тыс. рёбер уровня 4 получали 80). Для прочих «в населённом
+// пункте» решает `urban(lon, lat)` по середине линии (застройка из
+// out/cyp/areas.json); без неё — 80. Съезды — 60 (догадка: знаков на съездах
+// в OSM почти нет), living_street — 20.
+const STREETS = new Set(['residential', 'road', 'service']);
+function speedFor(f, hw, urban) {
+  const p = f.properties || {};
+  if (p.maxspeed) return p.maxspeed;
+  if (hw === 'motorway') return 100;
+  if (/_link$/.test(hw)) return 60;
+  if (hw === 'living_street') return 20;
+  if (STREETS.has(hw)) return 50;
+  const c = f.geometry.coordinates, m = c[c.length >> 1];
+  const town = urban ? urban(m[0], m[1]) : false;
+  return town ? 50 : 80;
+}
+
 // GeoJSON -> узлы и рёбра в единицах карты. Точки, севшие в одну единицу,
 // склеиваются; петля (ребро из узла в него же) отбрасывается.
 function graphFromGeoJSON(fc, opt) {
@@ -189,6 +269,11 @@ function graphFromGeoJSON(fc, opt) {
     if (classes && !classes.has(hw)) continue;
     const frc = FRC[hw] === undefined ? 4 : FRC[hw];
     const ow = +((f.properties || {}).oneway || 0);   // 1, -1 или 0 — см. src/osm2geo.js
+    const kmh = opt && opt.speeds ? speedFor(f, hw, opt.urban) : undefined;
+    // Категория (биты 10…12): 0 — автомагистраль, 5 — съезд, как у завода
+    // (DE: магистрали — категория 0, съезды — 5); прочим — категория индекса.
+    const cat = !(opt && opt.speeds) ? undefined
+      : hw === 'motorway' ? 0 : /_link$/.test(hw) ? 5 : undefined;
     const nm = roadName(f.properties);
     let ni = -1;
     if (nm) {
@@ -214,8 +299,8 @@ function graphFromGeoJSON(fc, opt) {
       seen.add(key);
       // Ребро пишется вектором у `a`, ссылкой на `b`: одностороннее «по
       // оцифровке» — это A→B. При `oneway=-1` концы меняются местами.
-      if (ow < 0) edges.push({ a: cur, b: prev, frc, name: ni, raw: ri, ow: 1 });
-      else edges.push({ a: prev, b: cur, frc, name: ni, raw: ri, ow: ow ? 1 : 0 });
+      if (ow < 0) edges.push({ a: cur, b: prev, frc, name: ni, raw: ri, ow: 1, kmh, cat });
+      else edges.push({ a: prev, b: cur, frc, name: ni, raw: ri, ow: ow ? 1 : 0, kmh, cat });
       prev = cur;
     }
   }
@@ -266,6 +351,11 @@ function layout(graph, groups, attrIdx, named) {
     let idx = tab[frc];
     if (e.ow) {
       if (tab.one && tab.one[frc] !== undefined) { idx = tab.one[frc]; oneway++; } else owLost++;
+    }
+    if (e.kmh !== undefined && tab.speed) {
+      const dir = e.ow && tab.one && tab.one[frc] !== undefined ? 1 : 0;
+      const sp = tab.speed(frc, dir, speedClass(e.kmh), e.cat);
+      if (sp !== null) idx = sp;
     }
     const names = zf >= 0 ? [zf] : null;
     const ba = blockOf[e.a], bb = blockOf[e.b];
@@ -729,7 +819,7 @@ function convert(geojson, opt) {
 module.exports = { convert, graphFromGeoJSON, splitNodes, layout, buildBlocks,
                    buildTileFile, verify, verifyNames, verifyGuidance, nameRefs, zenModel,
                    latinize, roadName, houseNumber, segDist2,
-                   attrByFrc, attrByFrcNamed, setAttributes, FRC };
+                   attrByFrc, attrByFrcNamed, setAttributes, FRC, speedClass, speedFor };
 
 if (require.main === module) {
   const args = process.argv.slice(2);

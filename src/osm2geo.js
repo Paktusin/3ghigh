@@ -36,6 +36,30 @@ function onewayOf(t) {
   return 0;
 }
 
+// Ограничение скорости в км/ч или null. Число, «N mph», зональные значения
+// (`CY:urban` 50, `CY:rural` 80, `CY:motorway` 100, британские `GB:nsl_*` на
+// базах) — из `maxspeed`, при его отсутствии из `maxspeed:type`; если задано
+// только по направлениям, берётся меньшее. `none`, `signals`, `walk` и прочее
+// нечисловое — null.
+const ZONE = { 'CY:urban': 50, 'CY:rural': 80, 'CY:motorway': 100, 'CY:trunk': 80,
+               'GB:nsl_single': 97, 'GB:nsl_dual': 113, 'GB:motorway': 113 };
+function speedOf(v) {
+  if (v === undefined || v === null) return null;
+  const s = String(v).trim();
+  if (ZONE[s] !== undefined) return ZONE[s];
+  const m = /^(\d+(?:\.\d+)?)\s*(mph|km\/h|kmh)?$/i.exec(s);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Math.round(m[2] && m[2].toLowerCase() === 'mph' ? n * 1.609344 : n) || null;
+}
+function maxspeedOf(t) {
+  const a = speedOf(t.maxspeed);
+  if (a) return a;
+  const f = speedOf(t['maxspeed:forward']), b = speedOf(t['maxspeed:backward']);
+  if (f || b) return Math.min(f || Infinity, b || Infinity);
+  return speedOf(t['maxspeed:type']);
+}
+
 function convert(src, max) {
   const j = JSON.parse(fs.readFileSync(src, 'utf8'));
   const ways = (j.elements || []).filter(e => e.type === 'way' && Array.isArray(e.geometry));
@@ -56,6 +80,7 @@ function convert(src, max) {
         name_en: (w.tags || {})['name:en'] || null,
         int_name: (w.tags || {}).int_name || null,
         oneway: onewayOf(w.tags || {}),
+        maxspeed: maxspeedOf(w.tags || {}),
       },
       geometry: { type: 'LineString', coordinates: p },
     });
@@ -77,4 +102,4 @@ if (require.main === module) {
   console.log('записано       :', dst);
 }
 
-module.exports = { convert, split, onewayOf };
+module.exports = { convert, split, onewayOf, maxspeedOf };

@@ -156,6 +156,39 @@ function globalL4(tileCount) {
   return verySmart(Array.from({ length: tileCount }, () => [0, 0, 0, 0]), 16);
 }
 
+// «В населённом пункте»: точка внутри застройки (`built` в out/cyp/areas.json —
+// landuse=residential|commercial|retail, src/osmareas.js). Нужно для скорости
+// по умолчанию (50 против 80), когда у дороги нет `maxspeed`.
+function urbanIndex(areas) {
+  const G = 0.02, grid = new Map();
+  const polys = (areas.features || []).filter((f) => f.cls === 'built');
+  polys.forEach((f, k) => {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const r of f.rings) for (const [x, y] of r) {
+      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+    }
+    for (let gx = Math.floor(x0 / G); gx <= Math.floor(x1 / G); gx++) {
+      for (let gy = Math.floor(y0 / G); gy <= Math.floor(y1 / G); gy++) {
+        const key = gx + ',' + gy;
+        if (!grid.has(key)) grid.set(key, []);
+        grid.get(key).push(k);
+      }
+    }
+  });
+  const inside = (rings, x, y) => {
+    let c = false;
+    for (const r of rings) {
+      for (let i = 0, j = r.length - 1; i < r.length; j = i++) {
+        if ((r[i][1] > y) !== (r[j][1] > y) &&
+            x < (r[j][0] - r[i][0]) * (y - r[i][1]) / (r[j][1] - r[i][1]) + r[i][0]) c = !c;
+      }
+    }
+    return c;
+  };
+  return (x, y) => (grid.get(Math.floor(x / G) + ',' + Math.floor(y / G)) || [])
+    .some((k) => inside(polys[k].rings, x, y));
+}
+
 // Дома из извлечения `.osm.pbf`: точки и контуры зданий с номером и улицей.
 function readHouses(file) {
   const idx = osmpbf.read(file, {
@@ -334,7 +367,9 @@ function mkxac(opt) {
 
   // ---- тайл ----
   const fc = JSON.parse(fs.readFileSync(o.roads || 'out/cyp/roads.geojson', 'utf8'));
-  const graph = roads.graphFromGeoJSON(fc, { classes: o.classes });
+  const areasFile = o.areas || 'out/cyp/areas.json';
+  const urban = fs.existsSync(areasFile) ? urbanIndex(JSON.parse(fs.readFileSync(areasFile, 'utf8'))) : null;
+  const graph = roads.graphFromGeoJSON(fc, { classes: o.classes, speeds: true, urban });
   const attr = roads.setAttributes(root);
   let named = null, zfSection = null;
   if (graph.names.length) {
@@ -436,7 +471,7 @@ function mkxac(opt) {
 }
 
 module.exports = { mkxac, buildXah, buildContainer, strukturRecord, levelRow,
-                   rasterSection, stubLevel2, readHouses, emptyAreaFiles, globalL4,
+                   rasterSection, stubLevel2, readHouses, emptyAreaFiles, globalL4, urbanIndex,
                    EMPTY_ZF, CYPRUS };
 
 if (require.main === module) {
