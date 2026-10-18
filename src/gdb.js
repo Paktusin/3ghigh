@@ -302,7 +302,7 @@ function cluster(g, h, off, sz) {
     const lw = r[5], lh = r[7], toff = r.readUInt32BE(11), tsz = r.readUInt32BE(15);
     // конец таблицы тайлов: запись перестаёт быть правдоподобной
     if (r[4] !== 0 || r[6] !== 0 || lw > 12 || lh > 12 || toff >= g.total || tsz > 0x400000) break;
-    tiles.push({ x, y, lw, lh, flag: r[8], attr: r[9], off: toff, size: tsz, sub: key >>> 28 });
+    tiles.push({ x, y, lw, lh, flag: r[8], attr: r[9], b10: r[10], off: toff, size: tsz, sub: key >>> 28 });
   }
   const searchStart = tiles.length * 19;
   return { tiles, searchStart, searchBytes: sz - searchStart };
@@ -365,6 +365,12 @@ const cellOfLat = (lat, cellY, fy) => (lat * UNITS_PER_LAT - (fy === undefined ?
 const lonOfCell = cx => lonOfCellL(cx, CELL_X);
 const latOfCell = cy => latOfCellL(cy, CELL_Y);
 
+// УСТАРЕЛО (18.10): `tilePoints`/`encodePoints` — ранний разбор одного узора,
+// оставлен для gdbwrite/gdbroads. По коду прошивки это МНОГОУГОЛЬНИК (тип 0) с
+// атрибутом 0x50 (класс 16 — рамка тайла), а u32 «точки» прошивка читает как
+// x:15 бит, y:15 бит и два бита признаков, не как x:u16/y:i16. Настоящий разбор
+// потока — `readElements` ниже.
+//
 // Точки последнего элемента тайла. Проверено на береговой линии Кипра: узор
 //   1d <u32 Y> <u8 N> 8f 00 00 00 00   затем ровно N × u32
 // где 0x1d — головной байт (X-режим 1 «константа», Y-режим 0xC «читать u32»,
@@ -442,7 +448,241 @@ function roundTrip(g, off, size) {
   return { ok: orig.equals(again), bytes: orig.length, count: pr.count };
 }
 
+// ── Поток элементов тайла — по коду прошивки ──────────────────────────────
+//
+// Итератор `CGdbTileElementIterator::next` (FUN_08cb3f90, сброс FUN_08cb3e70)
+// и декодер точек FUN_092526f0 (инициализация FUN_09253334, читатели точек
+// 0x0925183c / 0x092519a0 / 0x092518a0, читатели ширины 0x0925174c…). Сверено:
+// заводской том EJ211 читается до off0 у 100 % выборки на всех 12 уровнях.
+//
+//   управляющие байты (≥0x80) до головного:
+//     0xC0|t   тип: 0 многоугольник, 1 линия, 2 точка (держится до смены; в
+//              начале тайла 0)
+//     0xE0 b   поле +9 итератора («E0»; в начале тайла 0xFF), 0xE1/0xE2 — +10/+11,
+//     0xE3 u16
+//     0xA0|d   правка накопителя (d==0 → u16 целиком)
+//   многоугольник/линия, головной байт:
+//     &3   id: 0 повтор, 1 = 0xFFFF, 2 предыдущий + i16, 3 u32
+//     &0xC атрибут: 0 повтор, 4 — байт-индекс, 8 — u16-индекс в таблицу u32
+//          (секция S3), 0xC — u32 BE. Младшие 6 бит атрибута — класс.
+//     число точек: многоугольник (h>>4)&7, 1 → байт; линия &0x30: 0→2,
+//          0x10→3, 0x20→4, 0x30→байт; байт 255 → дальше u16
+//     линия, бит 6 — общий доп. блок (FUN_09252288)
+//   точки, сжатый путь (байт +10 записи тайла = 0, так у L0):
+//     байт: w = &0x1f, формат (b>>5)&3, бит 7 — признак многоугольника
+//     якорь: x,y по ширине тайла (байт +9 записи: 8/12/16/24/32)
+//     формат 0: n точек по (w + w [+2 бита признаков у многоугольника]) бит,
+//               смещения от якоря без знака, старший бит первым
+//     формат 1: wx:5, wy:5, первая точка = якорь + (w,w) бит [+2], дальше n−1
+//               точек «знак+модуль» (1+wx, 1+wy) [+2] — приращения
+//     формат 2: ровно 2 точки, 2w + 2 бита (линия) / 2w + 6 (многоугольник)
+//   точки, прямой путь (байт +10 записи = 1, так у L1…L11): без байта формата,
+//     n точек по ширине тайла как есть; у многоугольника за ними ceil(n/4) байт
+//     признаков, у линии — z-байты, если в атрибуте заданы биты 15–16/30
+//   точка (тип 2): атрибут в головном (&0x3f, 0x3d/0x3e/0x3f — расширение),
+//     u32 id, одна точка прямым путём.
+// Мировая координата = начало тайла + (сырая << сдвиг уровня).
+
+function readBits(b, bit, n) {
+  let v = 0;
+  for (let i = 0; i < n; i++, bit++) v = v * 2 + ((b[bit >> 3] >> (7 - (bit & 7))) & 1);
+  return v;
+}
+
+// точка по ширине тайла (FUN_0925174c — 8, 0x0925176e — 12, FUN_080b611c — 16)
+function rawPoint(b, p, W) {
+  if (W === 8) return [b[p], b[p + 1]];
+  if (W === 12) return [b[p] | (b[p + 2] & 0xf) << 8, b[p + 1] | (b[p + 2] >> 4) << 8];
+  if (W === 16) return [b.readUInt16BE(p), b.readUInt16BE(p + 2)];
+  return [readBits(b, p * 8, W), readBits(b, p * 8 + W, W)];
+}
+
+// z-ширина линии: биты 15–16 и 30 атрибута (FUN_09253294 → FUN_092526f0)
+function zWidth(attr) {
+  const f = (attr >>> 15) & 3;
+  return (attr >>> 30) & 1 ? f * 8 + 8 : (f === 3 ? 4 : f);
+}
+
+function pointData(b, p, type, n, W, zw, want, simple) {
+  if (simple) {
+    const tail = type === 1 ? Math.ceil(n * zw / 8) : type === 0 ? Math.ceil(n / 4) : 0;
+    const r = { w: W, fmt: 'raw', end: p + (n * W >> 2) + tail };
+    if (want) { r.pts = []; for (let i = 0; i < n; i++) r.pts.push(rawPoint(b, p + i * W / 4, W)); }
+    return r;
+  }
+  const start = p, h = b[p++];
+  if (type === 0 && !(h & 0x80)) throw new Error('многоугольник без признака @' + start);
+  if (type === 1 && (h & 0x80)) throw new Error('линия с признаком многоугольника @' + start);
+  const w = h & 0x1f, fmt = (h >> 5) & 3;
+  const [ax, ay] = rawPoint(b, p, W);
+  p += W / 4;
+  const bit0 = p * 8, ex = type === 0 ? 2 : 0;
+  let nb;
+  if (fmt === 0) nb = n * (2 * w + ex);
+  else if (fmt === 1) nb = 10 + 2 * w + ex + (n - 1) * (readBits(b, bit0, 5) + readBits(b, bit0 + 5, 5) + 2 + ex);
+  else if (fmt === 2) { if (n !== 2) throw new Error('двухточечный формат при n=' + n); nb = 2 * w + (type === 0 ? 6 : 2); }
+  else throw new Error('формат упаковки 3 @' + start);
+  const r = { w, fmt, anchor: [ax, ay], end: p + Math.ceil(nb / 8) + (type === 1 ? Math.ceil(n * zw / 8) : 0) };
+  if (want && fmt === 0) {
+    r.pts = [];
+    for (let i = 0, bit = bit0; i < n; i++, bit += 2 * w + ex) r.pts.push([ax + readBits(b, bit, w), ay + readBits(b, bit + w, w)]);
+  } else if (want && fmt === 1) {
+    const wx = readBits(b, bit0, 5), wy = readBits(b, bit0 + 5, 5);
+    let bit = bit0 + 10, x = ax + readBits(b, bit, w), y = ay + readBits(b, bit + w, w);
+    bit += 2 * w + ex;
+    r.pts = [[x, y]];
+    for (let i = 1; i < n; i++) {
+      const sx = readBits(b, bit, 1), dx = readBits(b, bit + 1, wx); bit += 1 + wx;
+      const sy = readBits(b, bit, 1), dy = readBits(b, bit + 1, wy); bit += 1 + wy + ex;
+      x += sx ? -dx : dx; y += sy ? -dy : dy;
+      r.pts.push([x, y]);
+    }
+  }
+  return r;
+}
+
+// Разобрать поток элементов блоба тайла. opts: W — ширина координаты (байт +9
+// записи тайла), simple — прямой путь (байт +10), points — вернуть точки.
+function readElements(blob, opts = {}) {
+  const W = opts.W || 16;
+  const off0 = blob.readUInt16BE(0), off2 = blob.readUInt16BE(4), cnt = blob.readUInt16BE(6);
+  const attrTable = blob.subarray(off2);
+  let p = TILE_HEAD, type = 0, id = 0, attr = 0, e9 = 0xff;
+  const cntOf = n => { if (n !== -1) return n; n = blob[p++]; if (n === 255) { n = blob.readUInt16BE(p); p += 2; } return n; };
+  const els = [];
+  for (let k = 0; k < cnt; k++) {
+    const ctl = [];
+    let c = blob[p++];
+    while (c & 0x80) {
+      ctl.push(c);
+      const g = c & 0xe0;
+      if (g === 0xc0) type = c & 0x0f;
+      else if (g === 0xe0) {
+        if (c === 0xe0) e9 = blob[p++];
+        else if (c === 0xe1 || c === 0xe2) p++;
+        else if (c === 0xe3) p += 2;
+        else throw new Error('управляющий 0x' + c.toString(16) + ' @' + (p - 1));
+      } else if (g === 0xa0) { if ((c & 0x1f) === 0) p += 2; }
+      else throw new Error('управляющий 0x' + c.toString(16) + ' @' + (p - 1));
+      c = blob[p++];
+    }
+    const el = { at: p - 1, type, ctl, head: c, e9 };
+    if (type === 2) {
+      let a = c & 0x3f;
+      if (a === 0x3e) a = blob[p++];
+      else if (a === 0x3f) { a = blob.readUInt16BE(p); p += 2; }
+      else if (a === 0x3d) { a = blob.readUIntBE(p, 3); p += 3; }
+      el.attr = a; el.cls = a & 0x3f; el.id = blob.readUInt32BE(p); p += 4; el.n = 1;
+      if (opts.points) el.pts = [rawPoint(blob, p, W)];
+      p += W / 4;
+      els.push(el);
+      continue;
+    }
+    if (type > 1) throw new Error('тип элемента ' + type + ' @' + el.at);
+    const im = c & 3;
+    if (im === 1) id = 0xffff;
+    else if (im === 2) { id += blob.readInt16BE(p); p += 2; }
+    else if (im === 3) { id = blob.readUInt32BE(p); p += 4; }
+    const am = c & 0xc;
+    if (am === 4) attr = attrTable.readUInt32BE(blob[p++] * 4);
+    else if (am === 8) { attr = attrTable.readUInt32BE(blob.readUInt16BE(p) * 4); p += 2; }
+    else if (am === 0xc) { attr = blob.readUInt32BE(p); p += 4; }
+    el.id = id; el.attr = attr; el.cls = attr & 0x3f;
+    let n;
+    if (type === 0) { n = (c >> 4) & 7; n = cntOf(n === 1 ? -1 : n); }
+    else {
+      const m = c & 0x30;
+      n = cntOf(m === 0 ? 2 : m === 0x10 ? 3 : m === 0x20 ? 4 : -1);
+      if (c & 0x40) {                     // общий доп. блок линии
+        const x = blob[p];
+        let len;
+        if (x & 0x80) len = 4;
+        else if (!(x & 0x40)) len = blob.readUInt16BE(p + 2);
+        else { const m2 = (x & 0x20) ? 1 : blob[p + 1]; len = (m2 === 1 ? 1 : 2) + ((x & 8) ? m2 : 2 * m2) + 4 * m2 + 4; }
+        p += len;
+      }
+    }
+    el.n = n;
+    const r = pointData(blob, p, type, n, W, type === 1 ? zWidth(attr) : 0, opts.points, opts.simple);
+    el.w = r.w; el.fmt = r.fmt;
+    if (r.anchor) el.anchor = r.anchor;
+    if (r.pts) el.pts = r.pts;
+    p = r.end;
+    els.push(el);
+  }
+  return { els, end: p, off0, ok: p === off0 || cnt === 0 };
+}
+
+// ── запись элементов ──────────────────────────────────────────────────────
+
+function bitWriter() {
+  const bytes = [];
+  let cur = 0, nb = 0;
+  return {
+    put(v, n) {
+      for (let i = n - 1; i >= 0; i--) {
+        cur = (cur << 1) | (Math.floor(v / 2 ** i) & 1);
+        if (++nb === 8) { bytes.push(cur); cur = 0; nb = 0; }
+      }
+    },
+    done() { if (nb) bytes.push(cur << (8 - nb)); return Buffer.from(bytes); },
+  };
+}
+
+function writeRaw(x, y, W) {
+  if (x < 0 || y < 0 || x >= 2 ** W || y >= 2 ** W) throw new Error('точка ' + x + ',' + y + ' не влезает в ' + W + ' бит');
+  if (W === 8) return Buffer.from([x, y]);
+  if (W === 12) return Buffer.from([x & 0xff, y & 0xff, (x >> 8) | ((y >> 8) << 4)]);
+  if (W === 16) { const b = Buffer.alloc(4); b.writeUInt16BE(x, 0); b.writeUInt16BE(y, 2); return b; }
+  const bw = bitWriter(); bw.put(x, W); bw.put(y, W); return bw.done();
+}
+
+const bitLen = v => (v <= 0 ? 0 : Math.floor(Math.log2(v)) + 1);
+
+// Точки линии. Сжатый путь (simple=false, как у L0 завода): байт w (бит 7 = 0,
+// формат 0), якорь = минимум по x и по y, затем смещения по w бит. Прямой путь:
+// точки по ширине тайла как есть. pts — [[x,y]…] в сырых единицах тайла, ≥ 0.
+function encodeLinePoints(pts, W = 16, simple = false) {
+  if (simple) return Buffer.concat(pts.map(([x, y]) => writeRaw(x, y, W)));
+  const ax = Math.min(...pts.map(q => q[0])), ay = Math.min(...pts.map(q => q[1]));
+  const w = Math.max(1, ...pts.map(([x, y]) => Math.max(bitLen(x - ax), bitLen(y - ay))));
+  if (w > 31) throw new Error('смещение не влезает в 31 бит');
+  const bw = bitWriter();
+  for (const [x, y] of pts) { bw.put(x - ax, w); bw.put(y - ay, w); }
+  return Buffer.concat([Buffer.from([w]), writeRaw(ax, ay, W), bw.done()]);
+}
+
+// Линия целиком: головной 0x3d (id 0xFFFF, атрибут u32, число точек байтом)
+// или 0x31 (атрибут повторяется). Число точек ≥ 2; 255 и больше — 0xFF + u16.
+function encodeLine(pts, attr, opt = {}) {
+  if (pts.length < 2 || pts.length > 0xffff) throw new Error('точек в линии: ' + pts.length);
+  const parts = [];
+  const rep = attr === null || attr === undefined;
+  parts.push(Buffer.from([rep ? 0x31 : 0x3d]));
+  if (!rep) { const a = Buffer.alloc(4); a.writeUInt32BE(attr >>> 0, 0); parts.push(a); }
+  if (pts.length < 255) parts.push(Buffer.from([pts.length]));
+  else { const c = Buffer.alloc(3); c[0] = 255; c.writeUInt16BE(pts.length, 1); parts.push(c); }
+  parts.push(encodeLinePoints(pts, opt.W || 16, !!opt.simple));
+  return Buffer.concat(parts);
+}
+
+// Рамка тайла — многоугольник класса 16 (атрибут 0x50) по границе тайла X×Y,
+// как у завода. Сжатый путь (L0): 4d 00000050, w=15, якорь 0,0, точки
+// (X,0)(X,Y)(0,Y)(0,0) с признаками 3,2,1,0 — у тайла 32×32 ячейки L0 это
+// ровно 26 байт общего пустого тайла. Прямой путь (L1…): точки (X,Y)(0,Y)(0,0)
+// (X,0) по ширине тайла и байт признаков 0xBB.
+function encodeFrame(X, Y, W = 16, simple = false) {
+  const head = Buffer.from([0x4d, 0, 0, 0, 0x50]);
+  if (simple) {
+    return Buffer.concat([head, writeRaw(X, Y, W), writeRaw(0, Y, W), writeRaw(0, 0, W), writeRaw(X, 0, W), Buffer.from([0xbb])]);
+  }
+  const bw = bitWriter();
+  for (const [x, y, f] of [[X, 0, 3], [X, Y, 2], [0, Y, 1], [0, 0, 0]]) { bw.put(x, 15); bw.put(y, 15); bw.put(f, 2); }
+  return Buffer.concat([head, Buffer.from([0x8f]), writeRaw(0, 0, W), bw.done()]);
+}
+
 module.exports = {
+  readElements, readBits, rawPoint, encodeLine, encodeLinePoints, encodeFrame, writeRaw,
   openGdb, openBuffer, read, header, levelHead, locateTable, levelGrid, slotFor, cluster,
   tileHeader, tilePoints, encodePoints, roundTrip, lonOfCell, latOfCell,
   CELL_X, CELL_Y, TILE_HEAD, TABLE_AT, LEVEL_SHIFT_AT, FRAME_X0, FRAME_Y0, gridW, keyOrigin,

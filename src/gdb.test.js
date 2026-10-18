@@ -16,9 +16,21 @@ const road = (n, x0 = 100, y0 = 50) => {
   return points;
 };
 
+// Тайл в РАННЕМ виде, который правят gdbwrite/gdbroads: рамка + элементы
+// gm.encodePoints (по коду прошивки это многоугольники класса 0x50, см.
+// docs/formats/gdb.md), S1/S2 пустые. gdbgen такие тайлы больше не пишет.
+const legacyTile = roads => {
+  const stream = Buffer.concat([G.FRAME_ELEMENT, ...roads.map(r => gm.encodePoints(r.points))]);
+  const head = Buffer.alloc(10);
+  const off0 = 10 + stream.length;
+  head.writeUInt16BE(off0, 0); head.writeUInt16BE(off0 + 2, 2); head.writeUInt16BE(off0 + 4, 4);
+  head.writeUInt16BE(roads.length + 1, 6); head.writeUInt16BE(0xE028, 8);
+  return Buffer.concat([head, stream, Buffer.from([0, 0, 0, 0])]);
+};
+
 // том из одного тайла: сам блоб и есть весь «файл»
 const tileVolume = roads => {
-  const blob = G.tileBlob(roads);
+  const blob = legacyTile(roads);
   return { blob, g: gm.openBuffer(blob), size: blob.length };
 };
 
@@ -197,7 +209,7 @@ test('наращивание: элементов на один больше, с�
 test('наращивание: блоб больше 64 КБ отвергается', () => {
   // набиваем тайл почти под предел u16, дальше одна дорога его переполняет
   const big = [];
-  do { big.push({ points: road(100), name: 'R' }); } while (G.tileBlob(big).length < 64600);
+  do { big.push({ points: road(100), name: 'R' }); } while (legacyTile(big).length < 64600);
   const { g, size } = tileVolume(big);
   assert.ok(size <= 0xffff, 'исходный тайл ещё влезает: ' + size);
   assert.throws(() => gw.buildGrownTile(g, 0, size, road(254)), /u16/);
@@ -221,11 +233,11 @@ test('дороги: каждая получает запись в S1 и имя �
   assert.equal(r.s1count, 3, 'записей реестра столько же, сколько дорог');
   assert.equal(r.names, 2, 'повторное имя строку не плодит');
 
-  const back = G.readTileRoads(r.blob);
-  assert.equal(back.count, 4, 'рамка плюс три дороги');
-  assert.equal(back.s1count, back.count - 1, 'счётчик S1 = элементов − 1');
-  assert.deepEqual(back.names, ['A1', 'B9']);
-  assert.deepEqual(back.roads.map(x => x.name), ['A1', 'A1', 'B9']);
+  // по коду прошивки такие элементы — многоугольники класса 0x50, а не линии
+  const back = gm.readElements(r.blob);
+  assert.equal(back.ok, true, 'поток сходится с off0');
+  assert.equal(back.els.length, 4, 'рамка плюс три дороги');
+  assert.deepEqual(back.els.map(e => [e.type, e.attr]), new Array(4).fill([0, 0x50]));
 });
 
 test('дороги: раскладка по тайлам — по первой точке ломаной', () => {
@@ -260,4 +272,81 @@ test('дороги: собранный тайл читается штатным 
     assert.ok(Math.abs(p.lon - deg[i][0]) < 0.01, 'точка ' + i + ': долгота');
     assert.ok(Math.abs(p.lat - deg[i][1]) < 0.01, 'точка ' + i + ': широта');
   });
+});
+
+
+// ── поток элементов по коду прошивки ───────────────────────────────────────
+
+test('элементы: рамка общего пустого тайла — многоугольник 0x50 по границе тайла 32×32', () => {
+  assert.deepEqual(gm.encodeFrame(25248, 17472), G.FRAME_ELEMENT);
+  const r = gm.readElements(G.emptyTile(), { points: true });
+  assert.equal(r.ok, true);
+  assert.equal(r.els.length, 1);
+  const f = r.els[0];
+  assert.deepEqual([f.type, f.attr, f.cls, f.e9], [0, 0x50, 16, 0xff]);
+  assert.deepEqual(f.pts, [[25248, 0], [25248, 17472], [0, 17472], [0, 0]], 'x:15, y:15, два бита признаков');
+});
+
+test('элементы: рамки прямого пути совпадают с заводскими (L1, L4)', () => {
+  // сняты с EJ211: пустой тайл L1 (W16) и L4 (W12)
+  assert.equal(gm.encodeFrame(15872, 15872, 16, true).toString('hex'), '4d000000503e003e0000003e00000000003e000000bb');
+  assert.equal(gm.encodeFrame(1984, 1984, 12, true).toString('hex'), '4d00000050c0c07700c070000000c00007bb');
+});
+
+test('элементы: заводская линия Родоса читается до off0 и упирается в край тайла', () => {
+  // тайл EJ211 @356344157 (88 б): рамка, затем e0 08 c1 1d 010e2004 …
+  const blob = Buffer.from('003c004e00580002e0284d000000508f000000000001110300000002c5400003c5411102e008c11d010e20040e2903315be67400093403eb00012e50000102000016604ea74100002108320001f00001000005a52dec091a', 'hex');
+  const r = gm.readElements(blob, { points: true });
+  assert.equal(r.ok, true);
+  const ln = r.els[1];
+  assert.deepEqual([ln.type, ln.attr, ln.cls, ln.e9, ln.n], [1, 0x010e2004, 4, 8, 3]);
+  assert.deepEqual(ln.ctl, [0xe0, 0xc1]);
+  assert.ok(ln.pts.every(([x, y]) => x >= 0 && x <= 25248 && y >= 0 && y <= 17472), 'точки внутри тайла');
+});
+
+test('элементы: линия записывается и читается обратно — оба пути, все ширины', () => {
+  const pts = [[0, 17472], [9000, 2500], [25248, 0], [12, 13]];
+  for (const [W, simple, lim] of [[16, false, 25248], [16, true, 15872], [12, true, 1984], [8, true, 248]]) {
+    const q = pts.map(([x, y]) => [Math.round(x / 25248 * lim), Math.round(y / 25248 * lim)]);
+    const el = Buffer.concat([Buffer.from([0xc1, 0xe0, 24]), gm.encodeLine(q, 1, { W, simple }),
+                              gm.encodeLine(q.slice(1), null, { W, simple })]);
+    const head = Buffer.alloc(10);
+    head.writeUInt16BE(10 + el.length, 0); head.writeUInt16BE(12 + el.length, 2); head.writeUInt16BE(14 + el.length, 4);
+    head.writeUInt16BE(2, 6); head.writeUInt16BE(0xE028, 8);
+    const blob = Buffer.concat([head, el, Buffer.alloc(4)]);
+    const r = gm.readElements(blob, { W, simple, points: true });
+    assert.equal(r.ok, true, 'W' + W + (simple ? ' прямой' : ' сжатый'));
+    assert.deepEqual(r.els.map(e => [e.type, e.attr, e.e9, e.head]), [[1, 1, 24, 0x3d], [1, 1, 24, 0x31]]);
+    assert.deepEqual(r.els[0].pts, q);
+    assert.deepEqual(r.els[1].pts, q.slice(1));
+  }
+});
+
+test('элементы: длинная линия — счётчик 0xFF + u16', () => {
+  const q = new Array(300).fill(0).map((_, i) => [i * 10, (i * 7) % 900]);
+  const b = gm.encodeLine(q, 4);
+  assert.equal(b[5], 0xff);
+  assert.equal(b.readUInt16BE(6), 300);
+});
+
+// Сверка с заводским томом, если он есть рядом (maps/ — только чтение).
+const fs = require('fs');
+const factory = fs.existsSync('maps/pkgdb/GDB/EJ211_v37a.gdb');
+test('элементы: заводские тайлы всех 12 уровней читаются ровно до off0', { skip: !factory && 'нет maps/' }, () => {
+  const g = gm.openGdb('maps');
+  const h = gm.header(g);
+  for (let lv = 0; lv < 12; lv++) {
+    const grid = gm.levelGrid(g, h, h.levels[lv]);
+    let n = 0, ok = 0;
+    for (let s = 0; s < grid.entries.length && n < 150; s += 97) {
+      const e = grid.entries[s];
+      if (!e.sz || e.off < h.regionEnd) continue;
+      for (const t of gm.cluster(g, h, e.off, e.sz).tiles) {
+        n++;
+        if (gm.readElements(gm.read(g, t.off, t.size), { W: t.attr, simple: !!t.b10 }).ok) ok++;
+      }
+    }
+    assert.ok(n > 0, 'L' + lv + ': есть тайлы');
+    assert.equal(ok, n, 'L' + lv + ': сошлось ' + ok + ' из ' + n);
+  }
 });

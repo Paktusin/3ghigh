@@ -25,11 +25,13 @@ const CLUSTER0_KEYS = [
   [0, 64], [32, 64], [0, 96], [32, 96], [64, 64], [96, 64], [64, 96], [96, 96],
 ];
 
+// линия в сырых единицах тайла (как [[x,y]…]); всё внутри тайла L0 32×32
 const road = (n, x0 = 100, y0 = 50) => {
-  const points = [];
-  for (let i = 0; i < n; i++) points.push({ x: x0 + i * 10, y: y0 - i * 3 });
-  return points;
+  const pts = [];
+  for (let i = 0; i < n; i++) pts.push([x0 + i * 10, y0 + i * 3]);
+  return pts;
 };
+const R = (n, x0, y0, cls = 4, e9 = 8) => ({ pts: road(n, x0, y0), cls, e9 });
 
 // ── тайл ───────────────────────────────────────────────────────────────────
 
@@ -39,69 +41,56 @@ test('тайл: без дорог собирается ровно общий п�
   assert.equal(b.toString('hex'), EMPTY_TILE_HEX, 'байт в байт как в EJ211');
 });
 
-test('тайл: заголовок 10 байт, секции стыкуются без зазоров', () => {
-  const blob = G.tileBlob([{ points: road(4), name: 'A1' }, { points: road(3), name: 'A2' }]);
+test('тайл: заголовок 10 байт, элементов = рамка + линии, S1/S2 пустые', () => {
+  const blob = G.tileBlob([R(4), R(3)]);
   const g = gm.openBuffer(blob);
   const th = gm.tileHeader(g, 0, blob.length);
   assert.equal(th.ok, true, 'читатель признаёт заголовок');
-  assert.equal(th.magic, 0xE028);
-  assert.equal(th.count, 3, 'рамка плюс две дороги');
-  assert.equal(th.geo[0], 10, 'поток элементов начинается сразу за заголовком');
-  assert.equal(th.off0, 10 + G.FRAME_ELEMENT.length + (11 + 4 * 4) + (11 + 3 * 4));
-  assert.equal(th.off2, blob.length, 'S3 пуста — секции покрывают блоб целиком');
+  assert.equal(th.count, 3, 'рамка плюс две линии; управляющие байты элементами не считаются');
+  assert.equal(th.geo[0], 10);
+  assert.equal(th.off1 - th.off0, 2, 'S1 = 00 00');
+  assert.equal(th.off2 - th.off1, 2, 'S2 = 00 00');
+  assert.equal(th.off2, blob.length);
+  assert.equal(gm.readElements(blob).ok, true, 'поток сходится с off0');
 });
 
-test('тайл: счётчик реестра S1 на единицу меньше числа элементов', () => {
-  for (const n of [0, 1, 2, 5]) {
-    const roads = [];
-    for (let i = 0; i < n; i++) roads.push({ points: road(2), name: 'R' + i });
-    const blob = G.tileBlob(roads);
-    const r = G.readTileRoads(blob);
-    assert.equal(r.count, n + 1, n + ' дорог: элементов');
-    assert.equal(r.s1count, n, n + ' дорог: счётчик S1 (рамка записи не имеет)');
-  }
-});
-
-test('тайл: дороги читаются обратно теми же точками и именами', () => {
+test('тайл: дороги — линии (C1), E0 по группе, 0x3D затем 0x31, точки возвращаются', () => {
   const roads = [
-    { points: road(2), name: 'A1' },
-    { points: road(16, 500, -200), name: 'LEFKOSIA' },
-    { points: road(7, 40, 3), name: 'A1' },
+    { pts: road(2), cls: 4, e9: 8 },
+    { pts: road(16, 500, 200), cls: 1, e9: 24 },
+    { pts: road(7, 40, 3), cls: 4, e9: 8 },
+    { pts: [[0, 17472], [25248, 0]], cls: 2, e9: 19 },
   ];
   const blob = G.tileBlob(roads);
   const r = G.readTileRoads(blob);
-  assert.equal(r.roads.length, 3);
-  r.roads.forEach((got, i) => {
-    assert.deepEqual(got.points, roads[i].points, 'дорога ' + i + ': точки');
-  });
-  assert.deepEqual(r.roads.map(x => x.name), ['A1', 'LEFKOSIA', 'A1']);
-  assert.equal(r.names.length, 2, 'повторное имя не плодит строку в S2');
+  assert.equal(r.roads.length, 4);
+  assert.equal(r.els[0].type, 0, 'первой идёт рамка');
+  assert.deepEqual([r.els[1].ctl, r.els[1].e9], [[0xc1, 0xe0], 8], 'C1 один раз, затем E0 группы');
+  assert.deepEqual(r.els.slice(2).map(e => e.ctl.length ? e.ctl : null), [null, [0xe0], [0xe0]], 'C1 больше не повторяется');
+  // группы по E0 (8, 19, 24), внутри — по атрибуту; повтор атрибута — 0x31
+  assert.deepEqual(r.roads.map(x => [x.cls, x.e9, x.head]),
+    [[4, 8, 0x3d], [4, 8, 0x31], [2, 19, 0x3d], [1, 24, 0x3d]]);
+  const want = [roads[0], roads[2], roads[3], roads[1]];
+  r.roads.forEach((got, i) => assert.deepEqual(got.points.map(q => [q.x, q.y]), want[i].pts, 'линия ' + i));
 });
 
-test('тайл: последнюю дорогу достаёт и независимый читатель gdb.js', () => {
-  const pts = road(12, 1000, -300);
-  const blob = G.tileBlob([{ points: road(3), name: 'A1' }, { points: pts, name: 'A2' }]);
-  const g = gm.openBuffer(blob);
-  const pr = gm.tilePoints(g, 0, blob.length);
-  assert.ok(pr, 'узор ломаной распознан');
-  assert.equal(pr.count, pts.length);
-  assert.deepEqual(pr.points, pts);
+test('тайл: прямой путь (грубые уровни) — рамка и линии по ширине тайла', () => {
+  for (const lv of [1, 4, 8, 11]) {
+    const L = G.EUROPE_LEVELS[lv];
+    const f = G.tileFormat(L, L.lw, L.lh);
+    assert.equal(f.simple, true);
+    const pts = [[0, 0], [f.X, f.Y], [Math.floor(f.X / 3), 1]];
+    const blob = G.tileBlob([{ pts, cls: 1, e9: 24 }], f);
+    const r = G.readTileRoads(blob, { W: f.W, simple: true });
+    assert.deepEqual(r.roads[0].points.map(q => [q.x, q.y]), pts, 'L' + lv + ' W' + f.W);
+  }
 });
 
-test('тайл: пустое имя заменяется на CY, длинное режется, не-латиница — на «?»', () => {
-  const blob = G.tileBlob([
-    { points: road(2), name: '' },
-    { points: road(2), name: 'A'.repeat(40) },
-    { points: road(2), name: 'ЛЕВКОСИЯ' },
-  ]);
-  const r = G.readTileRoads(blob);
-  assert.deepEqual(r.names, ['CY', 'A'.repeat(15), '????????']);
-});
-
-test('тайл: точек больше 254 и блоб больше 64 КБ отвергаются', () => {
-  assert.throws(() => G.tileBlob([{ points: road(255) }]), /254/);
+test('тайл: длинная линия и переполненный блоб', () => {
+  const r = G.readTileRoads(G.tileBlob([{ pts: road(300, 0, 0), cls: 4, e9: 8 }]));
+  assert.equal(r.roads[0].points.length, 300, 'счётчик 0xFF + u16');
   const many = [];
-  for (let i = 0; i < 700; i++) many.push({ points: road(100), name: 'R' });
+  for (let i = 0; i < 700; i++) many.push(R(100));
   assert.throws(() => G.tileBlob(many), /u16/);
 });
 
@@ -143,7 +132,7 @@ function cyprusVolume(roads) {
 }
 
 test('том: шапка и таблица уровней читаются штатным читателем', () => {
-  const v = cyprusVolume([{ points: road(5), name: 'A1' }]);
+  const v = cyprusVolume([R(5)]);
   const g = gm.openBuffer(v.gdb, v.gd2);
   const h = gm.header(g);
   assert.equal(h.sig, 'DEADBEEF');
@@ -163,7 +152,7 @@ test('том: шапка и таблица уровней читаются шт�
 });
 
 test('том: заголовки уровней те же, что у EJ211 (ячейка и пороги масштаба)', () => {
-  const v = cyprusVolume([{ points: road(3) }]);
+  const v = cyprusVolume([R(3)]);
   const g = gm.openBuffer(v.gdb, v.gd2);
   const h = gm.header(g);
   h.levels.forEach((L, i) => {
@@ -180,7 +169,7 @@ test('том: заголовки уровней те же, что у EJ211 (яч
 });
 
 test('том: сетка L0 — 256×168 по рамке и слот считается по формуле', () => {
-  const v = cyprusVolume([{ points: road(4), name: 'A1' }]);
+  const v = cyprusVolume([R(4)]);
   const g = gm.openBuffer(v.gdb, v.gd2);
   const h = gm.header(g);
   const gr = gm.levelGrid(g, h, h.levels[0]);
@@ -192,8 +181,8 @@ test('том: сетка L0 — 256×168 по рамке и слот счита�
 });
 
 test('том: тайл с дорогой лежит там, где его ищет читатель', () => {
-  const pts = road(9, 700, -120);
-  const v = cyprusVolume([{ points: pts, name: 'A1' }]);
+  const pts = road(9, 700, 120);
+  const v = cyprusVolume([{ pts, cls: 1, e9: 24 }]);
   const g = gm.openBuffer(v.gdb, v.gd2);
   const h = gm.header(g);
   const gr = gm.levelGrid(g, h, h.levels[0]);
@@ -207,8 +196,9 @@ test('том: тайл с дорогой лежит там, где его ище
   assert.ok(t, 'тайл с нужным ключом есть в кластере');
   const th = gm.tileHeader(g, t.off, t.size);
   assert.equal(th.ok, true);
-  const pr = gm.tilePoints(g, t.off, t.size);
-  assert.deepEqual(pr.points, pts, 'из тома вычитываются ровно наши точки');
+  assert.deepEqual([t.attr, t.b10], [16, 0], 'L0: ширина 16, сжатый путь');
+  const rr = G.readTileRoads(gm.read(g, t.off, t.size), { W: t.attr, simple: !!t.b10 });
+  assert.deepEqual(rr.roads[0].points.map(q => [q.x, q.y]), pts, 'из тома вычитываются ровно наши точки');
 
   // остальные 15 клеток кластера — общий пустой тайл, один на всех
   const holes = c.tiles.filter(x => x !== t);
@@ -218,7 +208,7 @@ test('том: тайл с дорогой лежит там, где его ище
 });
 
 test('том: пустых слотов нет — морской кластер ссылается на общий пустой тайл', () => {
-  const v = cyprusVolume([{ points: road(2) }]);
+  const v = cyprusVolume([R(2)]);
   const g = gm.openBuffer(v.gdb, v.gd2);
   const h = gm.header(g);
   const gr = gm.levelGrid(g, h, h.levels[0]);
@@ -243,7 +233,8 @@ test('том: кластер на грубом уровне получает к�
   const lvl = 5, cx = 9, cy = 4;
   const levels = G.EUROPE_LEVELS.map((l, i) => Object.assign({}, l, {
     clusters: i === lvl
-      ? [{ cx, cy, lw: l.lw, lh: l.lh, tiles: [{ ix: 0, iy: 0, lw: l.lw, lh: l.lh, blob: G.tileBlob([{ points: road(5), name: 'L5' }]) }] }]
+      ? [{ cx, cy, lw: l.lw, lh: l.lh, tiles: [{ ix: 0, iy: 0, lw: l.lw, lh: l.lh,
+        blob: G.tileBlob([{ pts: [[0, 0], [100, 200]], cls: 1, e9: 24 }], G.tileFormat(l, l.lw, l.lh)) }] }]
       : [],
   }));
   const v = G.build({ levels });
@@ -265,7 +256,8 @@ test('том: кластер на грубом уровне получает к�
 test('том: уровни выровнены на 4 и все двенадцать читаются', () => {
   const levels = G.EUROPE_LEVELS.map((l, i) => Object.assign({}, l, {
     clusters: [{ cx: 1, cy: 1, lw: l.lw, lh: l.lh,
-      tiles: [{ ix: 0, iy: 0, lw: l.lw, lh: l.lh, blob: G.tileBlob([{ points: road(3), name: 'L' + i }]) }] }],
+      tiles: [{ ix: 0, iy: 0, lw: l.lw, lh: l.lh,
+        blob: G.tileBlob([{ pts: [[0, 0], [30, 20]], cls: 1, e9: 24 }], G.tileFormat(l, l.lw, l.lh)) }] }],
   }));
   const v = G.build({ levels });
   const g = gm.openBuffer(v.gdb, v.gd2);
@@ -280,66 +272,64 @@ test('том: уровни выровнены на 4 и все двенадца�
 
 // ── укладка дорог из градусов ──────────────────────────────────────────────
 
-test('дороги: каждая попадает в тайл юго-западного угла своей рамки', () => {
-  const lines = [
-    { name: 'A1', pts: [[33.30, 35.16], [33.32, 35.17]] },
-    { name: 'A2', pts: [[33.30, 35.16], [33.31, 35.16]] },
-    { name: 'A6', pts: [[32.30, 35.05], [32.31, 35.06]] },   // Акамас — другой кластер
-  ];
-  const r = G.roadsToLevel(lines);
-  assert.equal(r.tiles, 2, 'две первые дороги в одном тайле, третья в своём');
-  assert.equal(r.clusters, 2);
-  assert.equal(r.skipped, 0);
-});
-
-test('дороги: ломаная из одной точки и слишком длинная пропускаются', () => {
-  const r = G.roadsToLevel([
-    { name: 'точка', pts: [[33.3, 35.16]] },
-    { name: 'длинная', pts: new Array(300).fill(0).map((_, i) => [33.3 + i * 0.0001, 35.16]) },
-    { name: 'хорошая', pts: [[33.3, 35.16], [33.31, 35.17]] },
-  ]);
-  assert.equal(r.skipped, 2);
-  assert.equal(r.tiles, 1);
-});
-
-test('дороги: градусы возвращаются из тома с точностью до сотой доли', () => {
-  const deg = [[33.300, 35.160], [33.320, 35.170], [33.340, 35.185]];
-  const v = G.volumeFromRoads([{ name: 'A1', pts: deg }]);
+// все линии уровня из тома: [{t, pts: [[lon,lat]…], cls, e9}]
+function linesOf(v, lv) {
   const g = gm.openBuffer(v.gdb, v.gd2);
   const h = gm.header(g);
-  const gr = gm.levelGrid(g, h, h.levels[0]);
-  const c0 = v.map.levels[0].clusters[0];
-  const t = gm.cluster(g, h, c0.off, c0.size).tiles.find(x => x.size > 40);
-  const pr = gm.tilePoints(g, t.off, t.size, t.x, t.y);
-  assert.equal(pr.count, deg.length);
-  pr.points.forEach((p, i) => {
-    assert.ok(Math.abs(p.lon - deg[i][0]) < 0.01, 'точка ' + i + ': долгота ' + p.lon);
-    assert.ok(Math.abs(p.lat - deg[i][1]) < 0.01, 'точка ' + i + ': широта ' + p.lat);
-  });
-  assert.equal(gr.entries[c0.slot].off, c0.off, 'кластер стоит в своём слоте');
-});
-
-test('дороги: уходящая на запад не теряется — привязка идёт по углу рамки', () => {
-  // первая точка у западного края тайла, дальше дорога идёт на запад:
-  // при привязке по первой точке x стал бы отрицательным и дорога пропала бы
-  const west = [[33.3000, 35.160], [33.2900, 35.160], [33.2800, 35.161]];
-  const r = G.roadsToLevel([{ name: 'западная', pts: west }]);
-  assert.equal(r.skipped, 0, 'дорога не пропущена');
-  assert.equal(r.tiles, 1, 'дорога легла в один тайл');
-
-  const v = G.volumeFromRoads([{ name: 'западная', pts: west }]);
-  const g = gm.openBuffer(v.gdb, v.gd2);
-  const h = gm.header(g);
-  const gr = gm.levelGrid(g, h, h.levels[0]);
-  let found = 0;
-  for (const e of gr.entries) {
-    if (!e.sz || e.off < h.regionEnd) continue;
-    for (const t of gm.cluster(g, h, e.off, e.sz).tiles) {
-      const rd = G.readTileRoads(gm.read(g, t.off, t.size));
-      for (const one of rd.roads) if (one.points.length === west.length) found++;
+  const hd = gm.levelHead(gm.read(g, h.levels[lv].offset, 100));
+  const k0 = gm.keyOrigin(lv);
+  const out = [];
+  for (const cl of v.map.levels[lv].clusters) {
+    for (const t of cl.tiles) {
+      if (t.off === v.map.emptyTile.off) continue;
+      const rr = G.readTileRoads(gm.read(g, t.off, t.size), { W: t.attr, simple: !!t.b10 });
+      const f = G.tileFormat(G.EUROPE_LEVELS[lv], t.lw, t.lh);
+      for (const r of rr.roads) {
+        out.push({ t, f, raw: r.points, cls: r.cls, e9: r.e9, pts: r.points.map(p => [
+          gm.lonOfCellL((t.x - k0.x0) + (p.x * (1 << hd.shift)) / hd.cellX, hd.cellX),
+          gm.latOfCellL((t.y - k0.y0) + (p.y * (1 << hd.shift)) / hd.cellY, hd.cellY),
+        ]) });
+      }
     }
   }
-  assert.ok(found > 0, 'дорога нашлась в томе');
+  return out;
+}
+
+test('дороги: линия режется по границам тайлов, куски стыкуются на границе', () => {
+  // ~0,9° по долготе — заведомо через несколько тайлов L0
+  const deg = [[32.90, 35.10], [33.40, 35.13], [33.80, 35.20]];
+  const v = G.volumeFromRoads([{ cls: 'primary', pts: deg }]);
+  const ls = linesOf(v, 0);
+  assert.ok(ls.length > 3, 'кусков больше трёх: ' + ls.length);
+  for (const l of ls) {
+    assert.ok(l.raw.every(p => p.x >= 0 && p.y >= 0 && p.x <= l.f.X && p.y <= l.f.Y), 'все точки внутри тайла');
+    assert.deepEqual([l.cls, l.e9], [2, 19], 'primary на L0 — класс 2, E0 19');
+  }
+  // у каждого куска хотя бы один конец — на краю тайла (кроме самых крайних)
+  const onEdge = l => [l.raw[0], l.raw[l.raw.length - 1]].some(p => p.x === 0 || p.y === 0 || p.x === l.f.X || p.y === l.f.Y);
+  assert.ok(ls.filter(onEdge).length >= ls.length - 0, 'куски кончаются на границе тайла');
+});
+
+test('дороги: ломаная из одной точки пропускается, длинная ложится', () => {
+  const r = G.roadsToLevel([
+    { name: 'точка', pts: [[33.3, 35.16]] },
+    { name: 'длинная', pts: new Array(300).fill(0).map((_, i) => [33.3 + i * 0.0001, 35.16 + (i % 2) * 0.0001]) },
+    { name: 'хорошая', pts: [[33.3, 35.16], [33.31, 35.17]] },
+  ]);
+  assert.equal(r.skipped, 1);
+  assert.ok(r.tiles >= 1);
+});
+
+test('дороги: градусы возвращаются из тома с точностью до метров', () => {
+  const deg = [[33.300, 35.160], [33.302, 35.161], [33.304, 35.1605]];
+  const v = G.volumeFromRoads([{ cls: 'motorway', pts: deg }]);
+  const ls = linesOf(v, 0);
+  assert.equal(ls.length, 1, 'дорога в одном тайле');
+  assert.deepEqual([ls[0].cls, ls[0].e9], [1, 24], 'автобан на L0 — класс 1, E0 24');
+  ls[0].pts.forEach((p, i) => {
+    assert.ok(Math.abs(p[0] - deg[i][0]) < 2e-5, 'точка ' + i + ': долгота ' + p[0]);
+    assert.ok(Math.abs(p[1] - deg[i][1]) < 2e-5, 'точка ' + i + ': широта ' + p[1]);
+  });
 });
 
 test('дороги: плотному кластеру достаётся тайл поменьше', () => {
@@ -347,8 +337,8 @@ test('дороги: плотному кластеру достаётся тай�
   // пятно целиком внутри одного тайла 2^5, но шириной в полторы ячейки:
   // уменьшение тайла его разрежет, а на 2^5 блоб переполнит u16
   const lines = [];
-  for (let i = 0; i < 450; i++) {
-    const lon = 33.302 + (i % 25) * 0.00064, lat = 35.146 + Math.floor(i / 25) * 0.00044;
+  for (let i = 0; i < 1200; i++) {
+    const lon = 33.302 + (i % 25) * 0.00064, lat = 35.146 + Math.floor(i / 25) * 0.00022;
     const pts = [];
     for (let k = 0; k < 40; k++) pts.push([lon + k * 0.00002, lat + (k % 2) * 0.00002]);
     lines.push({ name: 'R' + i, pts });
@@ -397,40 +387,34 @@ test('уровни: тайл любого уровня влезает в u16 п�
 });
 
 test('грубые уровни: дорога через весь Кипр возвращается из тома в градусах', () => {
-  // На L0 такая дорога не помещается: 2,1° — это 154 000 мировых единиц, а x
-  // точки — u16. На грубых уровнях её укладывает сдвиг.
   const road = [[32.42, 34.75], [33.00, 35.10], [33.36, 35.17], [34.55, 35.65]];
   const lines = [{ name: 'A1', cls: 'motorway', pts: road }];
-
-  assert.equal(G.roadsToLevel(lines, { level: 0 }).tiles, 0, 'на L0 не легла');
-
   // предел разрешения уровня: половина сырой единицы в километрах по долготе
-  const limit = L => (1 << L.shift) / gm.UNITS_PER_LON * 88.9;
-  for (const lv of [1, 2, 3, 5, 8, 11]) {
+  const limit = L => Math.max(0.002, (1 << L.shift) / gm.UNITS_PER_LON * 88.9);
+  for (const lv of [0, 1, 2, 3, 5, 8, 11]) {
     const v = G.volumeFromRoads(lines, { levels: [lv] });
-    const g = gm.openBuffer(v.gdb, v.gd2);
-    const h = gm.header(g);
-    const hd = gm.levelHead(gm.read(g, h.levels[lv].offset, 100));
-    assert.equal(hd.shift, G.EUROPE_LEVELS[lv].shift, 'сдвиг уровня записан');
-
-    let t = null;
-    for (const cl of v.map.levels[lv].clusters) { t = cl.tiles.find(x => x.size > 40) || t; }
-    assert.ok(t, 'L' + lv + ': тайл с дорогой есть');
-
-    const rr = G.readTileRoads(gm.read(g, t.off, t.size));
-    assert.equal(rr.roads.length, 1);
-    const k0 = gm.keyOrigin(lv);
-    const back = rr.roads[0].points.map(p => [
-      gm.lonOfCellL((t.x - k0.x0) + (p.x * (1 << hd.shift)) / hd.cellX, hd.cellX),
-      gm.latOfCellL((t.y - k0.y0) + (p.y * (1 << hd.shift)) / hd.cellY, hd.cellY),
-    ]);
-    assert.equal(back.length, road.length, 'L' + lv + ': все точки на месте');
-    back.forEach((p, i) => {
-      const err = Math.hypot((p[0] - road[i][0]) * 88.9, (p[1] - road[i][1]) * 111.1);
-      assert.ok(err <= limit(G.EUROPE_LEVELS[lv]), 'L' + lv + ' точка ' + i +
-        ': ошибка ' + err.toFixed(3) + ' км при пределе ' + limit(G.EUROPE_LEVELS[lv]).toFixed(3));
-    });
+    const ls = linesOf(v, lv);
+    assert.ok(ls.length > 0, 'L' + lv + ': линии есть');
+    const L = G.EUROPE_LEVELS[lv];
+    for (const l of ls) {
+      assert.equal(l.t.b10, lv === 0 ? 0 : 1, 'L' + lv + ': путь записи как у завода');
+      assert.ok(l.raw.every(p => p.x <= l.f.X && p.y <= l.f.Y), 'L' + lv + ': внутри тайла');
+    }
+    const all = ls.flatMap(l => l.pts);
+    for (const q of road) {
+      const err = Math.min(...all.map(p => Math.hypot((p[0] - q[0]) * 88.9, (p[1] - q[1]) * 111.1)));
+      assert.ok(err <= limit(L), 'L' + lv + ': вершина ' + q + ' — промах ' + err.toFixed(3) + ' км');
+    }
   }
+});
+
+test('грубые уровни: классы и E0 по уровню', () => {
+  assert.deepEqual(G.classFor(0, 'residential'), { cls: 4, e9: 8 });
+  assert.deepEqual(G.classFor(0, 'motorway_link'), { cls: 1, e9: 20 });
+  assert.deepEqual(G.classFor(2, 'secondary'), { cls: 3, e9: 15 });
+  assert.deepEqual(G.classFor(5, 'primary'), { cls: 9, e9: 25 });
+  assert.deepEqual(G.classFor(7, 'motorway'), { cls: 0, e9: 40 });
+  assert.deepEqual(G.classFor(11, 'motorway'), { cls: 0, e9: 0xff });
 });
 
 test('грубые уровни: классы дорог отсеиваются по пирамиде', () => {

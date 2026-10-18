@@ -35,11 +35,11 @@
 //
 //   ── ТАЙЛ ──────────────────────────────────────────────────────────────
 //     заголовок 10 байт {u16 off0, u16 off1, u16 off2, u16 элементов, u16 0xE028}
-//     [10 … off0)  поток элементов: сперва служебная рамка, затем наши ломаные
-//     [off0…off1)  S1 — реестр: u16 счётчик (= элементов − 1), 0x02, u16 ноль,
-//                  затем на каждый элемент запись «32 <u16 строка> f0»
-//     [off1…off2)  S2 — имена: u16 счётчик, u16 ноль, затем «байт длины + байты»
-//     [off2…конец) S3 — у собранных тайлов пуста
+//     [10 … off0)  поток элементов: рамка (многоугольник 0x50), C1, затем
+//                  линии группами «E0 v» — см. раздел «тайл» ниже и gm.readElements
+//     [off0…off1)  S1 = 00 00     [off1…off2)  S2 = 00 00
+//     байт +9 записи тайла — ширина координаты, +10 — путь записи точек
+//     (0 — сжатый, L0; 1 — прямой, L1…L11)
 //
 //   node src/gdbgen.js --roads cy.geojson --out out/gdbgen [--name CY]
 //   node src/gdbgen.js --demo --out out/gdbgen
@@ -72,155 +72,110 @@ const TAIL_576 = Buffer.from(
 // высота сетки H (ширина W считается из рамки) и шесть байт-меток с +82.
 // H взято из оригинала: count = (размер уровня − 1163)/6 делится на W у всех
 // уровней, кроме L4 (7990/102 = 78,33) — там берём 78 и говорим об этом вслух.
+// simple — точки прямым путём (байт +10 записи тайла = 1): так у всех тайлов
+// L1…L11 завода, у L0 — сжатый путь (0).
 // lw/lh — размер тайла в ячейках (log2): у L0 это 5 при potX 7, то есть 4×4
 // тайла в кластере; у грубых уровней lw = potX, то есть один тайл на кластер
 // (на выборке по 200–235 кластеров с уровня — преобладающая форма).
 const EUROPE_LEVELS = [
   { cellX: 789, cellY: 546, potX: 7, potY: 7, from: 0, to: 40000, H: 280, tag: '000700010c00', shift: 0, lw: 5, lh: 5 },
-  { cellX: 1984, cellY: 1984, potX: 6, potY: 6, from: 40000, to: 150000, H: 155, tag: '030600010c00', shift: 3, lw: 6, lh: 6 },
-  { cellX: 6336, cellY: 4416, potX: 6, potY: 6, from: 150000, to: 300000, H: 70, tag: '050600010c00', shift: 5, lw: 6, lh: 6 },
-  { cellX: 6336, cellY: 4416, potX: 6, potY: 6, from: 300000, to: 460000, H: 70, tag: '060600010c00', shift: 6, lw: 6, lh: 6 },
-  { cellX: 7936, cellY: 7936, potX: 5, potY: 5, from: 460000, to: 1500000, H: 78, tag: '070600010c00', shift: 7, lw: 5, lh: 5 },
-  { cellX: 15360, cellY: 15360, potX: 6, potY: 6, from: 1500000, to: 2000000, H: 20, tag: '090600010c00', shift: 9, lw: 6, lh: 6 },
-  { cellX: 15360, cellY: 15360, potX: 6, potY: 6, from: 2000000, to: 3500000, H: 20, tag: '090600010c00', shift: 9, lw: 6, lh: 6 },
-  { cellX: 30720, cellY: 30720, potX: 5, potY: 5, from: 3500000, to: 4000000, H: 20, tag: '0a0600010c00', shift: 10, lw: 5, lh: 5 },
-  { cellX: 63488, cellY: 63488, potX: 4, potY: 4, from: 4000000, to: 5900000, H: 20, tag: '0a0600010c00', shift: 10, lw: 4, lh: 4 },
-  { cellX: 253952, cellY: 253952, potX: 3, potY: 3, from: 5900000, to: 8000000, H: 10, tag: '0b0600010c00', shift: 11, lw: 3, lh: 3 },
-  { cellX: 253952, cellY: 253952, potX: 3, potY: 3, from: 8000000, to: 12500000, H: 10, tag: '0b0600010c00', shift: 11, lw: 3, lh: 3 },
-  { cellX: 253952, cellY: 253952, potX: 3, potY: 3, from: 12500000, to: 2147483647, H: 10, tag: '0c0100010c00', shift: 12, lw: 3, lh: 3 },
+  { cellX: 1984, cellY: 1984, potX: 6, potY: 6, from: 40000, to: 150000, H: 155, tag: '030600010c00', shift: 3, lw: 6, lh: 6, simple: true },
+  { cellX: 6336, cellY: 4416, potX: 6, potY: 6, from: 150000, to: 300000, H: 70, tag: '050600010c00', shift: 5, lw: 6, lh: 6, simple: true },
+  { cellX: 6336, cellY: 4416, potX: 6, potY: 6, from: 300000, to: 460000, H: 70, tag: '060600010c00', shift: 6, lw: 6, lh: 6, simple: true },
+  { cellX: 7936, cellY: 7936, potX: 5, potY: 5, from: 460000, to: 1500000, H: 78, tag: '070600010c00', shift: 7, lw: 5, lh: 5, simple: true },
+  { cellX: 15360, cellY: 15360, potX: 6, potY: 6, from: 1500000, to: 2000000, H: 20, tag: '090600010c00', shift: 9, lw: 6, lh: 6, simple: true },
+  { cellX: 15360, cellY: 15360, potX: 6, potY: 6, from: 2000000, to: 3500000, H: 20, tag: '090600010c00', shift: 9, lw: 6, lh: 6, simple: true },
+  { cellX: 30720, cellY: 30720, potX: 5, potY: 5, from: 3500000, to: 4000000, H: 20, tag: '0a0600010c00', shift: 10, lw: 5, lh: 5, simple: true },
+  { cellX: 63488, cellY: 63488, potX: 4, potY: 4, from: 4000000, to: 5900000, H: 20, tag: '0a0600010c00', shift: 10, lw: 4, lh: 4, simple: true },
+  { cellX: 253952, cellY: 253952, potX: 3, potY: 3, from: 5900000, to: 8000000, H: 10, tag: '0b0600010c00', shift: 11, lw: 3, lh: 3, simple: true },
+  { cellX: 253952, cellY: 253952, potX: 3, potY: 3, from: 8000000, to: 12500000, H: 10, tag: '0b0600010c00', shift: 11, lw: 3, lh: 3, simple: true },
+  { cellX: 253952, cellY: 253952, potX: 3, potY: 3, from: 12500000, to: 2147483647, H: 10, tag: '0c0100010c00', shift: 12, lw: 3, lh: 3, simple: true },
 ];
 
 // ── тайл ───────────────────────────────────────────────────────────────────
+//
+// Поток элементов — по коду прошивки (итератор FUN_08cb3f90, декодер точек
+// FUN_092526f0; разбор и проверка — `gm.readElements`, docs/formats/gdb.md,
+// «Дороги не рисуются…»). Тайл, как у завода:
+//   1. рамка — многоугольник класса 16 (атрибут 0x50) по границе тайла;
+//   2. `C1` — дальше линии (тип держится до смены);
+//   3. на каждую группу — `E0 <v>` (поле +9 итератора), затем линии: головной
+//      0x3D (id 0xFFFF, атрибут u32) у первой линии группы и 0x31 (атрибут
+//      повторяется) у остальных, число точек байтом, точки.
+// Точки — сжатым путём на L0 (байт w, якорь, смещения по w бит) и прямым на
+// L1…L11 (по ширине тайла 8/12/16 бит) — ровно так раскладывает завод: байт
+// +10 записи тайла 0 у всех тайлов L0 и 1 у всех тайлов L1…L11.
+//
+// S1/S2 пишутся пустыми («00 00»), как у общего пустого тайла. У заводских
+// линий id всегда 0xFFFF, и счётчик S1 не равен числу элементов (у тайла
+// Родоса 235 при 592) — связь линии с записью S1 из кода не выведена, поэтому
+// имена на линии не вешаются: сначала рисование.
 
-// Служебная рамка — первый элемент каждого тайла; записи в S1 у неё нет,
-// поэтому счётчик реестра всегда на единицу меньше числа элементов. Байты
-// взяты из общего пустого тайла и одинаковы у 2432 из 2500 осмотренных тайлов;
-// смысл четырёх точек (50496,3) (50497,4354) (1,4353) (0,0) не установлен.
+// Служебная рамка общего пустого тайла L0 (тайл 32×32 ячейки): то же, что
+// gm.encodeFrame(25248, 17472). Оставлено константой как якорь для тестов.
 const FRAME_ELEMENT = Buffer.from('4d000000508f00000000c5400003c54111020001110100000000', 'hex');
 
 const MAGIC = 0xE028;
 const MAX_BLOB = 0xffff;              // смещения секций — u16, длиннее тайл не бывает
-const MAX_NAME = 15;                  // в байте длины строки S2 значимы младшие 4 бита
 
-function s1record(nameIdx) {
-  const r = Buffer.alloc(4);
-  r[0] = 0x32; r.writeUInt16BE(nameIdx, 1); r[3] = 0xf0;
-  return r;
+// Формат тайла уровня: размах в сырых единицах, путь записи точек и ширина.
+// Размах тайла = (ячейка << lw) >> сдвиг — целое у всех уровней EJ211.
+function tileFormat(L, lw, lh) {
+  const X = (L.cellX * (1 << lw)) >> L.shift, Y = (L.cellY * (1 << lh)) >> L.shift;
+  const simple = !!L.simple;
+  const m = Math.max(X, Y);
+  const W = !simple ? 16 : m <= 0xff ? 8 : m <= 0xfff ? 12 : 16;
+  return { X, Y, W, simple };
 }
 
-// Строки в тайлах оригинала однобайтные (латиница: «CALLE GENERAL SERRADOR»,
-// «NAPOLI-CAGLIARI», коды стран). Всё, что в один байт latin1 не ложится,
-// заменяем на «?» — молча портить имя хуже, чем показать пропуск.
-function s2string(name) {
-  const clean = [...String(name)].map(ch => (ch.charCodeAt(0) <= 0xff ? ch : '?')).join('');
-  const s = Buffer.from(clean.slice(0, MAX_NAME), 'latin1');
-  return Buffer.concat([Buffer.from([s.length]), s]);
-}
+const L0_FORMAT = { X: 25248, Y: 17472, W: 16, simple: false };
 
-// Собрать блоб тайла. roads — массив {points: [{x,y}…], name}: точки в мировых
-// единицах ОТ НАЧАЛА ТАЙЛА (x беззнаковый u16, y знаковый i16).
-// Без дорог выходит ровно общий пустой тайл оригинала — 40 байт.
-function tileBlob(roads = [], opts = {}) {
-  const frame = opts.frame || FRAME_ELEMENT;
-  const s3 = opts.s3 || Buffer.alloc(0);
-  const yConst = opts.yConst === undefined ? 0x50 : opts.yConst;
-
-  const elems = [frame];
-  const names = [];
-  for (const r of roads) {
-    const pts = r.points || r;
-    elems.push(gm.encodePoints(pts, yConst));
-    names.push((r.name === undefined || r.name === null || r.name === '') ? 'CY' : r.name);
-  }
-
-  // на каждое имя — одна строка в S2, повторы не плодим
-  const uniq = [], idxOf = new Map();
-  for (const nm of names) {
-    const key = String(nm).slice(0, MAX_NAME);
-    if (!idxOf.has(key)) { idxOf.set(key, uniq.length); uniq.push(key); }
-  }
-
-  const s1 = names.length
-    ? Buffer.concat([
-      (() => { const hbuf = Buffer.alloc(5); hbuf.writeUInt16BE(names.length, 0); hbuf[2] = 2; return hbuf; })(),
-      ...names.map(nm => s1record(idxOf.get(String(nm).slice(0, MAX_NAME)))),
-    ])
-    : Buffer.from([0, 0]);
-  const s2 = uniq.length
-    ? Buffer.concat([
-      (() => { const hbuf = Buffer.alloc(4); hbuf.writeUInt16BE(uniq.length, 0); return hbuf; })(),
-      ...uniq.map(s2string),
-    ])
-    : Buffer.from([0, 0]);
-
+// Собрать блоб тайла. roads — [{pts: [[x,y]…], cls, e9, attr?}] в сырых
+// единицах ОТ НАЧАЛА ТАЙЛА (0…X, 0…Y). fmt — {X, Y, W, simple}; по умолчанию
+// тайл 32×32 ячейки L0. Без дорог выходит ровно общий пустой тайл оригинала.
+function tileBlob(roads = [], fmt = L0_FORMAT) {
+  const f = Object.assign({}, L0_FORMAT, fmt);
+  const elems = [gm.encodeFrame(f.X, f.Y, f.W, f.simple)];
+  const sorted = roads.map((r, i) => Object.assign({ i }, r))
+    .sort((a, b) => (a.e9 - b.e9) || (attrOf(a) - attrOf(b)) || (a.i - b.i));
+  let e9 = null, attr = null;
+  sorted.forEach((r, k) => {
+    const pre = [];
+    if (k === 0) pre.push(0xc1);
+    if (r.e9 !== e9) { pre.push(0xe0, r.e9); e9 = r.e9; attr = null; }
+    const a = attrOf(r);
+    const pts = r.pts || r.points.map(p => [p.x, p.y]);
+    elems.push(Buffer.concat([Buffer.from(pre), gm.encodeLine(pts, a === attr ? null : a, f)]));
+    attr = a;
+  });
+  const s1 = Buffer.from([0, 0]), s2 = Buffer.from([0, 0]);
   const stream = Buffer.concat(elems);
-  const off0 = gm.TILE_HEAD + stream.length;
-  const off1 = off0 + s1.length;
-  const off2 = off1 + s2.length;
-  const total = off2 + s3.length;
-  if (total > MAX_BLOB) throw new Error('блоб тайла не влезает в u16: ' + total + ' б');
-
+  const off0 = gm.TILE_HEAD + stream.length, off1 = off0 + s1.length, off2 = off1 + s2.length;
+  if (off2 > MAX_BLOB) throw new Error('блоб тайла не влезает в u16: ' + off2 + ' б');
   const head = Buffer.alloc(gm.TILE_HEAD);
   head.writeUInt16BE(off0, 0);
   head.writeUInt16BE(off1, 2);
   head.writeUInt16BE(off2, 4);
-  head.writeUInt16BE(elems.length, 6);       // рамка тоже считается элементом
+  head.writeUInt16BE(elems.length, 6);       // только элементы: рамка + линии
   head.writeUInt16BE(MAGIC, 8);
-  return Buffer.concat([head, stream, s1, s2, s3]);
+  return Buffer.concat([head, stream, s1, s2]);
 }
+
+const attrOf = r => (r.attr === undefined ? r.cls : r.attr) >>> 0;
 
 // Общий пустой тайл: та же сборка без дорог. Совпадает с оригинальным
 // байт в байт — на этом держится проверка в тестах.
-function emptyTile() { return tileBlob([]); }
+function emptyTile(fmt) { return tileBlob([], fmt); }
 
-// Обратный разбор собранного тайла: все ломаные, а не только последняя (как
-// в gm.tilePoints, который ищет один узор в конце потока). Разбирает только то,
-// что умеет писать эта сборка: рамка + элементы вида
-//   1d <u32 yConst> <u8 N> 8f 00 00 00 00   затем N × u32
-function readTileRoads(blob) {
-  const off0 = blob.readUInt16BE(0), off1 = blob.readUInt16BE(2), off2 = blob.readUInt16BE(4);
-  const count = blob.readUInt16BE(6), magic = blob.readUInt16BE(8);
-  if (magic !== MAGIC) throw new Error('не тайл: магия 0x' + magic.toString(16));
-
-  // имена S2 — по порядку, чтобы подставить их разобранным дорогам
-  const names = [];
-  const s2 = blob.subarray(off1, off2);
-  if (s2.length > 4) {
-    let p = 4;
-    for (let k = 0; k < s2.readUInt16BE(0) && p < s2.length; k++) {
-      const len = s2[p] & 0x0f;
-      names.push(s2.subarray(p + 1, p + 1 + len).toString('latin1'));
-      p += 1 + len;
-    }
-  }
-  const s1 = blob.subarray(off0, off1);
-  const refs = [];
-  if (s1.length > 5) {
-    for (let p = 5; p + 4 <= s1.length; p += 4) {
-      if (s1[p] !== 0x32 || s1[p + 3] !== 0xf0) break;      // запись иной формы — не наша
-      refs.push(s1.readUInt16BE(p + 1));
-    }
-  }
-
-  const roads = [];
-  let p = gm.TILE_HEAD + FRAME_ELEMENT.length;              // рамку пропускаем
-  const stream = blob.subarray(0, off0);
-  while (p + 11 <= stream.length) {
-    if (stream[p] !== 0x1d) break;
-    const yConst = stream.readUInt32BE(p + 1), n = stream[p + 5];
-    if (stream[p + 6] !== 0x8f) break;
-    const at = p + 11;
-    if (at + n * 4 > stream.length) break;
-    const points = [];
-    for (let i = 0; i < n; i++) {
-      const v = stream.readUInt32BE(at + i * 4);
-      points.push({ x: v >>> 16, y: ((v & 0xffff) << 16) >> 16 });
-    }
-    const idx = refs[roads.length];
-    roads.push({ points, yConst, name: idx === undefined ? null : names[idx] });
-    p = at + n * 4;
-  }
-  return { count, off0, off1, off2, roads, names, s1count: s1.length > 1 ? s1.readUInt16BE(0) : 0 };
+// Обратный разбор тайла настоящим читателем потока (gm.readElements).
+// opts — {W, simple} записи тайла. Возвращает линии с точками и классами.
+function readTileRoads(blob, opts = {}) {
+  const r = gm.readElements(blob, { W: opts.W || 16, simple: !!opts.simple, points: true });
+  if (!r.ok) throw new Error('поток элементов не сошёлся с off0: ' + r.end + ' ≠ ' + r.off0);
+  const roads = r.els.filter(e => e.type === 1).map(e => ({
+    points: e.pts.map(([x, y]) => ({ x, y })), cls: e.cls, attr: e.attr, e9: e.e9, head: e.head,
+  }));
+  return { count: blob.readUInt16BE(6), els: r.els, roads };
 }
 
 // ── кластер ────────────────────────────────────────────────────────────────
@@ -245,8 +200,8 @@ function clusterBlob(tiles) {
     b.writeUInt16BE(t.lw, o + 4);
     b.writeUInt16BE(t.lh, o + 6);
     b[o + 8] = t.flag || 0;
-    b[o + 9] = t.attr === undefined ? 0x10 : t.attr;
-    b[o + 10] = 0;
+    b[o + 9] = t.attr === undefined ? 0x10 : t.attr;   // ширина координаты
+    b[o + 10] = t.b10 || 0;                            // 1 — точки прямым путём
     b.writeUInt32BE(t.off, o + 11);
     b.writeUInt32BE(t.size, o + 15);
   });
@@ -290,10 +245,20 @@ function build(spec) {
   const chunks = [];
   let pos = regionEnd;
   const put = buf => { const o = pos; chunks.push(buf); pos += buf.length; return o; };
-  const empty = emptyTile();
-  const emptyAt = put(empty);
+  // Пустой тайл — свой на каждый формат (уровень и размер тайла): рамка в нём
+  // по границе тайла и тем же путём записи точек, что у соседей. Тайл L0
+  // 32×32 — ровно общий пустой тайл оригинала.
+  const empties = new Map();
+  const emptyFor = (L, lw, lh) => {
+    const f = tileFormat(L, lw, lh);
+    const blob = emptyTile(f);
+    const k = blob.toString('hex') + ':' + f.W + ':' + f.simple;
+    if (!empties.has(k)) empties.set(k, { off: put(blob), size: blob.length, attr: f.W, b10: f.simple ? 1 : 0 });
+    return empties.get(k);
+  };
+  const e0 = emptyFor(EUROPE_LEVELS[0], 5, 5);
 
-  const map = { emptyTile: { off: emptyAt, size: empty.length }, levels: [] };
+  const map = { emptyTile: { off: e0.off, size: e0.size }, levels: [] };
   for (const p of plan) {
     const entries = new Array(p.count).fill(null).map(() => ({ off: 0, sz: 0 }));
     const placed = [];
@@ -309,18 +274,28 @@ function build(spec) {
       const byIdx = new Map();
       for (const t of c.tiles) byIdx.set(mortonIndex(t.ix, t.iy), t);
       const recs = [];
-      for (let k = 0, n = 1 << (p.L.potX - lw + p.L.potY - lh); k < n; k++) {
+      // Порядок Мортона. Сетка тайлов бывает неквадратной (2^3×2^2 ячеек при
+      // кластере 2^7: 16×32 тайла) — тогда обходим квадрат по большей стороне
+      // и пропускаем клетки за краем (Z-порядок, как в квадродереве завода).
+      // Раньше обход шёл по 2^(nx+ny) номерам, и у неквадратной сетки часть
+      // тайлов в кластер не попадала.
+      const nx = 1 << (p.L.potX - lw), ny = 1 << (p.L.potY - lh), side = Math.max(nx, ny);
+      for (let k = 0; k < side * side; k++) {
         // обратный Мортон: чётные биты — ix, нечётные — iy
         let ix = 0, iy = 0;
         for (let b = 0; b < 8; b++) { ix |= (k >> (2 * b) & 1) << b; iy |= (k >> (2 * b + 1) & 1) << b; }
+        if (ix >= nx || iy >= ny) continue;
         const x = p.key0.x0 + (c.cx << p.L.potX) + (ix << lw);
         const y = p.key0.y0 + (c.cy << p.L.potY) + (iy << lh);
         const t = byIdx.get(k);
         if (t) {
           const o = put(t.blob);
-          recs.push({ x, y, lw, lh, attr: t.attr, flag: t.flag, off: o, size: t.blob.length });
+          const f = tileFormat(p.L, lw, lh);
+          recs.push({ x, y, lw, lh, attr: t.attr === undefined ? f.W : t.attr,
+                      b10: t.b10 === undefined ? (f.simple ? 1 : 0) : t.b10, flag: t.flag, off: o, size: t.blob.length });
         } else {
-          recs.push({ x, y, lw, lh, off: emptyAt, size: empty.length });
+          const em = emptyFor(p.L, lw, lh);
+          recs.push({ x, y, lw, lh, attr: em.attr, b10: em.b10, off: em.off, size: em.size });
         }
       }
       const blob = clusterBlob(recs);
@@ -354,8 +329,9 @@ function build(spec) {
       for (let k = 0, n = 1 << (p.L.potX - lw + p.L.potY - lh); k < n; k++) {
         let ix = 0, iy = 0;
         for (let b = 0; b < 8; b++) { ix |= (k >> (2 * b) & 1) << b; iy |= (k >> (2 * b + 1) & 1) << b; }
+        const em = emptyFor(p.L, lw, lh);
         recs.push({ x: p.key0.x0 + (cx << p.L.potX) + (ix << lw), y: p.key0.y0 + (cy << p.L.potY) + (iy << lh),
-                    lw, lh, off: emptyAt, size: empty.length });
+                    lw, lh, attr: em.attr, b10: em.b10, off: em.off, size: em.size });
       }
       const blob = clusterBlob(recs);
       entries[slot] = { off: put(blob), sz: blob.length };
@@ -443,10 +419,8 @@ function degToTile(lon, lat, tcx, tcy) {
   };
 }
 
-// То же для любого уровня: точка хранится не в мировых единицах, а в сдвинутых
-// на L.shift — прошивка восстанавливает мировую как `начало_тайла + (сырая <<
-// сдвиг)`. Сдвиг лежит в заголовке уровня на +82 и равен 0 3 5 6 7 9 9 10 10
-// 11 11 12; при нулевом сдвиге формула вырождается в прежнюю.
+// То же для любого уровня: точка хранится в единицах, сдвинутых на L.shift —
+// прошивка восстанавливает мировую как `начало_тайла + (сырая << сдвиг)`.
 function degToTileL(lon, lat, tcx, tcy, L) {
   const u = 1 << L.shift;
   return {
@@ -455,13 +429,10 @@ function degToTileL(lon, lat, tcx, tcy, L) {
   };
 }
 
-// Размеры тайла, которые перебирает подбор: X и Y уменьшаются по очереди.
-// Ровно такой ряд и лежит в заводском томе — 2^5×2^5, 2^5×2^4, 2^4×2^4,
-// 2^4×2^3, 2^3×2^3, 2^3×2^2, 2^2×2^2, 2^2×2^1, 2^1×2^1, 2^1×2^0.
+// Размеры тайла, которые перебирает подбор: X и Y уменьшаются по очереди —
+// ровно такой ряд лежит в заводском томе.
 const TILE_SIZES = [[5, 5], [5, 4], [4, 4], [4, 3], [3, 3], [3, 2], [2, 2], [2, 1], [1, 1], [1, 0]];
 
-// Тот же ряд, но начиная с размера тайла этого уровня: у грубых уровней тайл
-// крупнее (один на кластер), и начинать перебор с 2^5 незачем.
 function tileSizes(L) {
   const out = [];
   let lw = L.lw, lh = L.lh;
@@ -473,105 +444,149 @@ function tileSizes(L) {
   return out;
 }
 
+// Класс линии и значение E0 по уровню — сняты с заводского тома: какие классы
+// и E0 лежат на известных дорогах Баварии (A9 у Ингольштадта, B13, B16; ж/д
+// Мюнхен—Нюрнберг вдоль A9 — класс 8), см. docs/formats/gdb.md.
+//   L0…L6 автобан — класс 1, E0 24 (съезды — класс 1, E0 20)
+//   L7…L11 автобан — класс 0, E0 40 (на L11 у всех линий E0 0xFF)
+//   L0…L3 крупные дороги (B13) — класс 2, E0 19; помельче (B16) — класс 3, E0 15
+//   L4…L10 крупные дороги — класс 9, E0 34 (trunk) и 25 (primary)
+//   L0 мелочь: класс 6 (E0 8) — tertiary, класс 4 (E0 8) — улицы
+// Соответствие тегов OSM этим классам — догадка по плотности и геометрии.
+function classFor(lv, hw) {
+  const k = String(hw || '').replace(/_link$/, '');
+  const link = /_link$/.test(String(hw || ''));
+  if (k === 'motorway') {
+    if (lv <= 6) return { cls: 1, e9: link ? 20 : 24 };
+    return { cls: 0, e9: lv === 11 ? 0xff : 40 };
+  }
+  if (lv <= 3) {
+    if (k === 'trunk' || k === 'primary') return { cls: 2, e9: 19 };
+    if (k === 'secondary') return { cls: 3, e9: 15 };
+    if (lv >= 1) return { cls: 3, e9: 15 };          // tertiary на L1
+    if (k === 'tertiary') return { cls: 6, e9: 8 };
+    return { cls: 4, e9: 8 };
+  }
+  if (lv === 11) return { cls: 9, e9: 0xff };
+  return { cls: 9, e9: k === 'primary' ? 25 : 34 };
+}
+
+// Разрезать ломаную по сетке шага sx×sy (в тех же единицах): точки пересечения
+// с линиями сетки вставляются, куски ложатся в свою клетку. Точка на границе
+// принадлежит обоим соседним кускам — так у завода: первая точка линии лежит
+// ровно на краю тайла (проверено: 14246 + 3226 = 17472 = высота тайла).
+function splitGrid(pts, sx, sy) {
+  const runs = [];
+  let cur = null;
+  for (let i = 1; i < pts.length; i++) {
+    const [x1, y1] = pts[i - 1], [x2, y2] = pts[i];
+    const ts = [0, 1];
+    const cross = (a, b, s) => {
+      if (a === b) return;
+      const lo = Math.min(a, b), hi = Math.max(a, b);
+      for (let k = Math.floor(lo / s) + 1; k * s < hi; k++) ts.push((k * s - a) / (b - a));
+    };
+    cross(x1, x2, sx); cross(y1, y2, sy);
+    ts.sort((a, b) => a - b);
+    for (let j = 1; j < ts.length; j++) {
+      const t0 = ts[j - 1], t1 = ts[j];
+      if (t1 - t0 < 1e-12) continue;
+      const pa = [x1 + (x2 - x1) * t0, y1 + (y2 - y1) * t0], pb = [x1 + (x2 - x1) * t1, y1 + (y2 - y1) * t1];
+      const tm = (t0 + t1) / 2;
+      const gx = Math.floor((x1 + (x2 - x1) * tm) / sx), gy = Math.floor((y1 + (y2 - y1) * tm) / sy);
+      if (!cur || cur.gx !== gx || cur.gy !== gy) { cur = { gx, gy, pts: [pa] }; runs.push(cur); }
+      cur.pts.push(pb);
+    }
+  }
+  return runs;
+}
+
 // Разложить ломаные (в градусах) по тайлам уровня и собрать его описание.
-// Дорога целиком уходит в тайл, куда попадает юго-западный угол её рамки:
-// x — беззнаковое слово от начала тайла, y — знаковое, запаса хватает, чтобы
-// ломаная вылезла за край.
+// Линии режутся по границам кластеров и тайлов, как у завода: все точки
+// линии лежат внутри своего тайла [0, X] × [0, Y].
 //
-// Размер тайла подбирается ПО КЛАСТЕРУ, а не берётся постоянным. Смещения
-// секций внутри блоба — u16, поэтому плотный тайл в 32 ячейки не влезает:
-// на полной сети Кипра переполнялось 16 тайлов из 31. Завод решает это так же —
-// внутри кластера размер тайла один (175 кластеров из 175 просмотренных), а
-// между кластерами он гуляет от 2^5 до 2^0 по плотности.
-//
-// Грубые уровни. Точка тайла хранится не в мировых единицах, а в сдвинутых на
-// L.shift (байт +82 заголовка уровня, значения 0 3 5 6 7 9 9 10 10 11 11 12) —
-// прошивка восстанавливает мировую как `начало_тайла + (сырая << сдвиг)`.
-// Именно поэтому тайл влезает в u16 на любом уровне: (ячейка << lw) >> сдвиг
-// не превышает 25 248 ни у одного из 4695 проверенных заводских тайлов.
-// Сдвиг заодно задаёт разрешение: 1 единица — это 1,2 м на L0, 10 м на L1 и
-// 5 км на L11, поэтому на грубых уровнях соседние точки ломаной сливаются —
-// совпавшие подряд выбрасываем (`opts.thin`, по умолчанию включено).
+// Размер тайла подбирается ПО КЛАСТЕРУ: смещения секций внутри блоба — u16,
+// и плотный тайл в 32 ячейки не влезает. Завод решает это так же — внутри
+// кластера размер тайла один, а между кластерами он гуляет от 2^5 до 2^0.
 //
 // opts.level — номер уровня (по умолчанию 0).
 function roadsToLevel(lines, opts = {}) {
   const lvNr = opts.level || 0;
   const L = Object.assign({}, EUROPE_LEVELS[lvNr]);
   const CW = 1 << L.potX, CH = 1 << L.potY;
-  const thin = opts.thin === undefined ? true : opts.thin;
+  const u = 1 << L.shift;
 
-  // 1. дороги по кластерам — кластер задан сеткой уровня и от размера тайла
-  //    не зависит.
-  //
-  // Дорога привязывается к тайлу, в который попадает ЮГО-ЗАПАДНЫЙ угол её
-  // рамки, а не первая точка. Причина: x точки — беззнаковое слово от начала
-  // тайла, и дорога, начавшаяся у западного края и ушедшая на запад, даёт
-  // отрицательный x и пропадает. По привязке к первой точке на кипрской сети
-  // терялось 1407 дорог из 87 698, по углу рамки — ни одной.
+  // 1. дороги по кластерам — в ячейках уровня (дробных)
   const perCluster = new Map();
   let skipped = 0;
   for (const ln of lines) {
     const coords = Array.isArray(ln) ? ln : ln.pts;
-    if (!coords || coords.length < 2 || coords.length > 254) { skipped++; continue; }
-    let ax = Infinity, ay = Infinity;
-    for (const [lon, lat] of coords) {
-      const x = cellXL(lon, L), y = cellYL(lat, L);
-      if (x < ax) ax = x;
-      if (y < ay) ay = y;
+    if (!coords || coords.length < 2) { skipped++; continue; }
+    const c = classFor(lvNr, Array.isArray(ln) ? null : ln.cls);
+    const cells = coords.map(([lon, lat]) => [cellXL(lon, L), cellYL(lat, L)]);
+    for (const run of splitGrid(cells, CW, CH)) {
+      const k = run.gx + ',' + run.gy;
+      if (!perCluster.has(k)) perCluster.set(k, { cx: run.gx, cy: run.gy, pieces: [] });
+      perCluster.get(k).pieces.push({ cells: run.pts, cls: c.cls, e9: c.e9 });
     }
-    const cx = Math.floor(ax / CW), cy = Math.floor(ay / CH);
-    const k = cx + ',' + cy;
-    if (!perCluster.has(k)) perCluster.set(k, { cx, cy, roads: [] });
-    perCluster.get(k).roads.push({ coords, anchor: [ax, ay],
-      name: (Array.isArray(ln) ? null : ln.name) || opts.name || 'CY' });
   }
 
   // 2. на каждый кластер — самый крупный размер тайла, при котором блобы влезают
   const clusters = [];
-  let lost = 0;
+  let dropped = 0;
   const budget = opts.maxBlob || MAX_BLOB;
   for (const c of perCluster.values()) {
     let chosen = null;
     for (const [lw, lh] of tileSizes(L)) {
+      // размер кластера в таблице уровня — u16: не больше 3449 записей по 19 байт
+      if ((L.potX - lw) + (L.potY - lh) > 11) break;
+      const f = tileFormat(L, lw, lh);
       const step = [1 << lw, 1 << lh];
       const byTile = new Map();
       let out = 0;
-      for (const r of c.roads) {
-        const tx = Math.floor(r.anchor[0] / step[0]) * step[0];
-        const ty = Math.floor(r.anchor[1] / step[1]) * step[1];
-        let points = r.coords.map(([lon, lat]) => degToTileL(lon, lat, tx, ty, L));
-        // на грубых уровнях единица координаты крупная, и подряд идущие точки
-        // ломаной сливаются в одну — держать их незачем
-        if (thin) points = points.filter((p, i) => i === 0 || p.x !== points[i - 1].x || p.y !== points[i - 1].y);
-        if (points.length < 2) { out++; continue; }
-        if (points.some(p => p.x < 0 || p.x > 0xffff || p.y < -32768 || p.y > 32767)) { out++; continue; }
-        const k = tx + ',' + ty;
-        if (!byTile.has(k)) byTile.set(k, { tx, ty, roads: [] });
-        byTile.get(k).roads.push({ points, name: r.name });
+      for (const pc of c.pieces) {
+        for (const run of splitGrid(pc.cells, step[0], step[1])) {
+          const tx = run.gx * step[0], ty = run.gy * step[1];
+          const raw = [];
+          for (const [x, y] of run.pts) {
+            const q = [Math.min(f.X, Math.max(0, Math.round((x - tx) * L.cellX / u))),
+                       Math.min(f.Y, Math.max(0, Math.round((y - ty) * L.cellY / u)))];
+            const last = raw[raw.length - 1];
+            if (!last || last[0] !== q[0] || last[1] !== q[1]) raw.push(q);
+          }
+          // на грубых уровнях единица крупная: кусок может схлопнуться в точку
+          if (raw.length < 2) { out++; continue; }
+          for (let s = 0; s < raw.length - 1; s += 0xfffe) {
+            const k = tx + ',' + ty;
+            if (!byTile.has(k)) byTile.set(k, { tx, ty, roads: [] });
+            byTile.get(k).roads.push({ pts: raw.slice(s, s + 0xffff), cls: pc.cls, e9: pc.e9 });
+          }
+        }
       }
       let fits = true;
       const tiles = [];
       for (const t of byTile.values()) {
         let blob;
-        try { blob = tileBlob(t.roads); } catch (e) { fits = false; break; }
+        try { blob = tileBlob(t.roads, f); } catch (e) { fits = false; break; }
         if (blob.length > budget) { fits = false; break; }
         tiles.push({
           ix: (t.tx - c.cx * CW) >> lw, iy: (t.ty - c.cy * CH) >> lh,
-          lw, lh, blob,
+          lw, lh, blob, attr: f.W, b10: f.simple ? 1 : 0, lines: t.roads.length,
         });
       }
       if (fits) { chosen = { lw, lh, tiles, out }; break; }
     }
-    if (!chosen) { skipped += c.roads.length; continue; }
-    lost += chosen.out;
+    if (!chosen) { skipped += c.pieces.length; continue; }
+    dropped += chosen.out;
     clusters.push({ cx: c.cx, cy: c.cy, lw: chosen.lw, lh: chosen.lh, tiles: chosen.tiles });
   }
 
   L.clusters = clusters;
   const tiles = clusters.reduce((a, c) => a + c.tiles.length, 0);
+  const elements = clusters.reduce((a, c) => a + c.tiles.reduce((b, t) => b + t.lines, 0), 0);
   const sizes = {};
   for (const c of clusters) sizes['2^' + c.lw + 'x2^' + c.lh] = (sizes['2^' + c.lw + 'x2^' + c.lh] || 0) + 1;
-  return { level: L, tiles, clusters: clusters.length, skipped: skipped + lost, sizes };
+  return { level: L, tiles, clusters: clusters.length, skipped, dropped, elements, sizes };
 }
 
 // Классы дорог по уровням — та же пирамида, что у завода: чем мельче масштаб,
@@ -647,7 +662,7 @@ function component(outDir, v, opt) {
 
 module.exports = {
   PROLOGUE, SIG, VERSION, FRAME, MAGIC, MAX_BLOB, FRAME_ELEMENT, EUROPE_LEVELS, CLUSTER_REC,
-  tileBlob, emptyTile, readTileRoads, mortonIndex, clusterBlob, build,
+  tileBlob, emptyTile, readTileRoads, tileFormat, classFor, splitGrid, mortonIndex, clusterBlob, build,
   degToTile, degToTileL, cellX, cellY, cellXL, cellYL, roadsToLevel, volumeFromRoads,
   linesForLevel, LEVEL_CLASSES, TILE_CELLS, TILE_SIZES, tileSizes, component,
 };
@@ -693,7 +708,8 @@ if (require.main === module) {
   for (const st of v.stats) {
     console.log('  L' + String(st.nr).padStart(2) + ': дорог ' + String(st.lines).padStart(6) +
       ', тайлов ' + String(st.tiles).padStart(4) + ', кластеров ' + String(st.clusters).padStart(3) +
-      (st.skipped ? ', пропущено ' + st.skipped : '') +
+      ', линий ' + st.elements + (st.skipped ? ', пропущено ' + st.skipped : '') +
+      (st.dropped ? ', схлопнулось ' + st.dropped : '') +
       '  размер тайла: ' + Object.entries(st.sizes).map(([k, n]) => k + '×' + n).join(' '));
   }
   console.log('область уровней до ' + v.regionEnd + ', том ' + v.gdb.length + ' б (' +
