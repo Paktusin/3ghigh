@@ -103,18 +103,24 @@ function open(dirs) {
 // точек (docs/formats/xar.md): точка другого типа на карту не попадает, даже
 // если стиль у типа есть. null — шапки нет.
 function mapTypes(dir) {
+  const m = mapTypeScales(dir);
+  return m ? new Set(m.keys()) : null;
+}
+
+// То же с порогом масштаба типа (поле 0x74 витка типа): Map тип → порог.
+function mapTypeScales(dir) {
   const o = open([dir]);
   for (let i = 0; i < o.cat.length; i++) {
     const k = o.get(i);
     if (!k.els.length || k.els[0].type !== 0x20) continue;
     const n = k.els[0].f['44'] !== undefined ? k.els[0].f['44'] : 58;
-    const t = k.els.slice(1).map(e => e.f && e.f['49']).filter(v => v !== undefined);
-    return new Set(t.slice(0, n));
+    const t = k.els.slice(1).filter(e => e.f && e.f['49'] !== undefined).slice(0, n);
+    return new Map(t.map(e => [e.f['49'], e.f['74']]));
   }
   return null;
 }
 
-module.exports = { keyed, index, open, mapTypes };
+module.exports = { keyed, index, open, mapTypes, mapTypeScales };
 
 if (require.main === module) {
   const [dirs, bi, from, to] = process.argv.slice(2);

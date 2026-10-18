@@ -166,7 +166,8 @@ function litPois(root, styleFile) {
   if (!fs.existsSync(dir)) return null;
   const P = litpoi.open([dir]);
   const K = litkeys.open([dir]);
-  const onMap = litkeys.mapTypes(dir);
+  const scales = litkeys.mapTypeScales(dir);
+  const onMap = scales ? new Set(scales.keys()) : null;
   const ps = styleFile ? xar.poiStyles(xar.tree(xar.open(fs.readFileSync(styleFile)))) : null;
   const a = styleFile ? xar.open(fs.readFileSync(styleFile)) : null;
   const list = [], names = [], icons = {};
@@ -181,7 +182,7 @@ function litPois(root, styleFile) {
       const visible = !!ic && (!onMap || onMap.has(c));
       let uri = null;
       if (ic) { try { uri = 'data:image/png;base64,' + xar.png(xar.bitmap(a, ic.bitmap)).toString('base64'); } catch (e) { uri = null; } }
-      icons[c] = { name: litpoi.category(c) || String(c), visible, uri, from: ic ? ic.entries[0].from : 0,
+      icons[c] = { name: litpoi.category(c) || String(c), visible, uri, max: scales && scales.has(c) ? scales.get(c) : null, from: ic ? ic.entries[0].from : 0,
                    to: ic ? ic.entries[ic.entries.length - 1].to : 43, w: ic ? ic.entries[0].w : 0, h: ic ? ic.entries[0].h : 0 };
     }
   }
@@ -215,7 +216,13 @@ function build(root, opt = {}) {
   const pois = opt.pois === false ? null : litPois(root, xf);
   if (opt.log && pois) opt.log('точек интереса: ' + pois.list.length + ', видимых типов ' +
     Object.values(pois.icons).filter(x => x.visible).length + ' из ' + Object.keys(pois.icons).length);
-  return page({ title: path.basename(path.resolve(root)), box, data, pal, styles, pois });
+  // диапазон масштаба уровня из его шапки (+10 от, +14 до) — для порога типов POI
+  const lvRange = {};
+  for (const li of levels) {
+    const b = gm.read(g, h.levels[li].offset, 18);
+    lvRange[li] = [b.readUInt32BE(10), b.readUInt32BE(14)];
+  }
+  return page({ title: path.basename(path.resolve(root)), box, data, pal, styles, pois, lvRange });
 }
 
 function page(model) {
@@ -324,7 +331,8 @@ function legend() {
     $('lpoi').append(l);
   }
   const p = document.createElement('p'); p.className = 'stat';
-  p.textContent = 'Значок рисуется, если выбранный индекс масштаба попадает в диапазон его стиля. Наведите на точку — имя и категория.';
+  p.textContent = 'Значок рисуется, если (1) выбранный индекс масштаба попадает в диапазон его стиля (по коду) и (2) порог типа из шапки POI больше начала диапазона уровня GDB' +
+    (M.lvRange && M.lvRange[lv] ? ' (L' + lv + ': ' + M.lvRange[lv][0] + '–' + M.lvRange[lv][1] + ')' : '') + ' — догадка о единицах. Наведите на точку — имя, категория, порог.';
   $('lpoi').append(p);
 }
 // значки точек
@@ -395,7 +403,8 @@ function draw() {
       const ic = M.pois.icons[p[2]];
       const x = sx(p[0]), y = sy(p[1]);
       if (ic.visible) {
-        if (off.has('poiV') || sc < ic.from || sc > ic.to) continue;
+        // порог типа (0x74 шапки POI) против начала диапазона уровня GDB — догадка о единицах
+        if (off.has('poiV') || sc < ic.from || sc > ic.to || (ic.max !== null && M.lvRange && M.lvRange[lv] && M.lvRange[lv][0] >= ic.max)) continue;
         const im = IMG[p[2]];
         if (im && im.complete) cx.drawImage(im, x - ic.w / 2, y - ic.h / 2, ic.w, ic.h);
       } else {
@@ -427,7 +436,7 @@ cv.onpointermove = e => {
       const dx = p[0] * kx * view.s + view.x - px, dy = view.y - p[1] * view.s - py, d = dx * dx + dy * dy;
       if (d < bd) { bd = d; best = p; }
     }
-    if (best) { const ic = M.pois.icons[best[2]]; txt += ' — ' + M.pois.names[best[3]] + ' · ' + best[2] + ' ' + ic.name + (ic.visible ? '' : ' (на карте MMI не видна)'); }
+    if (best) { const ic = M.pois.icons[best[2]]; txt += ' — ' + M.pois.names[best[3]] + ' · ' + best[2] + ' ' + ic.name + (ic.max ? ' · порог ' + ic.max : '') + (ic.visible ? '' : ' (на карте MMI не видна)'); }
   }
   $('info').textContent = txt;
   if (!drag) return;

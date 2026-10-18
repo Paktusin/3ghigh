@@ -288,11 +288,21 @@ function verify(buf, r, pois) {
       rep.tableCount = { root: root.f['40'], found: n };
     }
     ks.L.vols.forEach((v) => fs.closeSync(v.fd));
+    if (r.countryBlk !== undefined) {
+      // путь прошивки (src/litcity.js): виток 0 корня -> страна -> узел вида 4;
+      // и FUN_08ccd098: код страны -> набор стран 7000 -> имя в списке языка
+      const LC = require('./litcity');
+      const em = LC.cities([dir], 'CYPRUS');
+      const byCode = LC.countryByCode([dir], 113, 3);
+      rep.emul = { cities: em.cities.length, notCity: em.cities.filter((c) => c.type !== 3).length,
+                   byCode: byCode.why, name: byCode.name };
+    }
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
   rep.bad = rep.keysOk !== rep.blocks || rep.parsedOk !== rep.blocks || rep.leavesEnd !== r.leaves ||
             rep.poisBack !== r.pois || rep.hit !== rep.seen || rep.poiPath === false ||
+            (rep.emul && (rep.emul.cities !== r.cities || rep.emul.notCity || rep.emul.byCode !== 'ок')) ||
             (rep.countrySet && (!rep.countrySet.length || rep.countrySet.some((c) => !c.ok) ||
                                 rep.tableCount.root !== rep.tableCount.found)) ||
             (rep.addr && ((rep.addr.postcodes || 0) !== (r.postcodes || 0) ||
@@ -319,6 +329,8 @@ function report(rep, r, log) {
         '; индексы в городах -> 0x31: ' + (a.cityPostcodes || 0) + '; точки-центры 0x24: ' + (a.centres || 0) +
         ' из ' + r.cities + '; все улицы страны -> имя в городе: ' + (a.allStreets || 0) + ' из ' + r.streets);
   }
+  if (rep.emul) log('путь прошивки (litcity): CYPRUS -> городов ' + rep.emul.cities + ' (не 0x03: ' + rep.emul.notCity +
+                    '); FUN_08ccd098(113, язык 3) -> «' + rep.emul.name + '» — ' + rep.emul.byCode);
   if (rep.countrySet) {
     log('набор стран (0x18/7000): ' + rep.countrySet.map((c) => c.code + ' -> (' + c.pos + ')' + (c.ok ? '' : ' НЕ 0x02')).join(', ') +
         '; статистик символов ' + rep.stats + '; записей таблицы: в корне ' + rep.tableCount.root +
