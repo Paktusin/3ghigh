@@ -17,7 +17,7 @@
 //         у своего контейнера — ещё и обход адресов страна -> город -> улица.
 //         Собранные листья читаются машиной грамматики: разбор обязан
 //         остановиться на метке конца блока, а всё, что за ней, — быть нулями
-//         (наши блоки короче слотов и дополнены нулями, см. src/mklit.js).
+//         (у прежней заплаты блоки были короче слотов и добиты нулями).
 
 const fs = require('fs');
 const path = require('path');
@@ -337,14 +337,14 @@ if (require.main === module) {
   const root = args[0];
   const flag = (n, d) => { const i = args.indexOf('--' + n); return i > 0 && args[i + 1] ? args[i + 1] : d; };
   if (!root) {
-    console.error('использование: node src/setcheck.js <каталог-набора> [--donor IS01]');
+    console.error('использование: node src/setcheck.js <каталог-набора> [--donor CY00]');
     process.exit(1);
   }
   // Компонента XAC в наборе может не быть (образ только с точками интереса
   // или только с отрисовкой) — тогда проверяется то, что есть.
   const pkgdb = path.join(root, 'pkgdb');
   const hasXac = fs.existsSync(pkgdb) && fs.readdirSync(pkgdb).some((d) => /^XAC/.test(d));
-  const r = hasXac ? check(root, (flag('donor', 'IS01')).toUpperCase()) : null;
+  const r = hasXac ? check(root, (flag('donor', 'CY00')).toUpperCase()) : null;
   if (!r) console.log('набор ' + root + ': компонента XAC нет, проверяю остальное');
   if (r) {
   console.log('набор ' + root + ', компонент ' + r.container + ', тайл ' + r.donor +

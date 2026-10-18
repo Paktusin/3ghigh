@@ -1,5 +1,5 @@
 'use strict';
-// Ответ Overpass API -> GeoJSON с LineString, пригодный для src/gdbroads.js.
+// Ответ Overpass API -> GeoJSON с LineString (out/cyp/roads.geojson) для src/mkcyprus.js.
 //
 // Overpass отдаёт `elements` с type="way" и geometry=[{lat,lon},…] (нужен
 // вывод `out geom;`). Здесь только две содержательные вещи:

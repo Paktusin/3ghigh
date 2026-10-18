@@ -1,9 +1,8 @@
 'use strict';
 // Сборка тома GDB С НУЛЯ: байты тайла, кластера, уровня и всего файла.
 //
-// Отличие от соседей: `gdbwrite.js` правит ломаную на месте, `gdbroads.js`
-// дописывает элементы в существующий тайл, `gdbstrip.js` копирует область
-// уровней оригинала и переписывает таблицу. Здесь ни одного байта оригинала не
+// Прежние соседи (`gdbwrite.js`, `gdbroads.js`, `gdbstrip.js`) правили тайлы
+// оригинала и сняты (docs/tools.md, «Снятые»). Здесь ни одного байта оригинала не
 // копируется (кроме двух явно помеченных констант, происхождение которых
 // неизвестно) — том собирается из описания.
 //
@@ -662,7 +661,7 @@ const cellY = lat => gm.cellOfLat(lat, gm.CELL_Y);
 const cellXL = (lon, L) => gm.cellOfLon(lon, L.cellX);
 const cellYL = (lat, L) => gm.cellOfLat(lat, L.cellY);
 
-// градусы → мировые единицы от начала тайла (та же арифметика, что в gdbwrite)
+// градусы → мировые единицы от начала тайла
 function degToTile(lon, lat, tcx, tcy) {
   return {
     x: Math.round((cellX(lon) - tcx) * gm.CELL_X),
@@ -1087,7 +1086,8 @@ if (require.main === module) {
     const style = fs.readdirSync(path.join(root, 'pkgdb')).find(d => /^StyleDBMMI3G_/.test(d));
     if (style) copyDir(style);
     copyDir('NaviPersistence_ALL_3');
-    console.log('дальше: node src/mkmeta.js ' + outDir + ' --keep-pkg');
-    console.log('после установки на машине: tools/write_fixacios.sh');
+    // без --keep-pkg: манифест должен перечислять ровно то, что в наборе, иначе
+    // LVM не активирует пакет и инициализация встаёт на 28 % (docs/device.md)
+    console.log('дальше: node src/mkmeta.js ' + outDir);
   }
 }
