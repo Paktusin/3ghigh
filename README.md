@@ -89,6 +89,7 @@ Automotive). Всё получено чтением файлов; оригина
 | [docs/formats/xar.md](docs/formats/xar.md) | архив стилей карты `.xar`: цвета и ширины по классам GDB, значки POI по категориям LIT, растры; `src/xar.js` |
 | [docs/device.md](docs/device.md) | правила работы с головным устройством, установка, проверки целостности |
 | [docs/firmware.md](docs/firmware.md) | карта читателей в прошивке, инициализация NDL, зависание на 28 % (первая версия причины; окончательная — манифест `.pkg`, в device.md) |
+| [docs/todo.md](docs/todo.md) | что осталось сделать: список и порядок работ |
 | [docs/tools.md](docs/tools.md) | свои скрипты в `src/` и `tools/`, чужие проекты |
 
 Рабочие правила для Claude — в [CLAUDE.md](CLAUDE.md).
