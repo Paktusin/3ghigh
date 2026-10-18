@@ -122,7 +122,10 @@ function mkcyprus(outDir, opt) {
     return { name: ((p.ref || p.name || '') + '').trim().slice(0, 15) || 'CY',
              cls: p.highway || null, pts: f.geometry.coordinates };
   });
-  const v = gdbgen.volumeFromRoads(lines, { name: 'EJ211',
+  // gdbRaw — рамка в градусах, чьи заводские кластеры кладутся рядом с нашими
+  // (опыт: рисуются ли заводские тайлы в собранном томе)
+  const raw = o.gdbRaw ? require('./gdbraw').rawClusters(root, o.gdbRaw) : null;
+  const v = gdbgen.volumeFromRoads(lines, { name: 'EJ211', raw,
                                             levels: gdbgen.EUROPE_LEVELS.map((_, i) => i) });
   const gdbSrc = fs.readdirSync(path.join(root, 'pkgdb', 'GDB')).find((f) => /\.gdb$/i.test(f));
   out.components.push(component(outDir, 'GDB', gdbSrc, v.gdb, root, log));
@@ -223,6 +226,7 @@ if (require.main === module) {
     pbf: houses,
     code: flag('code', 'CY00'),
     clean: args.includes('--clean'),
+    gdbRaw: flag('gdb-raw') && (([lon0, lat0, lon1, lat1]) => ({ lon0, lat0, lon1, lat1 }))(flag('gdb-raw').split(',').map(Number)),
     log: (m) => console.log(m),
   });
   const total = r.components.reduce((a, c) => a + c.size, 0);
@@ -231,7 +235,7 @@ if (require.main === module) {
   console.log('компоненты: ' + r.components.map((c) => c.name + ' ' +
               (c.size / 1048576).toFixed(2) + ' МБ').join(', ') +
               ' — итого ' + (total / 1048576).toFixed(2) + ' МБ');
-  console.log('дальше: node src/mkmeta.js ' + outDir + ' --keep-pkg');
+  console.log('дальше: node src/mkmeta.js ' + outDir);
   if (r.descriptor) {
     console.log('образ для ЧИСТОГО раздела: сперва delNavHDD.sh и перезагрузка,');
     console.log('затем установка, затем tools/write_fixacios.sh (возьмёт наш acios_db.ini)');

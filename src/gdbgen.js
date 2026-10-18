@@ -328,6 +328,22 @@ function build(spec) {
       entries[slot] = { off, sz: blob.length };
       placed.push({ cx: c.cx, cy: c.cy, slot, off, size: blob.length, tiles: recs });
     }
+    // Заводские кластеры как есть (опыт): записи тайлов байт в байт, кроме
+    // смещения тайла, затем словарь имён кластера; его длина — второе поле слота.
+    for (const c of (p.L.raw || [])) {
+      const slot = c.cy * p.W + c.cx;
+      if (entries[slot].sz) continue;
+      const recs = Buffer.from(c.records);
+      const moved = new Map();
+      for (let o = 0; o < recs.length; o += CLUSTER_REC) {
+        const old = recs.readUInt32BE(o + 11);
+        if (!moved.has(old)) moved.set(old, put(c.tiles.get(old)));
+        recs.writeUInt32BE(moved.get(old), o + 11);
+      }
+      const blob = Buffer.concat([recs, c.dict]);
+      entries[slot] = { off: put(blob), sz: blob.length, tiles: recs.length / CLUSTER_REC, dict: c.dict.length };
+      placed.push({ cx: c.cx, cy: c.cy, slot, raw: true });
+    }
     // Пустых слотов у завода нет: «морской» кластер — свои ключи, все тайлы
     // ссылаются на общий пустой (у Европы и Австралии непусты все слоты).
     const lw = p.L.lw === undefined ? p.L.potX : p.L.lw, lh = p.L.lh === undefined ? p.L.potY : p.L.lh;
@@ -390,7 +406,8 @@ function build(spec) {
     p.entries.forEach((e, i) => {
       b.writeUInt32BE(e.off, gm.TABLE_AT + i * 6);
       b.writeUInt16BE(e.sz, gm.TABLE_AT + i * 6 + 4);
-      b.writeUInt16BE(e.sz / CLUSTER_REC, second + i * 4);
+      b.writeUInt16BE(e.tiles === undefined ? e.sz / CLUSTER_REC : e.tiles, second + i * 4);
+      b.writeUInt16BE(e.dict || 0, second + i * 4 + 2);
     });
     return b;
   });
@@ -595,7 +612,8 @@ function volumeFromRoads(lines, opts = {}) {
   }
   const levels = EUROPE_LEVELS.map((L, i) => (stats.has(i)
     ? stats.get(i).level
-    : Object.assign({}, L, { clusters: [] })));
+    : Object.assign({}, L, { clusters: [] })))
+    .map((L, i) => (opts.raw && opts.raw[i] ? Object.assign({}, L, { raw: opts.raw[i] }) : L));
   const r = stats.get(want[0]);
   return Object.assign({}, build(Object.assign({}, opts, { levels })), {
     stat: r, stats: [...stats.values()],
