@@ -93,3 +93,28 @@ test('xar: заводской архив — 730 растров сходятся
   assert.deepEqual(land(0x5d), land(0x5f));
   assert.equal(xar.rgb(st[0].entries[0].fill), '#8bbdcd');
 });
+
+test('xar: iconFor повторяет getPOI — подтип вне таблицы → sub0, нет типа → null, стиль по умолчанию', () => {
+  const e = (b) => [{ from: 0, to: 23, w: 16, h: 16, bitmap: b, rest: [] }];
+  const ps = { mode: 1, min: 0, max: 242, maxSub: 18, def: null,
+    styles: new Map([[56, new Map([[0, e(293)], [3, e(455)]])], [242, new Map([[0, e(323)]])]]) };
+  assert.equal(xar.iconFor(ps, 56, 3).bitmap, 455);
+  assert.equal(xar.iconFor(ps, 56, 7).bitmap, 293, 'подтипа нет — берётся sub0 того же типа');
+  assert.equal(xar.iconFor(ps, 56, 40).bitmap, 293, 'подтип больше maxSub — sub0');
+  assert.equal(xar.iconFor(ps, 74), null, 'нет стиля и нет умолчания — точка не рисуется');
+  assert.equal(xar.iconFor(ps, 300), null, 'тип за max');
+  assert.equal(xar.iconFor({ ...ps, def: e(1) }, 74).bitmap, 1, 'со стилем по умолчанию (режим poitypes)');
+});
+
+test('xar: заводской архив — значки ровно у 71 категории из 192, умолчания нет', { skip: !fs.existsSync(FACTORY) }, () => {
+  const t = xar.tree(xar.open(fs.readFileSync(FACTORY)));
+  for (const night of [false, true]) for (const dim of ['2d', '3d']) {
+    const ps = xar.poiStyles(t, { night, dim });
+    assert.deepEqual([ps.mode, ps.min, ps.max, ps.maxSub, ps.def], [1, 0, 242, 18, null]);
+    let n = 0;
+    for (let c = 1; c <= 192; c++) if (xar.iconFor(ps, c)) n++;
+    assert.equal(n, 71);
+    assert.equal(xar.iconFor(ps, 74), null, 'PARKPLATZ/-HAUS');
+    assert.equal(xar.iconFor(ps, 242).bitmap, 323);
+  }
+});

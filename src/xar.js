@@ -247,28 +247,52 @@ function lineStyles(root, { night = false, dim = '2d' } = {}) {
   return { styles: out, rules: r };
 }
 
-// Значки POI: mainMap/<день>/<2d|3d>/poi/*/poi<категория>/sub<подкатегория>.
-// Категория — номер из таблицы NAVRESOURCE XAC (поле 0x4f записи LIT, с единицы).
+// Значки POI (CGMapStylePOIHandler, FUN_09272bc4 / getPOI FUN_09273004).
+// Загрузка: узел 'poitypes' (режим 0, тогда же создаётся стиль по умолчанию, тип
+// 0xfffe) или, если его нет, 'typespoisub' (режим 1) — пары (тип, подтип); стиль
+// строится ТОЛЬКО для перечисленных пар, по пути
+// mainMap/<день>/<2d|3d>/poi/*/poi<тип>/sub<подтип>. В заводском архиве 'poitypes'
+// нет — работает режим 1, и стиля по умолчанию нет.
+// Тип — номер категории LIT (0x4f, он же тип в заголовке POI 0x20).
 function poiStyles(root, { night = false, dim = '2d' } = {}) {
   const dn = night ? 'night' : 'day', out = new Map();
-  const pairs = (lookup(root, ['mainMap', dn, dim, 'poi', null, null, 'typespoisub']) || { value: [] }).value;
-  const seen = new Set();
-  for (let i = 0; i + 1 < pairs.length; i += 2) seen.add(pairs[i] + '/' + pairs[i + 1]);
-  for (let t = 0; t < 256; t++) {
-    for (let s = 0; s < 64; s++) {
-      if (s && !seen.has(t + '/' + s)) continue;
-      const n = lookup(root, ['mainMap', dn, dim, 'poi', null, 'poi' + t, 'sub' + s]);
-      if (!n || !n.name.startsWith('sub')) continue;
-      const e = poiEntries(n.value);
-      if (!out.has(t)) out.set(t, new Map());
-      out.get(t).set(s, e);
+  const node = (k) => lookup(root, ['mainMap', dn, dim, 'poi', null, null, k]);
+  const types = node('poitypes'), pairsNode = node('typespoisub');
+  const pairs = pairsNode ? pairsNode.value : [];
+  let min = Infinity, max = -Infinity, maxSub = 0;
+  const list = [];
+  if (types) for (const t of types.value) list.push([t, 0]);
+  else for (let i = 0; i + 1 < pairs.length; i += 2) list.push([pairs[i], pairs[i + 1]]);
+  for (const [t, sb] of list) {
+    min = Math.min(min, t); max = Math.max(max, t); maxSub = Math.max(maxSub, sb);
+    const n = lookup(root, ['mainMap', dn, dim, 'poi', null, 'poi' + t, 'sub' + sb]);
+    if (!n || n.name !== 'sub' + sb) continue;   // стиль без записей: точка не рисуется (isVisible = 0)
+    if (!out.has(t)) out.set(t, new Map());
+    out.get(t).set(sb, poiEntries(n.value));
+  }
+  const def = types ? lookup(root, ['mainMap', dn, dim, 'poi', null, 'poiDefault', 'sub0']) : null;
+  return { mode: types ? 0 : 1, pairs, styles: out, min, max, maxSub, def: def ? poiEntries(def.value) : null };
+}
+
+// Что нарисует прошивка для точки (категория, подтип): getPOI FUN_09273004.
+// Режим 1: тип в [min, max] → стиль (тип, подтип); подтип > maxSub или стиля нет →
+// стиль (тип, 0); нет и его → стиль по умолчанию, если он есть, иначе null —
+// точка не рисуется (FUN_092834f4 рисует только при ненулевом стиле).
+function iconFor(ps, cat, sub = 0) {
+  let e = null;
+  if (cat >= ps.min && cat <= ps.max) {
+    const m = ps.styles.get(cat);
+    if (m) {
+      if (ps.mode === 1 && sub <= ps.maxSub && m.get(sub)) e = m.get(sub);
+      else e = m.get(0) || null;
     }
   }
-  return { pairs, styles: out };
+  if (!e || !e.length) e = ps.def && ps.def.length ? ps.def : null;
+  return e ? { entries: e, bitmap: e[0].bitmap, fallback: !(ps.styles.get(cat) && ps.styles.get(cat).get(sub)) } : null;
 }
 
 module.exports = { open, bitmaps, bitmap, decodeBitmap, png, tree, lookup, hash, nameOf, areaStyles, lineStyles,
-  poiStyles, rgb, alpha, scales, GDB_CLASSES, AREA_STYLES, LINE_STYLES };
+  poiStyles, iconFor, rgb, alpha, scales, GDB_CLASSES, AREA_STYLES, LINE_STYLES };
 
 // ---------- CLI ----------
 
@@ -315,7 +339,7 @@ if (require.main === module) {
       for (const [t, subs] of styles) {
         if (want.size && !want.has(t)) continue;
         for (const [s, e] of subs) {
-          if (!e.length) continue;
+          if (!e || !e.length) continue;
           const f = path.join(dir, `poi${t}_sub${s}_bmp${e[0].bitmap}.png`);
           fs.writeFileSync(f, png(bitmap(a, e[0].bitmap)));
           console.log(f, e[0].w + '×' + e[0].h);

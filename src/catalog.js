@@ -15,6 +15,7 @@ const litpoi = require('./litpoi');
 const cyppoi = require('./cyppoi');
 const gdbgen = require('./gdbgen');
 const osmareas = require('./osmareas');
+const litkeys = require('./litkeys');
 
 const DEFAULT_XAR = 'maps/pkgdb/StyleDBMMI3G_ECE_94/MMI3G_MapArchive_H_04_01.xar';
 const PBF = 'out/cyp/cyprus-latest.osm.pbf';
@@ -70,6 +71,23 @@ function ourAreaTags() {
   return m;
 }
 
+// Типы, которые карта вообще рисует: поле 0x49 шапки POI (структура 0x20) в LIT —
+// по ним CLitPoiTileDb строит тайлы точек (docs/formats/xar.md). Точка другого
+// типа на карту не попадает, даже если стиль у типа есть.
+const LIT_DIR = 'out/cyprus/pkgdb/LIT';
+function mapTypes() {
+  if (!fs.existsSync(LIT_DIR)) return null;
+  const o = litkeys.open([LIT_DIR]);
+  for (let i = 0; i < o.cat.length; i++) {
+    const k = o.get(i);
+    if (!k.els.length || k.els[0].type !== 0x20) continue;
+    const n = k.els[0].f['44'] !== undefined ? k.els[0].f['44'] : 58;
+    const t = k.els.slice(1).map(e => e.f && e.f['49']).filter(v => v !== undefined);
+    return new Set(t.slice(0, n));
+  }
+  return null;
+}
+
 function poiCounts() {
   const n = new Map();
   for (const p of cyppoi.collect(PBF)) n.set(p.cat, (n.get(p.cat) || 0) + 1);
@@ -78,7 +96,7 @@ function poiCounts() {
 
 // ── разделы страницы ──────────────────────────────────────────────────────
 
-function poiSection(a, day, night, counts, cache) {
+function poiSection(a, day, night, counts, cache, onMap) {
   const tags = ourPoiTags();
   const nums = new Set([...day.styles.keys()]);
   for (let i = 1; i <= litpoi.CATEGORIES.length; i++) nums.add(i);
@@ -95,8 +113,10 @@ function poiSection(a, day, night, counts, cache) {
         '<figcaption>sub' + s + '<br>#' + e.bitmap + ' ' + e.w + '×' + e.h + '<br>м ' + es.map(range).join(', ') + '</figcaption></figure>';
     }).join('') : '<span class="miss">стиля нет — значок не рисуется' + (cnt ? ': наши ' + cnt + ' точек на карте не видны' : '') + '</span>';
     const ours = tags.get(n);
-    const cls = subs ? '' : cnt ? ' class="nostyle lost"' : ' class="nostyle"';
-    return '<tr' + cls + '><td class="num">' + n + '</td><td>' + esc(name) + '</td>' +
+    const shown = subs && (!onMap || onMap.has(n));
+    const cls = shown ? '' : cnt ? ' class="nostyle lost"' : ' class="nostyle"';
+    const mapCell = onMap ? '<td class="num">' + (onMap.has(n) ? '✓' : '') + '</td>' : '';
+    return '<tr' + cls + '><td class="num">' + n + '</td><td>' + esc(name) + '</td>' + mapCell +
       '<td class="icons">' + icons + '</td>' +
       '<td>' + (ours ? (ours.length ? ours.map(t => '<code>' + esc(t) + '</code>').join(' ') : '<span class="miss">в OSM нет</span>') : '') + '</td>' +
       (counts ? '<td class="num">' + (cnt || '') + '</td>' : '') + '</tr>';
@@ -104,8 +124,9 @@ function poiSection(a, day, night, counts, cache) {
   return '<h2 id="poi">Точки интереса: категории LIT → значки</h2>' +
     '<p>Номер — категория LIT (поле 0x4f, таблица NAVRESOURCE <code>XAC</code> с единицы). Ключ стиля — <code>poi&lt;номер&gt;/sub&lt;M&gt;</code>; у заправок M — бренд. ' +
     'Под значком: номер растра в архиве, размер, индексы масштаба, где значок виден. Тёмный значок справа — ночной, если отличается. ' +
-    'Красным — категории без стиля, в которые у нас попали точки Кипра: на карте их не видно.</p>' +
-    '<table><thead><tr><th>№</th><th>категория</th><th>значки (день / ночь)</th><th>наши теги OSM</th>' + (counts ? '<th>точек Кипра</th>' : '') + '</tr></thead><tbody>' + rows + '</tbody></table>';
+    '«На карте» — тип есть в шапке POI нашего LIT (поле 0x49): только такие точки попадают в тайлы карты, остальные живут в поиске. ' +
+    'Красным — категории, где у нас есть точки Кипра, но на карте их не видно (нет стиля или типа нет в шапке).</p>' +
+    '<table><thead><tr><th>№</th><th>категория</th>' + (onMap ? '<th>на карте</th>' : '') + '<th>значки (день / ночь)</th><th>наши теги OSM</th>' + (counts ? '<th>точек Кипра</th>' : '') + '</tr></thead><tbody>' + rows + '</tbody></table>';
 }
 
 function lineSvg(e) {
@@ -177,7 +198,7 @@ function build(file, opt = {}) {
   const cache = new Map();
   const counts = opt.counts && fs.existsSync(PBF) ? poiCounts() : null;
   const body = [
-    poiSection(a, xar.poiStyles(t), xar.poiStyles(t, { night: true }), counts, cache),
+    poiSection(a, xar.poiStyles(t), xar.poiStyles(t, { night: true }), counts, cache, mapTypes()),
     lineSection(xar.lineStyles(t), xar.lineStyles(t, { night: true })),
     areaSection(xar.areaStyles(t), xar.areaStyles(t, { night: true })),
     bitmapSection(a, cache),
