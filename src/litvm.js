@@ -167,6 +167,8 @@ function run(schema, data, startRule, opt) {
           byGoto = false;
         }
         if (type) { curStruct = type; curRule = pc; if (rec) rec['#'] = type; }
+        // Новый элемент (ключ позиции) — структура верхнего уровня со своим типом.
+        if (o.onKey && type && lvl === 0 && type < 0x1000) o.onKey({ at: p, type, rule: pc, loop: false });
         fr.cnt2 = 0;                                  // 0x10 сбрасывает состояние циклов
         fr.iter0 = -1; fr.iter2 = -1; fr.ptr0 = 0; fr.ptr2 = 0;
         if (type) val = type;                         // тип структуры — это и значение
@@ -181,7 +183,9 @@ function run(schema, data, startRule, opt) {
         // В прошивке это счётчик кадра +56 против предела в кадре +40.
         // 0x11 — это ещё и конец цикла 0xa2: пока витки есть, возврат назад.
         if (fr.iter2 >= 0 && fr.ptr2 !== 0 && fr.cnt2 > fr.iter2 + 1) {
-          fr.iter2 += 1; pc = fr.ptr2 + 1; continue;
+          fr.iter2 += 1;
+          if (o.onKey && lvl === 0) o.onKey({ at: p, type: curStruct, rule: pc, loop: true, iter: fr.iter2 });
+          pc = fr.ptr2 + 1; continue;
         }
         fr.iter2 = -1;
         // Порядок важен: прошивка смотрит w4 РАНЬШЕ уровня. Непустой w4 —
