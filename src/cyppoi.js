@@ -148,11 +148,24 @@ const BY_CATEGORY = [
 ];
 
 // Плоская таблица «тег -> категория» и место категории в порядке важности.
+// Переназначения поверх заводского соответствия: категории, у которых в архиве
+// стилей нет значка (каталог `npm run catalog`, docs/formats/lit.md), — их
+// точки на карте не видны. Решение пользователя (18.10): храмы — к памятникам
+// культуры, магазины и супермаркеты — к продуктам, одежда — к торговым центрам.
+// Строки BY_CATEGORY не трогаем, чтобы переназначение было видно и обратимо.
+const REMAP = {
+  'GOTTESHAUS': 'KULTURDENKMAL',
+  'SUPERMARKT': 'LEBENSMITTEL',
+  'FACHGESCHÄFT': 'LEBENSMITTEL',
+  'BEKLEIDUNG': 'EINKAUFSZENTRUM',
+};
+
 const MAP = [];
 for (let rank = 0; rank < BY_CATEGORY.length; rank++)
   for (const sel of BY_CATEGORY[rank][1]) {
     const [k, v] = sel.split('=');
-    MAP.push([k, v, BY_CATEGORY[rank][0], rank]);
+    const cat = BY_CATEGORY[rank][0];
+    MAP.push([k, v, REMAP[cat] || cat, rank]);
   }
 
 // Номер категории по её названию. Считается с единицы — так устроена таблица.
@@ -270,7 +283,7 @@ function build(pois, opt) {
   return { model: m, bytes: best.bytes, used: best.n, dropped: list.length - best.n };
 }
 
-module.exports = { MAP, BY_CATEGORY, classify, nameOf, fieldsOf, collect, build, order, catNo, DEG };
+module.exports = { MAP, BY_CATEGORY, REMAP, classify, nameOf, fieldsOf, collect, build, order, catNo, DEG };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);

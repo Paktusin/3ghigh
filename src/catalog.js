@@ -37,9 +37,15 @@ function bitmapUri(a, id, cache) {
 }
 
 // Наши правила: какие теги OSM ведут в категорию POI / класс линии / слой площади
+// с учётом переназначений cyppoi.REMAP: у исходной категории — пометка «→ куда»
 function ourPoiTags() {
   const m = new Map();
-  for (const [name, tags] of cyppoi.BY_CATEGORY) m.set(cyppoi.catNo(name), tags);
+  const add = (n, x) => { if (!m.has(n)) m.set(n, []); m.get(n).push(...x); };
+  for (const [name, tags] of cyppoi.BY_CATEGORY) {
+    const to = cyppoi.REMAP[name];
+    if (to) { add(cyppoi.catNo(name), ['→ ' + to]); add(cyppoi.catNo(to), tags); }
+    else add(cyppoi.catNo(name), tags);
+  }
   return m;
 }
 function ourLineTags() {
