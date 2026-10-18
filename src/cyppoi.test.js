@@ -9,8 +9,15 @@ test('точечные правила: AlphaGrand — AUDI SERVICE, салон A
   assert.equal(c.classify({ name: 'VW', shop: 'car', brand: 'Volkswagen' }).category, 'AUTOHÄNDLER');
 });
 
-test('переназначения: храмы — KULTURDENKMAL, супермаркеты — LEBENSMITTEL, одежда — EINKAUFSZENTRUM', () => {
+test('переназначения: храмы — KULTURDENKMAL, супермаркеты — LEBENSMITTEL, одежда остаётся в своей категории', () => {
   assert.equal(c.classify({ amenity: 'place_of_worship' }).category, 'KULTURDENKMAL');
   assert.equal(c.classify({ shop: 'supermarket' }).category, 'LEBENSMITTEL');
-  assert.equal(c.classify({ shop: 'clothes' }).category, 'EINKAUFSZENTRUM');
+  assert.equal(c.classify({ shop: 'clothes' }).category, 'BEKLEIDUNG');
+  assert.equal(c.classify({ shop: 'department_store' }).category, 'EINKAUFSZENTRUM');
+});
+
+test('TOURIST INFO — только офисы, щиты и указатели не берём', () => {
+  assert.equal(c.classify({ tourism: 'information', information: 'office' }).category, 'TOURIST INFO');
+  assert.equal(c.classify({ tourism: 'information', information: 'board' }), null);
+  assert.equal(c.classify({ tourism: 'information' }), null);
 });

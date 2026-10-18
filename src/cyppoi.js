@@ -155,11 +155,14 @@ const BY_CATEGORY = [
 // Строки BY_CATEGORY не трогаем, чтобы переназначение было видно и обратимо.
 // Вторая волна (18.10): у завода в дереве POI только 58 типов карты, поэтому
 // полезное переводим в ближайший видимый тип, прочее остаётся как есть.
+// Третья волна (18.10, сверка плотности с Критом): EINKAUFSZENTRUM у завода —
+// только торговые центры (на Крите единицы), поэтому одежда и непродуктовые
+// магазины туда больше не идут и остаются в своих категориях — без значка, как
+// и у завода их на карте нет. Универмаг (KAUFHAUS) — торговый центр по смыслу.
 const REMAP = {
   'GOTTESHAUS': 'KULTURDENKMAL',
   'SUPERMARKT': 'LEBENSMITTEL',
   'FACHGESCHÄFT': 'LEBENSMITTEL',
-  'BEKLEIDUNG': 'EINKAUFSZENTRUM',
   'ARZT': 'ÄRZTL. DIENST',
   'ZAHNARZT': 'ÄRZTL. DIENST',
   'TIERARZT': 'ÄRZTL. DIENST',
@@ -175,11 +178,6 @@ const REMAP = {
   'ZOO': 'FREIZEITPARK',
   'KINDERGARTEN': 'SCHULE',
   'KAUFHAUS': 'EINKAUFSZENTRUM',
-  'MÖBELMARKT': 'EINKAUFSZENTRUM',
-  'SPORTGESCHÄFT': 'EINKAUFSZENTRUM',
-  'BAUMARKT': 'EINKAUFSZENTRUM',
-  'ELEKTROMARKT': 'EINKAUFSZENTRUM',
-  'BÜROARTIKEL': 'EINKAUFSZENTRUM',
   'GETRÄNKEMARKT': 'LEBENSMITTEL',
   'GESCHÄFT': 'LEBENSMITTEL',
   'COFFEE SHOP': 'RESTAURANT',
@@ -211,13 +209,20 @@ function catNo(name) {
 // попадают в категорию без значка, а в заводских типах карты у них есть своя.
 // AlphaGrand AutoService (Лимассол) — сервис Audi по словам пользователя (18.10),
 // в OSM это просто `shop=car_repair` без бренда.
+// cat: null — объект не берём вовсе.
 const SPECIAL = [
+  // `tourism=information` — это и щиты, и указатели, и карты на столбах (854 у
+  // нас против единиц у завода); TOURIST INFO — только офисы
+  { cat: null, test: (t) => t.tourism === 'information' && t.information !== 'office' },
   { cat: 'AUDI SERVICE', test: (t) => /alpha\s*grand/i.test([t.name, t.alt_name, t['name:en']].join(' ')) },
   { cat: 'AUDI ZENTRUM', test: (t) => t.shop === 'car' && /(^|;)\s*audi\s*(;|$)/i.test(t.brand || '') },
 ];
 
+for (const x of SPECIAL)
+  if (x.cat && !P.CATEGORIES.includes(x.cat)) throw new Error('SPECIAL: нет категории ' + x.cat);
+
 function classify(tags) {
-  for (const s of SPECIAL) if (s.test(tags)) return { rank: -1, cat: catNo(s.cat), category: s.cat };
+  for (const s of SPECIAL) if (s.test(tags)) return s.cat ? { rank: -1, cat: catNo(s.cat), category: s.cat } : null;
   let best = null;
   for (const [k, v, name, rank] of MAP)
     if (tags[k] === v && (!best || rank < best.rank))
@@ -252,7 +257,7 @@ function fieldsOf(tags) {
 function collect(pbf) {
   const keys = new Set(MAP.map((m) => m[0]));
   const want = (tags) => {
-    if (SPECIAL.some((s) => s.test(tags))) return true;
+    if (SPECIAL.some((s) => s.cat && s.test(tags))) return true;
     for (const [k, v] of MAP) if (tags[k] === v) return true;
     return false;
   };
