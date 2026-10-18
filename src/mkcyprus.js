@@ -92,7 +92,7 @@ function mkcyprus(outDir, opt) {
   // ---- XAC: свой контейнер ----
   log('=== XAC: свой контейнер ===');
   const xacSrc = fs.readdirSync(path.join(root, 'pkgdb', 'XAC')).find((f) => /\.db$/i.test(f));
-  const x = mkxac({ root, roads: roadsFile, classes, places,
+  const x = mkxac({ root, roads: roadsFile, classes, places, pbf,
                     houses: o.houses, code: o.code, log });
   out.components.push(component(outDir, 'XAC', xacSrc, x.container, root, log));
   out.xac = { blocks: x.blocks, nodes: x.nodes, edges: x.edges };

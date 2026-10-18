@@ -341,7 +341,24 @@ function regenTile(buf, opt) {
   return { out, stat };
 }
 
-module.exports = { graphOf, regenBlock, regenTile, tileEdges, entryCoords, firstEntries };
+// Запреты поворотов узла по смещению его координаты: [{ from, to }] — номера
+// рукавов (элементов списка узла), см. xacwrite.encodeTurns.
+function nodeTurns(s, off) {
+  if ((s.readUInt16BE(off) & 0xc000) !== 0x8000) return [];
+  const b0 = s[off];
+  let q = off + (((b0 >> 5) & 1) ? 8 : 6), n = b0 & 0x0f;
+  if (n === 0x0f) { n = s.readUInt16BE(q); q += 2; }
+  const out = [];
+  for (let k = 0; k < n * 2; k++) {
+    const v = s[q + k];
+    if (v === 0xff) continue;
+    if (v === 0xfe) { out.push({ ext: s.subarray(q + k, q + k + 4) }); k += 3; continue; }
+    out.push({ from: v & 0x0f, to: v >> 4 });
+  }
+  return out;
+}
+
+module.exports = { graphOf, regenBlock, regenTile, tileEdges, entryCoords, firstEntries, nodeTurns };
 
 // Таблица ATTRIBUTE из общего индекса набора — нужна для нульвекторов.
 function attrOfSet() {

@@ -269,6 +269,7 @@ function graphFromGeoJSON(fc, opt) {
     if (classes && !classes.has(hw)) continue;
     const frc = FRC[hw] === undefined ? 4 : FRC[hw];
     const ow = +((f.properties || {}).oneway || 0);   // 1, -1 или 0 — см. src/osm2geo.js
+    const wid = (f.properties || {}).id;              // номер линии OSM — для запретов поворотов
     const kmh = opt && opt.speeds ? speedFor(f, hw, opt.urban) : undefined;
     // Категория (биты 10…12): 0 — автомагистраль, 5 — съезд, как у завода
     // (DE: магистрали — категория 0, съезды — 5); прочим — категория индекса.
@@ -299,12 +300,69 @@ function graphFromGeoJSON(fc, opt) {
       seen.add(key);
       // Ребро пишется вектором у `a`, ссылкой на `b`: одностороннее «по
       // оцифровке» — это A→B. При `oneway=-1` концы меняются местами.
-      if (ow < 0) edges.push({ a: cur, b: prev, frc, name: ni, raw: ri, ow: 1, kmh, cat });
-      else edges.push({ a: prev, b: cur, frc, name: ni, raw: ri, ow: ow ? 1 : 0, kmh, cat });
+      if (ow < 0) edges.push({ a: cur, b: prev, frc, name: ni, raw: ri, ow: 1, kmh, cat, wid });
+      else edges.push({ a: prev, b: cur, frc, name: ni, raw: ri, ow: ow ? 1 : 0, kmh, cat, wid });
       prev = cur;
     }
   }
-  return { nodes, edges, names, rawNames, byRaw, ways, points, loops, dups, named };
+  return { nodes, edges, names, rawNames, byRaw, ways, points, loops, dups, named, byKey };
+}
+
+// --- запреты поворотов ---------------------------------------------------------
+
+// Отношения OSM `type=restriction` -> запреты «из ребра в ребро» на узле графа.
+// Берутся только запреты через УЗЕЛ (`via` — точка): через линию прошивка
+// хранит их иначе (META_CROSS в `get_metainfo`, не разобрано). `from`/`to`
+// должны касаться узла ровно одним ребром своей линии, иначе не пишем.
+// `no_*` (и `no_entry`/`no_exit`) — один запрет; `only_*` — запреты из `from`
+// во все прочие рёбра, по которым из узла можно выехать. Разворот в то же
+// ребро не пишем: у завода нет ни одного запрета «рукав в сам себя»
+// (DE 0 из 5915, UK 0 из 20 713) — такой разворот прошивка, видимо, и так
+// не строит. Условные (`restriction:conditional`, `restriction:hgv` и т. п.)
+// пропускаются: у них нет ключа `restriction`.
+//
+// `rels` — [{ id, tags, members: [{ ref, type, role }] }] (src/osmpbf.js),
+// `coord(id)` — [lon, lat] узла OSM в градусах или null.
+function turnBans(graph, rels, coord) {
+  const stat = { total: rels.length, via_way: 0, no_via: 0, no_kind: 0, via_missing: 0,
+                 from_bad: 0, to_bad: 0, uturn_same: 0, bad_dir: 0, mapped: 0, bans: 0 };
+  const inc = new Map();                          // узел -> рёбра
+  graph.edges.forEach((e, ei) => {
+    for (const n of [e.a, e.b]) { if (!inc.has(n)) inc.set(n, []); inc.get(n).push(ei); }
+  });
+  const enter = (ei, n) => { const e = graph.edges[ei]; return !e.ow || e.b === n; };
+  const leave = (ei, n) => { const e = graph.edges[ei]; return !e.ow || e.a === n; };
+  const bans = new Map();
+  for (const r of rels) {
+    const kind = r.tags.restriction;
+    if (!kind) { stat.no_kind++; continue; }
+    const via = r.members.filter((m) => m.role === 'via');
+    if (!via.length) { stat.no_via++; continue; }
+    if (via.length > 1 || via[0].type !== 0) { stat.via_way++; continue; }
+    const c = coord(via[0].ref);
+    const n = c ? graph.byKey.get(Math.round(c[0] * LON) + ',' + Math.round(c[1] * LAT)) : undefined;
+    if (n === undefined || !inc.has(n)) { stat.via_missing++; continue; }
+    const pick = (role) => {
+      const ms = r.members.filter((m) => m.role === role && m.type === 1);
+      if (ms.length !== 1) return -1;
+      const es = inc.get(n).filter((ei) => graph.edges[ei].wid === ms[0].ref);
+      return es.length === 1 ? es[0] : -1;
+    };
+    const from = pick('from'), to = pick('to');
+    if (from < 0) { stat.from_bad++; continue; }
+    if (to < 0) { stat.to_bad++; continue; }
+    if (!enter(from, n)) { stat.bad_dir++; continue; }
+    let list;
+    if (/^only_/.test(kind)) list = inc.get(n).filter((ei) => ei !== to && ei !== from && leave(ei, n));
+    else if (/^no_/.test(kind)) {
+      if (from === to) { stat.uturn_same++; continue; }
+      list = [to];
+    } else { stat.no_kind++; continue; }
+    stat.mapped++;
+    if (!bans.has(n)) bans.set(n, []);
+    for (const t of list) { bans.get(n).push({ from, to: t }); stat.bans++; }
+  }
+  return { bans, stat };
 }
 
 // --- нарезка на блоки ---------------------------------------------------------
@@ -362,13 +420,13 @@ function layout(graph, groups, attrIdx, named) {
     const la = localOf[e.a], lb = localOf[e.b];
     if (ba === bb) {
       const pos = recs[ba][la].vecs.length;
-      recs[ba][la].vecs.push({ to: lb, idx, names });
-      recs[bb][lb].backs.push({ from: la, at: pos });
+      recs[ba][la].vecs.push({ to: lb, idx, names, ei });
+      recs[bb][lb].backs.push({ from: la, at: pos, ei });
       local++;
     } else {
       const pos = recs[ba][la].vecs.length;
-      recs[ba][la].vecs.push({ cross: bb, node: lb, idx, names });   // номер запишем потом
-      recs[bb][lb].backs.push({ crossBlock: ba, node: la, at: pos });
+      recs[ba][la].vecs.push({ cross: bb, node: lb, idx, names, ei });   // номер запишем потом
+      recs[bb][lb].backs.push({ crossBlock: ba, node: la, at: pos, ei });
       cross++;
     }
     place[ei] = { block: ba, node: la, pos: recs[ba][la].vecs.length - 1 };
@@ -431,11 +489,25 @@ function buildBlocks(graph, opt) {
     if (tooMany >= 0) { maxNodes = Math.floor(maxNodes * 0.7); continue; }
 
     const blocks = [];
-    let over = false;
+    let over = false, turnsWritten = 0, turnLost = 0;
     for (let bi = 0; bi < groups.length && !over; bi++) {
       const nodes = groups[bi].map((gi, k) => {
         const r = lay.recs[bi][k];
+        let turns;
+        const bl = o.bans && o.bans.get(gi);
+        if (bl) {
+          const arms = r.vecs.map((v) => v.ei).concat(r.backs.map((b) => b.ei));
+          turns = [];
+          for (const t of bl) {
+            const f = arms.indexOf(t.from), to = arms.indexOf(t.to);
+            if (f < 0 || to < 0 || f > 11 || to > 11) { turnLost++; continue; }
+            if (!turns.some((x) => x.from === f && x.to === to)) turns.push({ from: f, to });
+          }
+          if (turns.length > 28) { turnLost += turns.length - 28; turns = turns.slice(0, 28); }
+          turnsWritten += turns.length;
+        }
         return {
+          turns,
           x: graph.nodes[gi].x, y: graph.nodes[gi].y,
           vectors: r.vecs.map((v) => v.cross === undefined
             ? { to: v.to, idx: v.idx, names: v.names }
@@ -453,7 +525,7 @@ function buildBlocks(graph, opt) {
     }
     if (over) { maxNodes = Math.floor(maxNodes * 0.7); continue; }
     return { blocks, groups, local: lay.local, cross: lay.cross, maxNodes,
-             oneway: lay.oneway, owLost: lay.owLost,
+             oneway: lay.oneway, owLost: lay.owLost, turns: turnsWritten, turnLost,
              names: nameRefs(graph, lay, firsts, groups.length) };
   }
   throw new Error('блоки не удалось уложить в потолки даже после деления');
@@ -819,7 +891,7 @@ function convert(geojson, opt) {
 module.exports = { convert, graphFromGeoJSON, splitNodes, layout, buildBlocks,
                    buildTileFile, verify, verifyNames, verifyGuidance, nameRefs, zenModel,
                    latinize, roadName, houseNumber, segDist2,
-                   attrByFrc, attrByFrcNamed, setAttributes, FRC, speedClass, speedFor };
+                   attrByFrc, attrByFrcNamed, setAttributes, FRC, speedClass, speedFor, turnBans };
 
 if (require.main === module) {
   const args = process.argv.slice(2);

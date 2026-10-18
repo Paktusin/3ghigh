@@ -559,3 +559,75 @@ test('скорость: индекс подбирается с нужным кл
   }
   assert.deepEqual(t.speed.inexact, {});
 });
+
+// ---------------------------------------------------------------------------
+// Запреты поворотов: байты за длинной координатой узла, (в << 4) | из.
+
+function crossJunction() {
+  // перекрёсток в (33, 35): четыре линии OSM с номерами 1…4, концами в центре
+  const c = [33, 35], d = 0.001;
+  const w = (id, to) => ({ type: 'Feature', properties: { id, highway: 'residential' },
+                           geometry: { type: 'LineString', coordinates: [to, c] } });
+  return { type: 'FeatureCollection', features: [
+    w(1, [33, 35 - d]), w(2, [33 + d, 35]), w(3, [33, 35 + d]), w(4, [33 - d, 35]),
+  ] };
+}
+const VIA = 99;
+const coordOf = (id) => (id === VIA ? [33, 35] : null);
+const rel = (kind, from, to) => ({ id: 1, tags: { type: 'restriction', restriction: kind },
+  members: [{ ref: from, type: 1, role: 'from' }, { ref: VIA, type: 0, role: 'via' },
+            { ref: to, type: 1, role: 'to' }] });
+
+// Запреты, прочитанные обратно из блока, как пары «линия OSM -> линия OSM».
+function readBans(graph, built) {
+  const xg = require('./xacgraph');
+  const out = [];
+  for (const b of built.blocks) {
+    const g = xg.graphOf(b);
+    for (const n of g.nodes) {
+      const ts = xg.nodeTurns(b, n.off);
+      if (!ts.length) continue;
+      // рукав -> линия: по координате дальнего конца
+      const far = n.entries.map((en) => {
+        const m = g.nodes[en.to !== undefined ? en.to : g.entryNode[en.back]];
+        const e = graph.edges.find((x) => [x.a, x.b].some((k) => graph.nodes[k].x === m.x && graph.nodes[k].y === m.y));
+        return e.wid;
+      });
+      for (const t of ts) out.push(far[t.from] + '->' + far[t.to]);
+    }
+  }
+  return out.sort();
+}
+
+test('запрет поворота: no_left_turn читается обратно той же парой', () => {
+  const g = xr.graphFromGeoJSON(crossJunction());
+  const tb = xr.turnBans(g, [rel('no_left_turn', 1, 4)], coordOf);
+  assert.equal(tb.stat.mapped, 1);
+  const built = xr.buildBlocks(g, { attrIdx: xr.attrByFrc(attrTable()), bans: tb.bans });
+  assert.equal(built.turns, 1);
+  assert.deepEqual(readBans(g, built), ['1->4']);
+});
+
+test('запрет поворота: only_straight_on разворачивается в запреты прочих съездов', () => {
+  const g = xr.graphFromGeoJSON(crossJunction());
+  const tb = xr.turnBans(g, [rel('only_straight_on', 1, 3)], coordOf);
+  const built = xr.buildBlocks(g, { attrIdx: xr.attrByFrc(attrTable()), bans: tb.bans });
+  assert.deepEqual(readBans(g, built), ['1->2', '1->4']);
+});
+
+test('запрет поворота: разворот в то же ребро и запрет через линию не пишутся', () => {
+  const g = xr.graphFromGeoJSON(crossJunction());
+  const viaWay = { id: 2, tags: { type: 'restriction', restriction: 'no_left_turn' },
+    members: [{ ref: 1, type: 1, role: 'from' }, { ref: 2, type: 1, role: 'via' }, { ref: 3, type: 1, role: 'to' }] };
+  const tb = xr.turnBans(g, [rel('no_u_turn', 1, 1), viaWay], coordOf);
+  assert.equal(tb.stat.uturn_same, 1);
+  assert.equal(tb.stat.via_way, 1);
+  assert.equal(tb.bans.size, 0);
+});
+
+test('запрет поворота: байт узла — старший полубайт «куда», младший «откуда»', () => {
+  const xw = require('./xacwrite');
+  assert.deepEqual([...xw.encodeTurns([{ from: 2, to: 0 }], 3, 0)], [0x02, 0xff]);
+  assert.deepEqual([...xw.encodeTurns([{ from: 1, to: 2 }, { from: 0, to: 1 }], 3, 0)], [0x21, 0x10]);
+  assert.throws(() => xw.encodeTurns([{ from: 3, to: 0 }], 3, 0), /вне рукавов/);
+});

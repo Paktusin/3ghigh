@@ -387,6 +387,27 @@ function encodeNull(links) {
 // первого вектора служит длина координаты в словах: 2, 3 или 4.
 //
 // Номер 0 использовать нельзя: FUN_08272410 отвечает на него нулём.
+// Запреты поворотов узла (`xac_get_noturns_at_node`, `FUN_082707e8`).
+// Узел в длинной форме координаты: младший полубайт байта 0 — число
+// двухбайтовых слов запретов (0xf — число лежит словом после координаты), за
+// координатой — сами байты: в каждом старший полубайт — рукав, В КОТОРЫЙ
+// поворачивать нельзя, младший — рукав, ИЗ КОТОРОГО (по заводским данным,
+// см. docs/formats/xac.md «Запреты поворотов»), 0xff — заполнитель, 0xfe —
+// ссылка в соседний тайл (не пишем). Рукав — номер элемента в списке узла:
+// сначала его векторы, затем встречные ссылки; прошивка видит не больше 12.
+function encodeTurns(turns, arms, i) {
+  if (!turns || !turns.length) return null;
+  const bytes = [];
+  for (const t of turns) {
+    if (!(t.from >= 0 && t.from < Math.min(arms, 12) && t.to >= 0 && t.to < Math.min(arms, 12)))
+      throw new Error('узел ' + i + ': запрет поворота ' + t.from + '->' + t.to + ' вне рукавов (' + arms + ')');
+    bytes.push((t.to << 4) | t.from);
+  }
+  if (bytes.length % 2) bytes.push(0xff);
+  if (bytes.length / 2 > 14) throw new Error('узел ' + i + ': запретов больше 28');
+  return Buffer.from(bytes);
+}
+
 function buildBlock(spec) {
   const nodes = spec.nodes;
   if (!nodes.length) throw new Error('блок без узлов');
@@ -429,17 +450,21 @@ function buildBlock(spec) {
   let vectors = 0, junctions = 0;
   for (let i = 0; i < nodes.length; i++) {
     const n = nodes[i], vs = n.vectors || [];
-    const form = coordForm(n, ox, oy, true);
-    const c = encodeCoord(n, ox, oy, form, 0);
+    const tb = encodeTurns(n.turns, vs.length + (n.backs || []).length, i);
+    // запреты поворотов живут только в длинной форме координаты (метка 0x8000)
+    const form = tb ? Math.max(6, coordForm(n, ox, oy, true)) : coordForm(n, ox, oy, true);
+    const c = encodeCoord(n, ox, oy, form, tb ? tb.length / 2 : 0);
     if (!c) throw new Error('узел ' + i + ': координата не лежит в рамке блока');
     body.push(c);
     const nodeAt = p;
     p += form;
+    if (tb) { body.push(tb); p += tb.length; }
+    const head = form + (tb ? tb.length : 0);   // шаг от первой записи назад к узлу
     junctions++;
     const backs = n.backs || [];
     if (!vs.length && !backs.length) {                              // узел без векторов всё равно адресуем
       word[first[i]] = p / 2;
-      step[first[i]] = form / 2;
+      step[first[i]] = head / 2;
     } else {
       for (let k = 0; k < vs.length; k++) {
         const v = vs[k];
@@ -463,7 +488,7 @@ function buildBlock(spec) {
         }
         body.push(b);
         word[first[i] + k] = p / 2;
-        step[first[i] + k] = k === 0 ? form / 2 : 0;
+        step[first[i] + k] = k === 0 ? head / 2 : 0;
         vectors++;
         p += b.length;
         if (v.names && v.names.length) {        // имена ведения идут сразу за записью
@@ -497,7 +522,7 @@ function buildBlock(spec) {
       body.push(b);
       const slot = first[i] + vs.length + k;
       word[slot] = p / 2;
-      step[slot] = (vs.length === 0 && k === 0) ? form / 2 : 0;
+      step[slot] = (vs.length === 0 && k === 0) ? head / 2 : 0;
       p += b.length;
     }
     if (n.links && n.links.length) {               // нульвектор идёт сразу за записями
@@ -541,7 +566,7 @@ function buildBlock(spec) {
 module.exports = { readBlock, writeBlock, buildBlock, simpleAttributes,
                    nameAttributes, encodeNames, encodeCoord,
                    coordForm, looksSub, encodeLength, encodeHeader, encodeNull, scaleAt,
-                   recordParts, HDR, SUB };
+                   recordParts, encodeTurns, HDR, SUB };
 
 if (require.main === module) {
   const fldb = require('./fldb');

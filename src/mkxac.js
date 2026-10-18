@@ -381,8 +381,21 @@ function mkxac(opt) {
     zfSection = zfnamen.buildSection(order.map((g) => ({ text: graph.names[g], kind: 0 })),
                                      zfnamen.tokens(xahSrc));
   }
-  const built = roads.buildBlocks(graph, { attr, attrIdx: roads.attrByFrc(attr), named,
+  // запреты поворотов из отношений OSM `type=restriction`
+  let bans = null;
+  const pbf = o.pbf === undefined ? 'out/cyp/cyprus-latest.osm.pbf' : o.pbf;
+  if (pbf && fs.existsSync(pbf)) {
+    const idx = osmpbf.read(pbf, { relation: (t) => t.type === 'restriction' });
+    const tb = roads.turnBans(graph, idx.relations, (id) => {
+      const c = osmpbf.coord(idx, id);
+      return c ? [c[0] / 1e7, c[1] / 1e7] : null;
+    });
+    bans = tb.bans;
+    log('запреты поворотов OSM: ' + JSON.stringify(tb.stat));
+  }
+  const built = roads.buildBlocks(graph, { attr, attrIdx: roads.attrByFrc(attr), named, bans,
                                            base: 0, country: CYPRUS, maxNodes: o.maxNodes || 9000 });
+  if (bans) log('запретов записано в узлы: ' + built.turns + (built.turnLost ? ', не уложилось: ' + built.turnLost : ''));
   log('дорог ' + graph.ways + ', узлов ' + graph.nodes.length + ', рёбер ' + graph.edges.length +
       ' -> блоков ' + built.blocks.length + ', односторонних рёбер ' + built.oneway +
       (built.owLost ? ' (без одностороннего индекса — двусторонними: ' + built.owLost + ')' : ''));
