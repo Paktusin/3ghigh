@@ -29,6 +29,7 @@ const { mkxac, readHouses, buildContainer } = require('./mkxac');
 const fldb = require('./fldb');
 const gdbgen = require('./gdbgen');
 const atlascut = require('./atlascut');
+const placesMod = require('./places');
 const cyplit = require('./cyplit');
 const litaddr = require('./litaddr');
 const cyppoi = require('./cyppoi');
@@ -64,10 +65,16 @@ function mkcyprus(outDir, opt) {
   const out = { outDir, components: [] };
   fs.mkdirSync(outDir, { recursive: true });
 
+  // города — один список для XAC и LIT, двойники склеены (src/places.js)
+  const pbf = o.pbf || 'out/cyp/cyprus-latest.osm.pbf';
+  const rawPlaces = o.places || JSON.parse(fs.readFileSync('out/cyp/places_geo.json', 'utf8'));
+  const places = placesMod.dedupe(rawPlaces, fs.existsSync(pbf) ? placesMod.englishNames(pbf) : null);
+  if (places.length !== rawPlaces.length) log('города: ' + rawPlaces.length + ' -> ' + places.length + ' (склеены двойники)');
+
   // ---- XAC: свой контейнер ----
   log('=== XAC: свой контейнер ===');
   const xacSrc = fs.readdirSync(path.join(root, 'pkgdb', 'XAC')).find((f) => /\.db$/i.test(f));
-  const x = mkxac({ root, roads: roadsFile, classes: o.classes, places: o.places,
+  const x = mkxac({ root, roads: roadsFile, classes: o.classes, places,
                     houses: o.houses, code: o.code, log });
   out.components.push(component(outDir, 'XAC', xacSrc, x.container, root, log));
   out.xac = { blocks: x.blocks, nodes: x.nodes, edges: x.edges };
@@ -97,7 +104,7 @@ function mkcyprus(outDir, opt) {
   const litPath = path.join(root, 'pkgdb', 'LIT', litSrc);
   // адресный справочник: те же города и улицы, что в XAC (тот же граф, те же классы)
   const addr = litaddr.modelFromRoads(JSON.parse(fs.readFileSync(roadsFile, 'utf8')),
-                                      o.places || JSON.parse(fs.readFileSync('out/cyp/places_geo.json', 'utf8')),
+                                      places,
                                       { classes: o.classes,
                                         addrs: litaddr.readAddresses(o.pbf || 'out/cyp/cyprus-latest.osm.pbf') });
   const factory = ['LIT', 'LIT2', 'LIT3', 'LIT4'].map((d) => path.join(root, 'pkgdb', d));
