@@ -65,40 +65,55 @@ const FRC = {
   service: 7, track: 7, pedestrian: 7,
 };
 
-// Биты 3…4 описателя — направление проезда (по коду: `kdv_calc`
-// `FUN_08ed3fdc` сравнивает `(описатель >> 3) & 3` со стороной вектора и при
-// `сторона + 1` берёт обратную; подбор цели с флагом 0x10 отбрасывает
-// значение 3, «проезда нет»). 0 — в обе стороны, 1 и 2 — одностороннее, какое
-// из них «по оцифровке», не установлено. OSM-признак `oneway` до сюда не
-// доезжает, поэтому все наши дороги — двусторонние: до 19.10 «первый простой
-// индекс» для FRC 0 и 1 был со значением 2, и 7194 безымянных ребра
-// магистралей и съездов оказались односторонними в случайную сторону.
-const twoWay = (v) => ((v >>> 3) & 3) === 0;
+// Биты 3…4 описателя — направление проезда относительно порядка записи:
+// A — узел, у которого лежит запись вектора, B — узел, на который она ссылается.
+//   0 — в обе стороны, 1 — только A→B, 2 — только B→A, 3 — проезда нет.
+// По коду: `u_gvi` (`FUN_08272938`) кладёт координату A в +0x14, B в +0x20;
+// `FUN_08272ef4` для стороны 0 разворачивает курс (то есть сторона 1 — это
+// A→B), а `kdv_calc` `FUN_08ed3fdc` запрещает сторону `значение − 1`.
+// По данным: у парных проезжих частей автомагистралей встречная половина при
+// значении 1 лежит слева от A→B в Германии (3094 из 3217) и справа в
+// Великобритании (2254 из 2275) — правостороннее и левостороннее движение;
+// при значении 2 — наоборот (DE 3146 из 3329, UK 2236 из 2253). Подробно — в
+// docs/formats/xac.md, «Одностороннее движение».
+const DIR = (v) => (v >>> 3) & 3;
+const CAT = (v) => (v >>> 10) & 7;
+const bits = (x) => { let c = 0; for (x >>>= 0; x; x >>>= 1) c += x & 1; return c; };
 
-// Первый «простой» индекс таблицы ATTRIBUTE для каждого FRC. Нулевое значение
-// не берём: это описатель без единого признака, и дорогой он быть не может.
-// В заводской таблице нулей нет вовсе (0 из 2048), так что правило ничего не
-// отнимает, зато не даёт синтетической таблице подсунуть пустой индекс.
-// То же, но из индексов, у которых в хвосте записи лежит список имён ведения.
-function attrByFrcNamed(attr) {
-  const out = {};
-  for (const i of xw.nameAttributes(attr)) {
-    if (!attr[i] || !twoWay(attr[i])) continue;
-    const frc = attr[i] & 7;
-    if (out[frc] === undefined) out[frc] = i;
+// Индексы ATTRIBUTE для каждого FRC парой «двусторонний / односторонний A→B».
+// Пара подбирается так, чтобы описатели отличались только направлением; если
+// такой пары в таблице нет, берётся ближайшая по числу отличающихся бит с той
+// же категорией (иначе — любая), и это отмечается в `tab.inexact`. Нулевое
+// значение не берём: дорогой оно быть не может (в заводской таблице нулей нет).
+// Двусторонний индекс — `tab[frc]`, односторонний — `tab.one[frc]` (свойство
+// неперечисляемое, чтобы таблица оставалась картой FRC → индекс).
+function pairByFrc(attr, family) {
+  const two = {}, one = {}, inexact = {};
+  const list = family.filter((i) => attr[i]);
+  for (let frc = 0; frc < 8; frc++) {
+    const c0 = list.filter((i) => (attr[i] & 7) === frc && DIR(attr[i]) === 0);
+    const c1 = list.filter((i) => (attr[i] & 7) === frc && DIR(attr[i]) === 1);
+    if (!c0.length) continue;
+    if (!c1.length) { two[frc] = c0[0]; continue; }
+    let best = null;
+    for (const i of c0) {
+      for (const j of c1) {
+        const vi = attr[i] >>> 0, vj = attr[j] >>> 0;
+        const sc = (CAT(vi) !== CAT(vj) ? 100 : 0) + bits(vi ^ vj ^ 0x08);
+        if (!best || sc < best.sc) best = { i, j, sc };
+      }
+    }
+    two[frc] = best.i; one[frc] = best.j;
+    if (best.sc) inexact[frc] = best.sc;
   }
-  return out;
+  Object.defineProperty(two, 'one', { value: one });
+  Object.defineProperty(two, 'inexact', { value: inexact });
+  return two;
 }
 
-function attrByFrc(attr) {
-  const out = {};
-  for (const i of xw.simpleAttributes(attr)) {
-    if (!attr[i] || !twoWay(attr[i])) continue;
-    const frc = attr[i] & 7;
-    if (out[frc] === undefined) out[frc] = i;
-  }
-  return out;
-}
+// То же из индексов, у которых в хвосте записи лежит список имён ведения.
+function attrByFrcNamed(attr) { return pairByFrc(attr, xw.nameAttributes(attr)); }
+function attrByFrc(attr) { return pairByFrc(attr, xw.simpleAttributes(attr)); }
 
 // Таблица ATTRIBUTE набора.
 function setAttributes(root) {
@@ -169,6 +184,7 @@ function graphFromGeoJSON(fc, opt) {
     const hw = (f.properties || {}).highway || 'unclassified';
     if (classes && !classes.has(hw)) continue;
     const frc = FRC[hw] === undefined ? 6 : FRC[hw];
+    const ow = +((f.properties || {}).oneway || 0);   // 1, -1 или 0 — см. src/osm2geo.js
     const nm = roadName(f.properties);
     let ni = -1;
     if (nm) {
@@ -192,7 +208,10 @@ function graphFromGeoJSON(fc, opt) {
       const key = prev < cur ? prev + '-' + cur : cur + '-' + prev;
       if (seen.has(key)) { dups++; prev = cur; continue; }
       seen.add(key);
-      edges.push({ a: prev, b: cur, frc, name: ni, raw: ri });
+      // Ребро пишется вектором у `a`, ссылкой на `b`: одностороннее «по
+      // оцифровке» — это A→B. При `oneway=-1` концы меняются местами.
+      if (ow < 0) edges.push({ a: cur, b: prev, frc, name: ni, raw: ri, ow: 1 });
+      else edges.push({ a: prev, b: cur, frc, name: ni, raw: ri, ow: ow ? 1 : 0 });
       prev = cur;
     }
   }
@@ -232,14 +251,18 @@ function layout(graph, groups, attrIdx, named) {
 
   const recs = groups.map((g) => g.map(() => ({ vecs: [], backs: [] })));
   const place = new Array(graph.edges.length);   // где лежит запись ребра
-  let local = 0, cross = 0;
+  let local = 0, cross = 0, oneway = 0, owLost = 0;
 
   graph.edges.forEach((e, ei) => {
     // У дороги с именем ведения индекс берётся из «именующих»: у них в хвосте
     // записи лежит список имён, у простых хвоста нет вовсе.
     const zf = named && e.name >= 0 ? named.of[e.name] : -1;
     const tab = zf >= 0 ? named.attr : attrIdx;
-    const idx = tab[e.frc] === undefined ? tab[6] : tab[e.frc];
+    const frc = tab[e.frc] === undefined ? 6 : e.frc;
+    let idx = tab[frc];
+    if (e.ow) {
+      if (tab.one && tab.one[frc] !== undefined) { idx = tab.one[frc]; oneway++; } else owLost++;
+    }
     const names = zf >= 0 ? [zf] : null;
     const ba = blockOf[e.a], bb = blockOf[e.b];
     const la = localOf[e.a], lb = localOf[e.b];
@@ -256,7 +279,7 @@ function layout(graph, groups, attrIdx, named) {
     }
     place[ei] = { block: ba, node: la, pos: recs[ba][la].vecs.length - 1 };
   });
-  return { blockOf, localOf, recs, place, local, cross };
+  return { blockOf, localOf, recs, place, local, cross, oneway, owLost };
 }
 
 // Связь «имя -> дорога» для ZE-NAMEN: на каждое имя список { block, recs }.
@@ -336,6 +359,7 @@ function buildBlocks(graph, opt) {
     }
     if (over) { maxNodes = Math.floor(maxNodes * 0.7); continue; }
     return { blocks, groups, local: lay.local, cross: lay.cross, maxNodes,
+             oneway: lay.oneway, owLost: lay.owLost,
              names: nameRefs(graph, lay, firsts, groups.length) };
   }
   throw new Error('блоки не удалось уложить в потолки даже после деления');

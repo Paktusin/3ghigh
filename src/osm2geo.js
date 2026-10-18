@@ -21,6 +21,21 @@ function split(pts, max) {
   return out.filter(p => p.length >= 2);
 }
 
+// Одностороннее движение по тегам OSM: 1 — только по порядку точек, -1 —
+// только против, 0 — в обе стороны. Явный `oneway` главнее подразумеваемого;
+// подразумевается он у `motorway`, `motorway_link` и у кольца
+// (`junction=roundabout|circular`). `reversible`/`alternating` меняют
+// направление по времени — считаем двусторонними.
+function onewayOf(t) {
+  const v = String(t.oneway || '').toLowerCase();
+  if (v === 'yes' || v === '1' || v === 'true') return 1;
+  if (v === '-1' || v === 'reverse') return -1;
+  if (v === 'no' || v === '0' || v === 'false' || v === 'reversible' || v === 'alternating') return 0;
+  if (t.highway === 'motorway' || t.highway === 'motorway_link') return 1;
+  if (t.junction === 'roundabout' || t.junction === 'circular') return 1;
+  return 0;
+}
+
 function convert(src, max) {
   const j = JSON.parse(fs.readFileSync(src, 'utf8'));
   const ways = (j.elements || []).filter(e => e.type === 'way' && Array.isArray(e.geometry));
@@ -40,6 +55,7 @@ function convert(src, max) {
         name: (w.tags || {}).name || null,
         name_en: (w.tags || {})['name:en'] || null,
         int_name: (w.tags || {}).int_name || null,
+        oneway: onewayOf(w.tags || {}),
       },
       geometry: { type: 'LineString', coordinates: p },
     });
@@ -61,4 +77,4 @@ if (require.main === module) {
   console.log('записано       :', dst);
 }
 
-module.exports = { convert, split };
+module.exports = { convert, split, onewayOf };

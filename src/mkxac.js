@@ -349,7 +349,8 @@ function mkxac(opt) {
   const built = roads.buildBlocks(graph, { attr, attrIdx: roads.attrByFrc(attr), named,
                                            base: 0, country: CYPRUS, maxNodes: o.maxNodes || 9000 });
   log('дорог ' + graph.ways + ', узлов ' + graph.nodes.length + ', рёбер ' + graph.edges.length +
-      ' -> блоков ' + built.blocks.length);
+      ' -> блоков ' + built.blocks.length + ', односторонних рёбер ' + built.oneway +
+      (built.owLost ? ' (без одностороннего индекса — двусторонними: ' + built.owLost + ')' : ''));
 
   const bb = [Infinity, Infinity, -Infinity, -Infinity];
   for (const n of graph.nodes) {

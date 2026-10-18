@@ -435,3 +435,79 @@ test('без имён ведения тайл собирается по-преж
   assert.equal(zs.total, 112, 'заглушка на месте');
   assert.equal(r.check.found, r.check.want, 'рёбра целы');
 });
+
+// ---------------------------------------------------------------------------
+// Одностороннее движение: биты 3…4 описателя, 1 — только A→B, где A — узел
+// записи вектора (см. docs/formats/xac.md, «Одностороннее движение»).
+
+function attrTableDir() {
+  const a = new Uint32Array(2048);
+  for (let frc = 0; frc <= 7; frc++) {
+    a[0x100 + frc] = 0x1000 | frc;              // двусторонняя
+    a[0x180 + frc] = 0x1000 | 0x08 | frc;       // только A→B
+    a[0x1c0 + frc] = 0x1000 | 0x10 | frc;       // только B→A — нам не нужна
+  }
+  return a;
+}
+
+// Ребро графа -> { from, to, dir } по прочитанному обратно тайлу.
+function edgesWithDir(file, attr) {
+  const xg = require('./xacgraph'), xrec = require('./xacrec');
+  const out = [];
+  for (const s of xac.sections(file).list.filter((x) => x.name === 'VEKTORBLOCK')) {
+    const b = file.subarray(s.offset, s.offset + s.total);
+    const g = xg.graphOf(b), tab = b.readUInt32BE(0x6c);
+    g.nodes.forEach((n) => {
+      for (const en of n.entries) {
+        if (en.to === undefined || en.back !== undefined) continue;
+        const r = xrec.record(b, b.readUInt16BE(tab + en.old * 2) * 2, attr, () => {});
+        out.push({ from: [n.x, n.y], to: [g.nodes[en.to].x, g.nodes[en.to].y], dir: (r.flags >>> 3) & 3 });
+      }
+    });
+  }
+  return out;
+}
+
+test('одностороннее: пара индексов отличается только направлением', () => {
+  const a = attrTableDir();
+  const t = xr.attrByFrc(a);
+  for (let frc = 0; frc <= 7; frc++) {
+    assert.equal(t[frc], 0x100 + frc);
+    assert.equal(t.one[frc], 0x180 + frc, 'FRC ' + frc + ': значение 1, а не 2');
+    assert.equal(t.inexact[frc], undefined);
+  }
+  assert.deepEqual(Object.keys(t).map(Number), [0, 1, 2, 3, 4, 5, 6, 7], 'таблица — по-прежнему карта FRC');
+});
+
+test('одностороннее: по оцифровке, обратное и двустороннее читаются обратно верно', () => {
+  const attr = attrTableDir();
+  const LON = 72000, LAT = 40000000 / 360, P = (lon, lat) => [Math.round(lon * LON), Math.round(lat * LAT)];
+  const feat = (pts, ow) => ({ type: 'Feature', properties: { highway: 'primary', oneway: ow },
+                               geometry: { type: 'LineString', coordinates: pts } });
+  const fc = { type: 'FeatureCollection', features: [
+    feat([[33.0, 35.0], [33.004, 35.0]], 1),        // по оцифровке
+    feat([[33.0, 35.01], [33.004, 35.01]], -1),     // против
+    feat([[33.0, 35.02], [33.004, 35.02]], 0),      // в обе стороны
+  ] };
+  const r = xr.convert(fc, { attr, guidance: false, names: false });
+  assert.equal(r.built.oneway, 2);
+  assert.equal(r.built.owLost, 0);
+  const es = edgesWithDir(r.file, attr);
+  const at = (lat) => es.find((e) => e.from[1] === P(0, lat)[1]);
+  const fwd = at(35.0), rev = at(35.01), two = at(35.02);
+  assert.deepEqual([fwd.from, fwd.to, fwd.dir], [P(33.0, 35.0), P(33.004, 35.0), 1], 'A — первая точка, проезд A→B');
+  assert.deepEqual([rev.from, rev.to, rev.dir], [P(33.004, 35.01), P(33.0, 35.01), 1], 'oneway=-1: вектор у последней точки');
+  assert.equal(two.dir, 0, 'двустороннее не тронуто');
+});
+
+test('одностороннее: теги OSM -> признак oneway', () => {
+  const { onewayOf } = require('./osm2geo');
+  assert.equal(onewayOf({ highway: 'primary', oneway: 'yes' }), 1);
+  assert.equal(onewayOf({ highway: 'primary', oneway: '-1' }), -1);
+  assert.equal(onewayOf({ highway: 'primary' }), 0);
+  assert.equal(onewayOf({ highway: 'motorway' }), 1, 'автомагистраль — подразумевается');
+  assert.equal(onewayOf({ highway: 'motorway_link', oneway: 'no' }), 0, 'явное «no» главнее');
+  assert.equal(onewayOf({ highway: 'primary', junction: 'roundabout' }), 1, 'кольцо');
+  assert.equal(onewayOf({ highway: 'trunk', junction: 'circular' }), 1);
+  assert.equal(onewayOf({ highway: 'primary', oneway: 'reversible' }), 0);
+});
