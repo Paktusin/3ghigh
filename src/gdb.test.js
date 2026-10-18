@@ -350,3 +350,55 @@ test('элементы: заводские тайлы всех 12 уровней
     assert.equal(ok, n, 'L' + lv + ': сошлось ' + ok + ' из ' + n);
   }
 });
+
+// ── многоугольники: треугольники по автомату признаков ─────────────────────
+
+const triArea = t => Math.abs((t[1][0] - t[0][0]) * (t[2][1] - t[0][1]) - (t[2][0] - t[0][0]) * (t[1][1] - t[0][1])) / 2;
+const sgn = (a, b, c) => (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]);
+const inTri = (t, x, y) => {
+  const d1 = sgn(t[0], t[1], [x, y]), d2 = sgn(t[1], t[2], [x, y]), d3 = sgn(t[2], t[0], [x, y]);
+  return (d1 > 0 && d2 > 0 && d3 > 0) || (d1 < 0 && d2 < 0 && d3 < 0);
+};
+// каждая точка сетки покрыта ровно одним треугольником
+const coveredOnce = (tris, X, Y, N = 40) => {
+  let bad = 0;
+  for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+    const x = (i + 0.53) * X / N, y = (j + 0.41) * Y / N;
+    if (tris.filter(t => inTri(t, x, y)).length !== 1) bad++;
+  }
+  return bad;
+};
+
+test('многоугольники: рамка — веер из двух треугольников на весь тайл', () => {
+  const f = gm.readElements(G.emptyTile(), { points: true }).els[0];
+  const r = gm.polyTriangles(f.pts, f.flags);
+  assert.equal(r.illegal, 0);
+  assert.equal(r.tris.length, 2);
+  assert.equal(r.tris.reduce((s, t) => s + triArea(t), 0), 25248 * 17472);
+});
+
+test('многоугольники: заводской прибрежный тайл Кипра — суша 0x5D и море 0x50 делят тайл без зазоров', () => {
+  // EJ211 @346900808 (178 б), северный берег Кипра
+  const blob = Buffer.from('009800aa00b20002e0281d0000005d0eaf172125c87b25bf9e78f2dfc00002324be905008062087f27741efa324847f56f10723ade231a5bdd40dea028807d86ad01f108fa0a1f059406d818301d00000050108f00000000c5400003c540a3e8c1d4a0e5b7b6a249b3d49dcdb1de9721aaea97717946c6e56b00ddd55904f4c54988fb0d410b04e9370b05192e431101000111010000000200010200001681dce4f100002128320000f00001000003435950', 'hex');
+  const r = gm.readElements(blob, { points: true });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.els.map(e => [e.type, e.attr]), [[0, 0x5d], [0, 0x50]]);
+  const tris = r.els.flatMap(e => { const q = gm.polyTriangles(e.pts, e.flags); assert.equal(q.illegal, 0); return q.tris; });
+  assert.equal(coveredOnce(tris, 25248, 17472), 0);
+});
+
+test('многоугольники: список треугольников пишется и читается обоими путями', () => {
+  const tris = [[[0, 0], [100, 0], [0, 100]], [[100, 0], [100, 100], [0, 100]], [[5, 5], [9, 5], [5, 9]]];
+  for (const [W, simple] of [[16, false], [16, true], [12, true], [8, true]]) {
+    const el = gm.encodePolygon(tris.flat(), gm.listFlags(3, true), 0x5f, { W, simple });
+    const head = Buffer.alloc(10);
+    head.writeUInt16BE(10 + el.length, 0); head.writeUInt16BE(12 + el.length, 2); head.writeUInt16BE(14 + el.length, 4);
+    head.writeUInt16BE(1, 6); head.writeUInt16BE(0xE028, 8);
+    const r = gm.readElements(Buffer.concat([head, el, Buffer.alloc(4)]), { W, simple, points: true });
+    assert.equal(r.ok, true, 'W' + W);
+    assert.deepEqual([r.els[0].type, r.els[0].attr], [0, 0x5f]);
+    const back = gm.polyTriangles(r.els[0].pts, r.els[0].flags);
+    assert.equal(back.illegal, 0);
+    assert.deepEqual(back.tris, tris, 'W' + W + (simple ? ' прямой' : ' сжатый'));
+  }
+});

@@ -507,7 +507,13 @@ function pointData(b, p, type, n, W, zw, want, simple) {
   if (simple) {
     const tail = type === 1 ? Math.ceil(n * zw / 8) : type === 0 ? Math.ceil(n / 4) : 0;
     const r = { w: W, fmt: 'raw', end: p + (n * W >> 2) + tail };
-    if (want) { r.pts = []; for (let i = 0; i < n; i++) r.pts.push(rawPoint(b, p + i * W / 4, W)); }
+    if (want) {
+      r.pts = [];
+      for (let i = 0; i < n; i++) r.pts.push(rawPoint(b, p + i * W / 4, W));
+      // признаки многоугольника — по 2 бита на точку, младшие биты байта
+      // первыми (FUN_09250f64: значение = байт & 3, затем байт >>= 2)
+      if (type === 0) { r.flags = []; const q = p + (n * W >> 2); for (let i = 0; i < n; i++) r.flags.push((b[q + (i >> 2)] >> (2 * (i & 3))) & 3); }
+    }
     return r;
   }
   const start = p, h = b[p++];
@@ -525,15 +531,21 @@ function pointData(b, p, type, n, W, zw, want, simple) {
   const r = { w, fmt, anchor: [ax, ay], end: p + Math.ceil(nb / 8) + (type === 1 ? Math.ceil(n * zw / 8) : 0) };
   if (want && fmt === 0) {
     r.pts = [];
-    for (let i = 0, bit = bit0; i < n; i++, bit += 2 * w + ex) r.pts.push([ax + readBits(b, bit, w), ay + readBits(b, bit + w, w)]);
+    r.flags = [];
+    for (let i = 0, bit = bit0; i < n; i++, bit += 2 * w + ex) {
+      r.pts.push([ax + readBits(b, bit, w), ay + readBits(b, bit + w, w)]);
+      if (ex) r.flags.push(readBits(b, bit + 2 * w, 2));
+    }
   } else if (want && fmt === 1) {
     const wx = readBits(b, bit0, 5), wy = readBits(b, bit0 + 5, 5);
     let bit = bit0 + 10, x = ax + readBits(b, bit, w), y = ay + readBits(b, bit + w, w);
+    r.flags = ex ? [readBits(b, bit + 2 * w, 2)] : [];
     bit += 2 * w + ex;
     r.pts = [[x, y]];
     for (let i = 1; i < n; i++) {
       const sx = readBits(b, bit, 1), dx = readBits(b, bit + 1, wx); bit += 1 + wx;
       const sy = readBits(b, bit, 1), dy = readBits(b, bit + 1, wy); bit += 1 + wy + ex;
+      if (ex) r.flags.push(readBits(b, bit - 2, 2));
       x += sx ? -dx : dx; y += sy ? -dy : dy;
       r.pts.push([x, y]);
     }
@@ -607,6 +619,7 @@ function readElements(blob, opts = {}) {
     el.w = r.w; el.fmt = r.fmt;
     if (r.anchor) el.anchor = r.anchor;
     if (r.pts) el.pts = r.pts;
+    if (r.flags && r.flags.length) el.flags = r.flags;
     p = r.end;
     els.push(el);
   }
@@ -681,8 +694,86 @@ function encodeFrame(X, Y, W = 16, simple = false) {
   return Buffer.concat([head, Buffer.from([0x8f]), writeRaw(0, 0, W), bw.done()]);
 }
 
+// ── многоугольники: треугольники по признакам точек ───────────────────────
+//
+// Многоугольник с битом 0x40 атрибута (суша 0x5F, море 0x50 и все прочие у
+// завода) рисуется ТРЕУГОЛЬНИКАМИ, а не контуром: младший бит признака точки
+// (+0x74) ведёт автомат «состояния грани» FUN_09251044, а тип грани по
+// состоянию отдаёт FUN_09251ce0 (выгрузка точек — FUN_0924c164, «Illegal
+// triangle face state» при запрещённом переходе). Переходы [бит 0, бит 1]:
+const FACE = { 0: [7, 5], 1: [7, 5], 2: [7, 5], 3: [11, 9], 4: [7, 5], 5: [6, 11],
+               6: [1, 6], 7: [10, 8], 8: [2, 8], 9: [11, 10], 10: [4, 3] };
+// Прочитано по данным и сверено разбиением тайла (каждая точка тайла покрыта
+// ровно одним треугольником суши или моря — 100 % у прибрежных тайлов L0,
+// L1, L3, L4, L11): состояния 5/7 — первая точка нового примитива; 5 → веер
+// (6 — продолжение, 1 — последняя точка), 7 + бит 1 → полоса (8, 2 —
+// последняя), 7 + бит 0 → список треугольников (10, 3, 9 …, 4 — конец).
+// Старший бит признака (+0x78) уходит дальше флагом 0x80 — у суши завода он
+// почти всегда 1, у моря чаще 0; смысл (видимость ребра?) — догадка.
+function polyTriangles(pts, flags) {
+  const out = [];
+  let s = 0, prim = [], mode = null, bad = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const ns = (FACE[s] || [11, 11])[flags[i] & 1];
+    if (ns === 11) bad++;
+    if (ns === 5 || ns === 7) { prim = [pts[i]]; mode = ns === 5 ? 'fan' : null; }
+    else {
+      if (prim.length === 1 && mode === null) mode = ns === 8 ? 'strip' : 'list';
+      prim.push(pts[i]);
+      const n = prim.length;
+      if (mode === 'fan' && n >= 3) out.push([prim[0], prim[n - 2], prim[n - 1]]);
+      else if (mode === 'strip' && n >= 3) out.push([prim[n - 3], prim[n - 2], prim[n - 1]]);
+      else if (mode === 'list' && n % 3 === 0) out.push([prim[n - 3], prim[n - 2], prim[n - 1]]);
+    }
+    s = ns;
+  }
+  return { tris: out, illegal: bad };
+}
+
+// Многоугольник целиком: головной 0x1D (id 0xFFFF, атрибут u32, число точек
+// байтом) или 0x11 (атрибут повторяется); точки — сжатым путём (байт 0x80|w,
+// якорь, по w+w бит и 2 бита признака) или прямым (точки по ширине тайла,
+// затем признаки по 2 бита, младшие биты байта первыми).
+function encodePolygon(pts, flags, attr, opt = {}) {
+  const n = pts.length;
+  if (n < 3 || n > 0xffff) throw new Error('точек в многоугольнике: ' + n);
+  const W = opt.W || 16;
+  const rep = attr === null || attr === undefined;
+  const parts = [Buffer.from([rep ? 0x11 : 0x1d])];
+  if (!rep) { const a = Buffer.alloc(4); a.writeUInt32BE(attr >>> 0, 0); parts.push(a); }
+  if (n < 255) parts.push(Buffer.from([n]));
+  else { const c = Buffer.alloc(3); c[0] = 255; c.writeUInt16BE(n, 1); parts.push(c); }
+  if (opt.simple) {
+    parts.push(...pts.map(([x, y]) => writeRaw(x, y, W)));
+    const tail = Buffer.alloc(Math.ceil(n / 4));
+    flags.forEach((f, i) => { tail[i >> 2] |= (f & 3) << (2 * (i & 3)); });
+    parts.push(tail);
+  } else {
+    const ax = Math.min(...pts.map(q => q[0])), ay = Math.min(...pts.map(q => q[1]));
+    const w = Math.max(1, ...pts.map(([x, y]) => Math.max(bitLen(x - ax), bitLen(y - ay))));
+    const bw = bitWriter();
+    pts.forEach(([x, y], i) => { bw.put(x - ax, w); bw.put(y - ay, w); bw.put(flags[i] & 3, 2); });
+    parts.push(Buffer.from([0x80 | w]), writeRaw(ax, ay, W), bw.done());
+  }
+  return Buffer.concat(parts);
+}
+
+// Признаки списка треугольников: бит 0 — [0,0,c, 1,1,c, …], c = 1, пока
+// дальше есть треугольник; бит 1 — по образцу завода (суша 0,1,1; море 0).
+function listFlags(nTris, edge) {
+  const f = [];
+  for (let t = 0; t < nTris; t++) {
+    const more = t < nTris - 1 ? 1 : 0;
+    const b0 = t === 0 ? [0, 0, more] : [1, 1, more];
+    const b1 = edge ? [0, 1, 1] : [0, 0, 0];
+    for (let k = 0; k < 3; k++) f.push(b0[k] | (b1[k] << 1));
+  }
+  return f;
+}
+
 module.exports = {
   readElements, readBits, rawPoint, encodeLine, encodeLinePoints, encodeFrame, writeRaw,
+  polyTriangles, encodePolygon, listFlags, FACE,
   openGdb, openBuffer, read, header, levelHead, locateTable, levelGrid, slotFor, cluster,
   tileHeader, tilePoints, encodePoints, roundTrip, lonOfCell, latOfCell,
   CELL_X, CELL_Y, TILE_HEAD, TABLE_AT, LEVEL_SHIFT_AT, FRAME_X0, FRAME_Y0, gridW, keyOrigin,

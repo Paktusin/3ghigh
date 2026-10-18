@@ -11,6 +11,10 @@ const assert = require('node:assert/strict');
 const gm = require('./gdb');
 const G = require('./gdbgen');
 
+// без суши (иначе подхватится out/cyp/land.json, если он есть рядом)
+const V = (l, o = {}) => G.volumeFromRoads(l, Object.assign({ land: null }, o));
+const RL = (l, o = {}) => G.roadsToLevel(l, Object.assign({ land: null }, o));
+
 // Общий пустой тайл из EJ211_v37a.gdb (@334 925 620, 40 байт) — на него
 // ссылаются ~13 580 «морских» клеток L0.
 const EMPTY_TILE_HEX =
@@ -298,7 +302,7 @@ function linesOf(v, lv) {
 test('дороги: линия режется по границам тайлов, куски стыкуются на границе', () => {
   // ~0,9° по долготе — заведомо через несколько тайлов L0
   const deg = [[32.90, 35.10], [33.40, 35.13], [33.80, 35.20]];
-  const v = G.volumeFromRoads([{ cls: 'primary', pts: deg }]);
+  const v = V([{ cls: 'primary', pts: deg }]);
   const ls = linesOf(v, 0);
   assert.ok(ls.length > 3, 'кусков больше трёх: ' + ls.length);
   for (const l of ls) {
@@ -311,7 +315,7 @@ test('дороги: линия режется по границам тайлов
 });
 
 test('дороги: ломаная из одной точки пропускается, длинная ложится', () => {
-  const r = G.roadsToLevel([
+  const r = RL([
     { name: 'точка', pts: [[33.3, 35.16]] },
     { name: 'длинная', pts: new Array(300).fill(0).map((_, i) => [33.3 + i * 0.0001, 35.16 + (i % 2) * 0.0001]) },
     { name: 'хорошая', pts: [[33.3, 35.16], [33.31, 35.17]] },
@@ -322,7 +326,7 @@ test('дороги: ломаная из одной точки пропускае
 
 test('дороги: градусы возвращаются из тома с точностью до метров', () => {
   const deg = [[33.300, 35.160], [33.302, 35.161], [33.304, 35.1605]];
-  const v = G.volumeFromRoads([{ cls: 'motorway', pts: deg }]);
+  const v = V([{ cls: 'motorway', pts: deg }]);
   const ls = linesOf(v, 0);
   assert.equal(ls.length, 1, 'дорога в одном тайле');
   assert.deepEqual([ls[0].cls, ls[0].e9], [1, 24], 'автобан на L0 — класс 1, E0 24');
@@ -343,7 +347,7 @@ test('дороги: плотному кластеру достаётся тай�
     for (let k = 0; k < 40; k++) pts.push([lon + k * 0.00002, lat + (k % 2) * 0.00002]);
     lines.push({ name: 'R' + i, pts });
   }
-  const r = G.roadsToLevel(lines);
+  const r = RL(lines);
   assert.equal(r.skipped, 0, 'ни одна дорога не потеряна');
   const sizes = Object.keys(r.sizes);
   assert.equal(sizes.length, 1, 'кластер один');
@@ -357,7 +361,7 @@ test('дороги: размер тайла внутри кластера оди
     const lon = 33.30 + (i % 20) * 0.001, lat = 35.16 + Math.floor(i / 20) * 0.001;
     lines.push({ name: 'R' + i, pts: [[lon, lat], [lon + 0.0005, lat + 0.0005]] });
   }
-  const v = G.volumeFromRoads(lines);
+  const v = V(lines);
   const g = gm.openBuffer(v.gdb, v.gd2);
   const h = gm.header(g);
   const gr = gm.levelGrid(g, h, h.levels[0]);
@@ -392,7 +396,7 @@ test('грубые уровни: дорога через весь Кипр во�
   // предел разрешения уровня: половина сырой единицы в километрах по долготе
   const limit = L => Math.max(0.002, (1 << L.shift) / gm.UNITS_PER_LON * 88.9);
   for (const lv of [0, 1, 2, 3, 5, 8, 11]) {
-    const v = G.volumeFromRoads(lines, { levels: [lv] });
+    const v = V(lines, { levels: [lv] });
     const ls = linesOf(v, lv);
     assert.ok(ls.length > 0, 'L' + lv + ': линии есть');
     const L = G.EUROPE_LEVELS[lv];
@@ -427,4 +431,74 @@ test('грубые уровни: классы дорог отсеиваются 
   assert.equal(G.linesForLevel(lines, 1).length, 2, 'на L1 без жилых улиц');
   assert.equal(G.linesForLevel(lines, 4).length, 2, 'на L4 магистрали и primary');
   assert.equal(G.linesForLevel(lines, 11).length, 1, 'на L11 только автобаны');
+});
+
+
+// ── суша и море ────────────────────────────────────────────────────────────
+
+const triArea = t => Math.abs((t[1][0] - t[0][0]) * (t[2][1] - t[0][1]) - (t[2][0] - t[0][0]) * (t[1][1] - t[0][1])) / 2;
+
+test('суша: квадратный остров в тайле — суша и море делят тайл точно', () => {
+  const a = G.landArea([{ pts: [[100, 100], [300, 100], [300, 300], [100, 300]], bbox: [100, 100, 300, 300] }], 400, 400);
+  assert.equal(a.land.reduce((s, t) => s + triArea(t), 0), 200 * 200);
+  assert.equal(a.sea.reduce((s, t) => s + triArea(t), 0), 400 * 400 - 200 * 200);
+  assert.deepEqual(G.landArea([{ pts: [[-1, -1], [500, -1], [500, 500], [-1, 500]], bbox: [-1, -1, 500, 500] }], 400, 400), { full: true });
+  assert.deepEqual(G.landArea([{ pts: [[900, 900], [990, 900], [990, 990]], bbox: [900, 900, 990, 990] }], 400, 400), { empty: true });
+  // суша касается тайла только по вертикальным краям — полоса во всю ширину
+  const b = G.landArea([{ pts: [[-100, -100], [500, -100], [500, 200], [-100, 200]], bbox: [-100, -100, 500, 200] }], 400, 400);
+  assert.equal(b.land.reduce((s, t) => s + triArea(t), 0), 400 * 200);
+});
+
+test('суша: тайл целиком на суше — один многоугольник 0x5F по границе, рамки моря нет', () => {
+  for (const [lv, fmt] of [[0, undefined], [4, G.tileFormat(G.EUROPE_LEVELS[4], 5, 5)]]) {
+    const f = fmt || { X: 25248, Y: 17472, W: 16, simple: false };
+    const blob = G.tileBlob([], f, { full: true });
+    const r = gm.readElements(blob, { W: f.W, simple: f.simple, points: true });
+    assert.equal(r.els.length, 1, 'L' + lv);
+    assert.deepEqual([r.els[0].type, r.els[0].attr], [0, G.LAND]);
+    const t = gm.polyTriangles(r.els[0].pts, r.els[0].flags);
+    assert.equal(t.illegal, 0);
+    assert.equal(t.tris.reduce((s, q) => s + triArea(q), 0), f.X * f.Y, 'L' + lv + ': веер покрывает тайл');
+  }
+});
+
+test('суша: остров на всех уровнях — треугольники суши и моря закрывают тайлы, площадь сходится', () => {
+  // ромб ~0,2° у Никосии и дорога через него
+  const ring = [[33.30, 35.05], [33.45, 35.15], [33.30, 35.25], [33.15, 35.15]];
+  const want = 0.15 * 0.10 * 2 * (88.9 * 111.1);        // км², грубо
+  const lines = [{ cls: 'motorway', pts: [[33.2, 35.15], [33.4, 35.15]] }];
+  for (const lv of [0, 1, 4, 8, 11]) {
+    const v = G.volumeFromRoads(lines, { land: [ring], levels: [lv] });
+    const g = gm.openBuffer(v.gdb, v.gd2);
+    const hd = gm.levelHead(gm.read(g, gm.header(g).levels[lv].offset, 100));
+    const u = 1 << hd.shift;
+    let land = 0, landTiles = 0;
+    for (const cl of v.map.levels[lv].clusters) {
+      for (const t of cl.tiles) {
+        if (t.off === v.map.emptyTile.off) continue;
+        const r = gm.readElements(gm.read(g, t.off, t.size), { W: t.attr, simple: !!t.b10, points: true });
+        assert.equal(r.ok, true);
+        const polys = r.els.filter(e => e.type === 0);
+        if (!polys.some(p => p.attr === G.LAND)) continue;
+        landTiles++;
+        const f = G.tileFormat(G.EUROPE_LEVELS[lv], t.lw, t.lh);
+        let total = 0;
+        for (const p of polys) {
+          assert.ok([G.LAND, G.SEA].includes(p.attr), 'только суша и море');
+          assert.ok(p.pts.every(([x, y]) => x >= 0 && y >= 0 && x <= f.X && y <= f.Y), 'точки внутри тайла');
+          const q = gm.polyTriangles(p.pts, p.flags);
+          assert.equal(q.illegal, 0, 'автомат граней без запрещённых переходов');
+          const a = q.tris.reduce((s, x) => s + triArea(x), 0);
+          total += a;
+          if (p.attr === G.LAND) land += a;
+        }
+        assert.equal(total, f.X * f.Y, 'L' + lv + ': суша + море = тайл');
+        const lines2 = r.els.filter(e => e.type === 1);
+        assert.ok(r.els.indexOf(lines2[0]) === -1 || r.els.indexOf(lines2[0]) > r.els.indexOf(polys[polys.length - 1]), 'линии после многоугольников');
+      }
+    }
+    assert.ok(landTiles > 0, 'L' + lv + ': тайлы с сушей есть');
+    const km2 = land * u * u * (88.9 / 72000 * 1.0) * (111.1 / 111111.1);
+    assert.ok(Math.abs(km2 - want) / want < 0.05 || lv >= 8, 'L' + lv + ': площадь суши ' + km2.toFixed(0) + ' км² против ' + want.toFixed(0));
+  }
 });
