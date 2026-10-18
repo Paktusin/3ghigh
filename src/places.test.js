@@ -14,3 +14,9 @@ test('города: двойники по координате склеиваю�
   assert.deepEqual(P.dedupe(list, en).map((p) => p.name), ['LIMASSOL', 'DHALI', 'PAFOS']);
   assert.deepEqual(P.dedupe(list, null).map((p) => p.name), ['LEMESOS', 'DHALI', 'PAFOS']);
 });
+
+test('города и районы из OSM: в общем списке страны нет повторяющихся строк', { skip: !require('fs').existsSync('out/cyp/cyprus-latest.osm.pbf') && 'нет OSM' }, () => {
+  const { places, districts } = P.fromOsm('out/cyp/cyprus-latest.osm.pbf');
+  const all = places.map((p) => p.name).concat(districts.map((d) => d.name));
+  assert.equal(new Set(all).size, all.length);
+});

@@ -44,6 +44,7 @@ module.exports = { dedupe, englishNames, key };
 // name:en (иначе name), латиницей как в XAC. Одинаковые имена ближе 3 км —
 // один город (оставляем более крупный); одинаковые имена дальше — оба, ко
 // второму и следующим через запятую добавляется ближайший город или городок.
+// Районы с повторяющимся именем (или одноимённые с селом) — «РАЙОН, ГОРОД».
 const RANK = { city: 4, town: 3, village: 2, hamlet: 1, suburb: 0, quarter: 0, neighbourhood: 0 };
 const TOWNS = ['city', 'town', 'village', 'hamlet'];
 const DISTRICTS = ['suburb', 'quarter', 'neighbourhood'];
@@ -91,6 +92,22 @@ function fromOsm(pbf) {
     if (best < 0 || bd > km15 || d.name === places[best].name) continue;
     if (districts.some((x) => x.name === d.name && x.parent === best)) continue;
     districts.push(Object.assign(d, { parent: best }));
+  }
+  // районы с одинаковым именем в разных городах и районы, одноимённые с селом, —
+  // в общем списке страны встали бы одинаковыми строками; различаем своим городом
+  const placeNames = new Set(places.map((q) => q.name));
+  const dn = new Map();
+  for (const d of districts) dn.set(d.name, (dn.get(d.name) || 0) + 1);
+  for (const d of districts) {
+    if (dn.get(d.name) > 1 || placeNames.has(d.name)) d.name = d.name + ', ' + places[d.parent].name;
+  }
+  // последняя страховка: приписки могут совпасть (село «X, Г» и район «X, Г») —
+  // весь список городов и районов должен быть без повторов
+  const used = new Set(places.map((q) => q.name));
+  for (const d of districts) {
+    let n = d.name, k = 2;
+    while (used.has(n)) n = d.name + ' ' + k++;
+    d.name = n; used.add(n);
   }
   return { places, districts };
 }
