@@ -36,6 +36,7 @@ const T = require('./cyptree');
 const S = require('./litschema');
 const VM = require('./litvm');
 const P = require('./litpoi');
+const B = require('./litblock');
 
 const CAP = 13795;                  // потолок листа: самый большой заводской блок
 const NODE = 0;                     // блок с узлами дерева
@@ -118,11 +119,21 @@ function factoryParts(dirs) {
   const tables = [];
   for (let i = 2; i <= EU_TABLE_LAST_BLOCK; i++) tables.push(f.L.block(f.cat[i]));
   const hb = f.L.block(f.cat[EU_POI_HEADER]);
+  // Слои POI по шапке 0x20: последние записи — слои (0x49 = номер слоя, 0x3c —
+  // его заголовок 0x21), остальные — типы; слой типа — тот, чей 0x3c совпал.
+  // Проверено данными: у 58 типов из 58 порог 0x74 равен порогу слоя, и все
+  // точки в листьях над Критом, Мальтой и Мюнхеном лежат в слое своего типа.
+  const ents = f.get(EU_POI_HEADER).els.filter((e) => e.type === 0x20)
+    .map((e) => ({ id: e.f['49'], root: e.f['3c'], th: e.f['74'] }));
+  const nl = new Set(ents.map((e) => e.root.join(','))).size;
+  const layers = ents.slice(-nl).map((e) => ({ idx: e.id, root: e.root, th: e.th }));
+  const t2l = {};
+  for (const t of ents.slice(0, ents.length - nl)) t2l[t.id] = layers.find((l) => l.root[0] === t.root[0]).idx;
   return {
     root: { f206: r0.f['206'], f2e: r0.f['2e'], f85: r0.f['85'], f217: r0.f['217'], f86: r0.f['86'],
             tableCount: r0.f['40'] },
     langs, block1: g1.next - EU_TABLE_FIRST, countryTemplate: ie,
-    tables, header: { schema: f.schema, block: hb },
+    tables, header: { schema: f.schema, block: hb }, layers, t2l,
   };
 }
 
@@ -145,6 +156,19 @@ function countrySet(A, model, C, pois, template) {
     A.STAT_IDS.map((id) => A.t18('stat:' + id, id, A.spellStats(C, A.statNames(id, names)))));
 }
 
+// Слой для типов вне шапки (их точки на карте не рисуются). Слой 0 (порог
+// 13 000, у завода — пригородные поезда, которых на Кипре нет): иначе он вышел бы
+// пустым, а пустых слоёв у завода не бывает — лишний риск зависания на старте.
+const NONMAP_LAYER = 0;
+
+// Пустой слой: заголовок 0x21 (0x41 = 0, без листьев) и узел без ветвей.
+function emptyLayer(li) {
+  return { origin: { x: 0, y: 0 }, width: 24, byte2: 0, count: 2, dict: new Map(), tile: null, pois: [],
+           layer: { f4c: li, f41: 0 },
+           nodes: [{ aMin: [0, 0], aMax: [0, 0], a: null, bMin: [0, 0], bMax: [0, 0], b: null,
+                     x79: null, n42: 0, x7a: null, n7b: 0 }] };
+}
+
 function buildAddr(pois, o, tpl, cap, slots) {
   const A = require('./litaddr');
   const fac = o.factory ? factoryParts(o.factory) : null;
@@ -152,13 +176,34 @@ function buildAddr(pois, o, tpl, cap, slots) {
   let next = 2;                                      // блок 1 — набор стран, всегда наш
   if (fac) next = EU_TABLE_LAST_BLOCK + 1;
   const H = fac ? next++ : null;
-  const N = next++;
-  const donors = Array.from({ length: slots }, (_, i) => ({ blk: N + 1 + i, size: cap }));
-  const r = T.build(pois, donors, { ref: o.ref || [N + 1, 0], nodeBlk: N,
-                                    layer: { f4c: 2, f41: 3999970 } });
-  const used = r.leaves.slice().sort((a, b) => a.blk - b.blk);
-  if (used.some((l, i) => l.blk !== N + 1 + i)) throw new Error('номера листьев идут не подряд');
-  const C = N + 1 + used.length;
+  // Слои POI: у завода по дереву на слой, точка — в слое своего типа (по шапке).
+  // Типы вне шапки (магазины одежды и пр. — у завода в деревьях их нет) кладём в
+  // слой NONMAP_LAYER (см. выше) — это догадка.
+  const nl = fac ? fac.layers.length : 1;
+  const layerOf = (p) => (!fac ? 0 : fac.t2l[p.cat] !== undefined ? fac.t2l[p.cat] : NONMAP_LAYER);
+  const groups = Array.from({ length: nl }, () => []);
+  for (const p of pois) groups[layerOf(p)].push(p);
+  const layers = [];
+  for (let li = 0; li < nl; li++) {
+    const Ni = next++;
+    const g = groups[li];
+    if (!g.length) {                                  // пустой слой: заголовок и пустой узел
+      layers.push({ idx: li, nodeBlk: Ni, leaves: [], node: B.writeBlock(emptyLayer(li), Ni), pois: [] });
+      continue;
+    }
+    const donors = Array.from({ length: slots }, (_, i) => ({ blk: Ni + 1 + i, size: cap }));
+    const r = T.build(g, donors, { ref: o.ref || [Ni + 1, 0], nodeBlk: Ni,
+                                   layer: (lv) => ({ f4c: li, f41: g.length,
+                                                     b: [Math.min(...lv.map((l) => l.blk)), 0],
+                                                     plus: [Math.max(...lv.map((l) => l.blk)), 0] }) });
+    const used = r.leaves.slice().sort((a, b) => a.blk - b.blk);
+    if (used.some((l, i) => l.blk !== Ni + 1 + i)) throw new Error('номера листьев идут не подряд');
+    layers.push({ idx: li, nodeBlk: Ni, leaves: used, node: r.node.bytes, pois: g });
+    next = Ni + 1 + used.length;
+  }
+  const N = layers[0].nodeBlk;
+  const used = [].concat(...layers.map((l) => l.leaves));
+  const C = next;
   const dir = A.directory(o.addr, { countryBlk: C });
 
   // корень и списки названий страны
@@ -188,11 +233,15 @@ function buildAddr(pois, o, tpl, cap, slots) {
   blocks.push({ blk: 1, origin: { x: 0, y: 0 }, width: 24, records: set });
   if (fac) {
     fac.tables.forEach((b, i) => blocks.push({ blk: 2 + i, bytes: b }));
+    // шапка: ссылка на заголовок заводского слоя -> на заголовок нашего того же слоя
+    const ours = new Map(fac.layers.map((l, i) => [l.root[0], [layers[i].nodeBlk, 0]]));
     blocks.push({ blk: H, bytes: A.transplant(fac.header.schema, fac.header.block, EU_POI_HEADER,
-                                              { blk: H, map: () => [N, 0] }) });
+                                              { blk: H, map: (p) => ours.get(p[0]) || p }) });
   }
-  blocks.push({ blk: N, bytes: r.node.bytes });
-  for (const l of used) blocks.push({ blk: l.blk, bytes: l.bytes });
+  for (const l of layers) {
+    blocks.push({ blk: l.nodeBlk, bytes: l.node });
+    for (const lf of l.leaves) blocks.push({ blk: lf.blk, bytes: lf.bytes });
+  }
   for (const b of dir.blocks) blocks.push(b);
 
   const asm = A.assemble(blocks);
@@ -205,7 +254,12 @@ function buildAddr(pois, o, tpl, cap, slots) {
   const sizeOf = (a, z) => list.slice(a, z).reduce((s, b) => s + b.length, 0);
   return { buf: litfile.build({ head: tpl.head, ttd: tpl.ttd, blocks: list }),
            leaves: used.length, pois: used.reduce((a, l) => a + l.pois, 0),
-           node: r.node.bytes.length, nodeBlk: N, poiHeader: H, countryBlk: C,
+           node: layers.reduce((a, l) => a + l.node.length, 0), nodeBlk: N, poiHeader: H, countryBlk: C,
+           layers: layers.map((l) => ({ idx: l.idx, nodeBlk: l.nodeBlk, count: l.pois.length,
+                                        first: l.leaves.length ? l.leaves[0].blk : null,
+                                        last: l.leaves.length ? l.leaves[l.leaves.length - 1].blk : null,
+                                        leaves: l.leaves.map((x) => x.blk) })),
+           layerOf,
            cities: dir.stats.cities, streets: dir.stats.streets, postcodes: dir.stats.postcodes,
            bytes: list.reduce((a, b) => a + b.length, 0),
            parts: { root: list[0].length, tables: fac ? sizeOf(1, EU_TABLE_LAST_BLOCK + 1) : 0,
@@ -233,22 +287,40 @@ function verify(buf, r, pois) {
       const why = g.run.why;
       if (why === 'данные кончились' && g.run.pos === m.blocks[i].length) rep.parsedOk++;
     }
-    const nodeBlk = r.nodeBlk === undefined ? NODE : r.nodeBlk;
-    const rootKey = r.nodeBlk === undefined ? 0 : 1;
-    const firstLeaf = nodeBlk + 1;
-    for (let i = firstLeaf; i < firstLeaf + r.leaves; i++) {
-      const res = VM.run(schema, m.blocks[i], 0, { blk: i, limit: 4000000 });
-      if (res.why === 'данные кончились' && res.pos === m.blocks[i].length) rep.leavesEnd++;
-      rep.poisBack += P.poisOf(schema, m.blocks[i], i).length;
+    // слои: у старой раскладки один слой — блок NODE, корень в ключе 0
+    const lays = r.layers || [{ idx: 0, nodeBlk: NODE, count: r.pois,
+                                leaves: Array.from({ length: r.leaves }, (_, i) => NODE + 1 + i) }];
+    const rootKey = r.layers ? 1 : 0;
+    for (const L of lays) {
+      for (const i of L.leaves) {
+        const res = VM.run(schema, m.blocks[i], 0, { blk: i, limit: 4000000 });
+        if (res.why === 'данные кончились' && res.pos === m.blocks[i].length) rep.leavesEnd++;
+        rep.poisBack += P.poisOf(schema, m.blocks[i], i).length;
+      }
     }
-    if (r.nodeBlk !== undefined) {
-      // путь прошивки к дереву: корень 0x4a -> заголовок 0x20 -> слой 0x21 -> узел
+    if (r.layers) {
+      // заголовки слоёв 0x21: 0x4c — номер слоя, 0x41 — точек в нём, 0x62/0x2b —
+      // первый и последний лист (как у завода, EU 120582: 9, 1110, 120583…120586)
+      rep.layerHdr = lays.every((L) => {
+        const h = ks.get(L.nodeBlk).map.get(0);
+        if (!h || h.type !== 0x21 || h.f['4c'] !== L.idx || h.f['41'] !== L.count) return false;
+        if (!L.leaves.length) return h.f['62'][0] < 0 && h.f['2b'][0] < 0;
+        return h.f['62'][0] === L.first && h.f['2b'][0] === L.last;
+      });
+      // путь прошивки к дереву: корень 0x4a -> шапка 0x20 -> слой 0x21 своего номера
       const root = ks.get(0).map.get(0);
-      const h = root && root.f['4a'];
-      rep.poiPath = !!(h && h[0] === r.poiHeader &&
-        ks.get(h[0]).els.every((e) => !e.f['3c'] || (e.f['3c'][0] === nodeBlk && e.f['3c'][1] === 0)) &&
-        ks.get(nodeBlk).map.get(0).type === 0x21);
-      if (r.poiHeader === null) rep.poiPath = 'без заголовка POI';
+      const hp = root && root.f['4a'];
+      if (r.poiHeader === null) rep.poiPath = 'без шапки POI';
+      else {
+        const byBlk = new Map(lays.map((L) => [L.nodeBlk, L.idx]));
+        const ents = hp && hp[0] === r.poiHeader ? ks.get(hp[0]).els.filter((e) => e.type === 0x20) : [];
+        const nl = lays.length;
+        rep.poiPath = ents.length > nl && ents.every((e, i) => {
+          const li = byBlk.get(e.f['3c'][0]);
+          if (li === undefined || e.f['3c'][1] !== 0) return false;
+          return i >= ents.length - nl ? li === e.f['49'] : li === r.layerOf({ cat: e.f['49'] });
+        });
+      }
     }
     const cache = new Map();
     const get = (i) => {
@@ -260,10 +332,14 @@ function verify(buf, r, pois) {
       cache.set(i, v);
       return v;
     };
-    for (let i = 0; i < pois.length; i += 100) {
+    // спуск от корня дерева СВОЕГО слоя по рамке вокруг каждой точки (каждой 20-й)
+    const layerOf = r.layerOf || (() => 0);
+    const byIdx = new Map(lays.map((L) => [L.idx, L]));
+    for (let i = 0; i < pois.length; i += 20) {
       const q = pois[i]; rep.seen++;
+      const L = byIdx.get(layerOf(q));
       const box = { x0: q.x - 72, y0: q.y - 111, x1: q.x + 72, y1: q.y + 111 };
-      if (T.collect(get, nodeBlk, rootKey, box, new Set(), 0).size) rep.hit++;
+      if (L && T.collect(get, L.nodeBlk, rootKey, box, new Set(), 0).size) rep.hit++;
     }
     if (r.countryBlk !== undefined) {
       rep.addr = A.walk(ks.get);
@@ -295,7 +371,9 @@ function verify(buf, r, pois) {
       const em = LC.cities([dir], 'CYPRUS');
       const nl = ks.get(0).els.filter((x) => x.type === 1).length;   // корень и его витки
       const codes = [];
-      for (let l = 0; l < nl; l++) codes.push(LC.countryByCode([dir], 113, l));
+      const ko = KS.open([dir]);
+      for (let l = 0; l < nl; l++) codes.push(LC.countryByCode(ko, 113, l));
+      ko.L.vols.forEach((v) => fs.closeSync(v.fd));
       const bad = codes.filter((c) => c.why !== 'ок');
       rep.emul = { cities: em.cities.length, notCity: em.cities.filter((c) => c.type !== 3).length,
                    byCode: bad.length ? bad[0].why : 'ок', name: codes.map((c) => c.name).filter(Boolean)[1] || codes[0].name,
@@ -305,7 +383,7 @@ function verify(buf, r, pois) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
   rep.bad = rep.keysOk !== rep.blocks || rep.parsedOk !== rep.blocks || rep.leavesEnd !== r.leaves ||
-            rep.poisBack !== r.pois || rep.hit !== rep.seen || rep.poiPath === false ||
+            rep.poisBack !== r.pois || rep.hit !== rep.seen || rep.poiPath === false || rep.layerHdr === false ||
             (rep.emul && (rep.emul.cities !== r.cities || rep.emul.notCity || rep.emul.byCode !== 'ок')) ||
             (rep.countrySet && (!rep.countrySet.length || rep.countrySet.some((c) => !c.ok) ||
                                 rep.tableCount.root !== rep.tableCount.found)) ||
@@ -323,7 +401,9 @@ function report(rep, r, log) {
   log('листья дочитываются до конца: ' + rep.leavesEnd + ' из ' + r.leaves);
   log('точек прочитано обратно: ' + rep.poisBack + ' из ' + r.pois);
   log('спуск по дереву POI: проверено ' + rep.seen + ', лист найден у ' + rep.hit);
-  if (rep.poiPath !== undefined) log('путь корень -> 0x20 -> 0x21 -> узлы: ' + rep.poiPath);
+  if (rep.poiPath !== undefined) log('путь корень -> 0x20 -> 0x21 своего слоя -> узлы: ' + rep.poiPath);
+  if (r.layers) log('слои POI: ' + r.layers.map((L) => L.idx + ':' + L.count + (L.leaves.length ? '/' + L.leaves.length + 'л' : '')).join(' ') +
+                    '; заголовки 0x21 (номер, число точек, первый/последний лист): ' + rep.layerHdr);
   if (rep.addr) {
     const a = rep.addr;
     log('адреса: корень -> «' + a.countryName.join(', ') + '» -> страна ' + a.code + ' ' + a.iso.join('/') +

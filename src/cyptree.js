@@ -166,12 +166,21 @@ function build(pois, donors, opt) {
   // корень дерева получает ключ 1, как у завода (101099, 1).
   const kb = o.layer ? 1 : 0;
   const ns = nodes(pl.root, { x: origin.x0, y: origin.y0 }, leafLink, nodeBlk, kb);
+  // всё влезло в один лист: корня-узла нет, а спуск начинается с узла — даём
+  // один узел, у которого половина A — этот лист, B — пусто
+  if (!ns.length && pl.root.pois) {
+    const b = bbox(pl.root.pois);
+    ns.push({ aMin: [b.x0 - origin.x0, b.y0 - origin.y0], aMax: [b.x1 - origin.x0, b.y1 - origin.y0],
+              a: leafLink(pl.root), bMin: [0, 0], bMax: [0, 0], b: null,
+              x79: null, n42: 0, x7a: null, n7b: 0 });
+  }
   const span = Math.max(origin.x1 - origin.x0, origin.y1 - origin.y0);
   const width = [8, 12, 16, 24].find((w) => span < Math.pow(2, w));
   if (!width) throw new Error('рамка Кипра не влезает в 24 бита');
   const model = { origin: { x: origin.x0, y: origin.y0 }, width: width, byte2: 0,
                   count: ns.length + kb, dict: new Map(), tile: null, pois: [], nodes: ns,
-                  layer: o.layer || null };
+                  // заголовок слоя может зависеть от листьев (первый и последний блок)
+                  layer: typeof o.layer === 'function' ? o.layer(out.leaves) : (o.layer || null) };
   out.node = { blk: nodeBlk, bytes: B.writeBlock(model, nodeBlk) };
   return out;
 }

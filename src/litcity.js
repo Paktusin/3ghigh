@@ -93,7 +93,8 @@ function cities(dirs, country) {
 // языка `lang` (виток корня) искать имя, чья ссылка ведёт ровно туда. Не нашлось —
 // FUN_08f0ee68 стирает страну в описании места.
 function countryByCode(dirs, code, lang) {
-  const o = KS.open(dirs);
+  const own = Array.isArray(dirs);
+  const o = own ? KS.open(dirs) : dirs;           // можно передать уже открытый KS.open
   const get = (b) => o.get(b);
   const root = get(0).map.get(0);
   const rep = { code, lang };
@@ -111,7 +112,11 @@ function countryByCode(dirs, code, lang) {
     if (b.readUInt16BE(4) === code) hit = [b.readUInt16BE(0) | ((b.readUInt16BE(2) >>> 13) << 16), b.readUInt16BE(2) & 0x1fff];
   }
   rep.records = seen;
-  if (!hit) { rep.why = 'кода ' + code + ' нет в наборе стран 7000'; return rep; }
+  if (!hit) {
+    rep.why = 'кода ' + code + ' нет в наборе стран 7000';
+    if (own) o.L.vols.forEach((v) => require('fs').closeSync(v.fd));
+    return rep;
+  }
   rep.pos = hit;
   const iters = [root].concat(get(0).els.filter((x) => x.loop && x.type === 1));
   const it = iters[lang];
@@ -119,7 +124,7 @@ function countryByCode(dirs, code, lang) {
   const m = list.find((x) => x.target && x.target[0] === hit[0] && x.target[1] === hit[1]);
   rep.name = m ? m.name : null;
   rep.why = m ? 'ок' : 'в списке языка нет имени с такой ссылкой';
-  o.L.vols.forEach((v) => require('fs').closeSync(v.fd));
+  if (own) o.L.vols.forEach((v) => require('fs').closeSync(v.fd));
   return rep;
 }
 

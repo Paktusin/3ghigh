@@ -105,6 +105,10 @@ test('справочник читается обратно: страна -> 60 �
 test('с заводскими частями: таблицы, заголовок POI и языки корня', { skip: !haveMaps }, () => {
   const r = CL.build(pois(300), { template: CL.template(LIT), addr: model(), factory: FACTORY, cap: 1500 });
   assert.equal(r.poiHeader, 31);
+  // слои как у завода: 10 деревьев, заправки (тип 56) — в слое 4 (порог 49 000)
+  assert.equal(r.layers.length, 10);
+  assert.equal(r.layers[4].count, 300);
+  assert.ok(r.layers.filter((l) => l.idx !== 4).every((l) => l.count === 0 && !l.leaves.length));
   const rep = CL.verify(r.buf, r, pois(300));
   assert.equal(rep.poiPath, true, 'корень 0x4a -> 0x20 -> 0x21');
   assert.equal(rep.addr.cities.length, 60);

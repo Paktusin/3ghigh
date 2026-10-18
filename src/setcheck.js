@@ -226,12 +226,14 @@ function checkOwnLit(file) {
   const g0 = keyed(0);
   const rootRec = g0.els[0];
   let start = { blk: 0, key: 0 }, addr = null, poiPath = null;
+  let starts = [start];
   if (rootRec && rootRec.type === 1) {
     const h = rootRec.f['4a'];
-    const hdr = h && h[0] >= 0 ? keyed(h[0]).els.find((e) => e.f['3c']) : null;
-    const layer = hdr ? hdr.f['3c'] : null;
-    poiPath = !!(layer && keyed(layer[0]).els[0].type === 0x21);
-    if (poiPath) start = { blk: layer[0], key: 1 };
+    // все слои шапки 0x20 (у завода их 10): у каждого — заголовок 0x21 и корень (блок, 1)
+    const roots = h && h[0] >= 0
+      ? [...new Set(keyed(h[0]).els.filter((e) => e.f['3c']).map((e) => e.f['3c'][0]))] : [];
+    poiPath = roots.length > 0 && roots.every((b) => keyed(b).els[0].type === 0x21);
+    if (poiPath) { starts = roots.map((b) => ({ blk: b, key: 1 })); start = starts[0]; }
     const cache = new Map();
     const get = (i) => {
       if (!cache.has(i)) { const g = keyed(i); g.map = KS.index(g.els); cache.set(i, g); }
@@ -264,13 +266,13 @@ function checkOwnLit(file) {
     for (let k = 0; k < list.length; k += 100) {
       const q = list[k]; seen++;
       const x = Math.round(q.lon * 72000), y = Math.round(q.lat * ct.DEG);
-      const got = ct.collect(get, start.blk, start.key, { x0: x - 72, y0: y - 111, x1: x + 72, y1: y + 111 },
-                             new Set(), 0);
+      const got = new Set();
+      for (const st of starts) ct.collect(get, st.blk, st.key, { x0: x - 72, y0: y - 111, x1: x + 72, y1: y + 111 }, got, 0);
       if (got.has(i)) hit++;
     }
   }
   return { own: true, blocks: m.blocks.length, leaves, stops, pois, inside, seen, hit, bad,
-           start, poiPath, addr };
+           start, starts, poiPath, addr };
 }
 
 function checkLit(root) {
@@ -395,7 +397,7 @@ if (require.main === module) {
     console.log('LIT (' + poi.vols.join(', ') + ', свой контейнер): блоков ' + poi.blocks +
                 ', с точками ' + poi.leaves + ', разбор дочитан до конца у ' + poi.stops);
     if (poi.poiPath !== null) console.log('путь к дереву POI: корень 0x4a -> 0x20 -> 0x21: ' +
-                                          (poi.poiPath ? 'есть, корень дерева (' + poi.start.blk + ', 1)' : 'НЕТ'));
+                                          (poi.poiPath ? 'есть, слоёв ' + poi.starts.length + ', корни ' + poi.starts.map((x) => x.blk).join(',') : 'НЕТ'));
     console.log('точек ' + poi.pois + ', из них в рамке Кипра ' + poi.inside +
                 '; спуск от корня: проверено ' + poi.seen + ', свой лист найден у ' + poi.hit);
     if (poi.addr) {
