@@ -178,19 +178,32 @@ const MAX_TRIS = 21845;                  // 3·n ≤ 65535 точек в одн�
 
 function areaElements(area, f) {
   if (!area || area.empty) return [gm.encodeFrame(f.X, f.Y, f.W, f.simple)];
-  if (area.full) {
-    const pts = f.simple ? [[f.X, f.Y], [0, f.Y], [0, 0], [f.X, 0]] : [[f.X, 0], [f.X, f.Y], [0, f.Y], [0, 0]];
-    return [gm.encodePolygon(pts, [3, 2, 3, 2], LAND, f)];      // веер, как рамка
-  }
   const out = [];
-  for (const [attr, tris, edge] of [[LAND, area.land, true], [SEA, area.sea, false]]) {
+  const list = (attr, tris, edge, pre) => {
     for (let i = 0; i < tris.length; i += MAX_TRIS) {
       const part = tris.slice(i, i + MAX_TRIS);
-      out.push(gm.encodePolygon(part.flat(), gm.listFlags(part.length, edge), attr, f));
+      const el = gm.encodePolygon(part.flat(), gm.listFlags(part.length, edge), attr, f);
+      out.push(i === 0 && pre ? Buffer.concat([pre, el]) : el);
     }
+  };
+  if (area.full) {
+    const pts = f.simple ? [[f.X, f.Y], [0, f.Y], [0, 0], [f.X, 0]] : [[f.X, 0], [f.X, f.Y], [0, f.Y], [0, 0]];
+    out.push(gm.encodePolygon(pts, [3, 2, 3, 2], LAND, f));      // веер, как рамка
+  } else {
+    list(LAND, area.land, true);
+    list(SEA, area.sea, false);
+  }
+  // слои — в порядке завода; E0 держится до смены, у суши/моря/ступеней 0xFF
+  let e9 = 0xff;
+  for (const ly of area.layers || []) {
+    const pre = ly.e9 !== e9 ? Buffer.from([0xe0, ly.e9]) : null;
+    e9 = ly.e9;
+    list(ly.attr, ly.tris, ly.attr !== SEA, pre);
   }
   return out;
 }
+
+const rectTris = (X, Y) => [[[0, 0], [X, 0], [X, Y]], [[0, 0], [X, Y], [0, Y]]];
 
 // Отсечь кольцо прямоугольником [0,X]×[0,Y] (Сазерленд — Ходжмен). Кольцо
 // вогнутое — на границе могут остаться «мостики» туда-обратно; при заливке по
@@ -214,22 +227,14 @@ function clipRing(ring, X, Y) {
 const cutX = (a, b, x) => [x, a[1] + (b[1] - a[1]) * (x - a[0]) / (b[0] - a[0])];
 const cutY = (a, b, y) => [a[0] + (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]), y];
 
-function insideEO(rings, x, y) {
-  let c = false;
-  for (const p of rings) {
-    for (let i = 0, j = p.length - 1; i < p.length; j = i++) {
-      const [xi, yi] = p[i], [xj, yj] = p[j];
-      if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) c = !c;
-    }
-  }
-  return c;
-}
 
-// Суша и море тайла X×Y из колец суши (в сырых единицах ОТ НАЧАЛА ТАЙЛА).
+// Область тайла X×Y, заданная кольцами (в сырых единицах ОТ НАЧАЛА ТАЙЛА):
+// заливка по НЕНУЛЕВОЙ обмотке — внешние кольца против часовой, дыры по
+// часовой; перекрытия объектов одного класса сливаются, а не гасятся.
 // Разбиение на трапеции полосами между соседними y вершин; трапеции между
 // одной и той же парой рёбер склеиваются по высоте. Возвращает {empty} |
-// {full} | {land: [[p,p,p]…], sea: [[p,p,p]…]} с целыми координатами.
-function landArea(rings, X, Y) {
+// {full} | {inside: [[p,p,p]…], outside: [[p,p,p]…]} с целыми координатами.
+function regionTris(rings, X, Y) {
   const near = rings.filter(r => r.bbox[0] <= X && r.bbox[2] >= 0 && r.bbox[1] <= Y && r.bbox[3] >= 0);
   if (!near.length) return { empty: true };
   const polys = near.map(r => clipRing(r.pts, X, Y).map(([x, y]) => [Math.round(x), Math.round(y)])).filter(p => p.length >= 3);
@@ -237,46 +242,67 @@ function landArea(rings, X, Y) {
   for (const p of polys) {
     for (let i = 0; i < p.length; i++) {
       const a = p[i], b = p[(i + 1) % p.length];
-      if (a[1] !== b[1]) edges.push(a[1] < b[1] ? [a, b] : [b, a]);
+      if (a[1] !== b[1]) edges.push(a[1] < b[1] ? [a, b, 1] : [b, a, -1]);
     }
   }
-  // кольца тайла не задевают — он целиком внутри суши или целиком снаружи
-  if (!edges.length) return insideEO(near.map(r => r.pts), X / 2, Y / 2) ? { full: true } : { empty: true };
+  // кольца тайла не задевают — он целиком внутри или целиком снаружи
+  if (!edges.length) return windingAt(near, X / 2, Y / 2) ? { full: true } : { empty: true };
   const ys = [...new Set([0, Y, ...polys.flat().map(q => q[1])])].sort((a, b) => a - b);
   const xAt = (e, y) => (e === 'L' ? 0 : e === 'R' ? X
     : Math.round(e[0][0] + (e[1][0] - e[0][0]) * (y - e[0][1]) / (e[1][1] - e[0][1])));
-  const open = new Map();               // ключ пары рёбер → {l, r, y0, land}
+  const open = new Map();
   const done = [];
-  const close = k => { const t = open.get(k); open.delete(k); done.push(t); };
   for (let i = 0; i + 1 < ys.length; i++) {
     const y0 = ys[i], y1 = ys[i + 1], ym = (y0 + y1) / 2;
     const act = edges.filter(([a, b]) => a[1] <= y0 && b[1] >= y1)
       .map(e => ({ e, x: e[0][0] + (e[1][0] - e[0][0]) * (ym - e[0][1]) / (e[1][1] - e[0][1]) }))
       .sort((a, b) => a.x - b.x);
-    // чередование: снаружи → суша → снаружи …; море — промежутки между сушей
-    const bounds = ['L', ...act.map(q => q.e), 'R'];
     const spans = [];
-    for (let k = 0; k + 1 < bounds.length; k++) spans.push({ l: bounds[k], r: bounds[k + 1], land: k % 2 === 1 });
+    let w = 0, from = 'L', fromIn = false;
+    for (const q of act) {
+      w += q.e[2];
+      const nowIn = w !== 0;
+      if (nowIn !== fromIn) { spans.push({ l: from, r: q.e, in: fromIn }); from = q.e; fromIn = nowIn; }
+    }
+    spans.push({ l: from, r: 'R', in: fromIn });
     const keys = new Set();
     for (const sp of spans) {
-      const key = (sp.land ? 'L:' : 'S:') + edgeKey(sp.l) + '|' + edgeKey(sp.r);
+      const key = (sp.in ? 'I:' : 'O:') + edgeKey(sp.l) + '|' + edgeKey(sp.r);
       keys.add(key);
       const t = open.get(key);
-      if (!t) open.set(key, { l: sp.l, r: sp.r, y0, y1, land: sp.land });
+      if (!t) open.set(key, { l: sp.l, r: sp.r, y0, y1, in: sp.in });
       else t.y1 = y1;
     }
-    for (const k of [...open.keys()]) if (!keys.has(k)) close(k);
+    for (const k of [...open.keys()]) if (!keys.has(k)) { done.push(open.get(k)); open.delete(k); }
   }
-  for (const k of [...open.keys()]) close(k);
-  const land = [], sea = [];
+  for (const t of open.values()) done.push(t);
+  const inside = [], outside = [];
   for (const t of done) {
     const a = [xAt(t.l, t.y0), t.y0], b = [xAt(t.r, t.y0), t.y0], c = [xAt(t.r, t.y1), t.y1], d = [xAt(t.l, t.y1), t.y1];
-    const dst = t.land ? land : sea;
+    const dst = t.in ? inside : outside;
     for (const tri of [[a, b, c], [a, c, d]]) if (area2(tri) !== 0) dst.push(tri);
   }
-  if (!land.length) return { empty: true };
-  if (!sea.length) return { full: true };
-  return { land, sea };
+  if (!inside.length) return { empty: true };
+  if (!outside.length) return { full: true };
+  return { inside, outside };
+}
+
+function windingAt(rings, x, y) {
+  let w = 0;
+  for (const r of rings) {
+    const p = r.pts;
+    for (let i = 0, j = p.length - 1; i < p.length; j = i++) {
+      const [xi, yi] = p[i], [xj, yj] = p[j];
+      if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) w += yj < yi ? 1 : -1;
+    }
+  }
+  return w !== 0;
+}
+
+// Суша и море тайла: {empty} | {full} | {land, sea}
+function landArea(rings, X, Y) {
+  const r = regionTris(rings, X, Y);
+  return r.inside ? { land: r.inside, sea: r.outside } : r;
 }
 const edgeKey = e => (typeof e === 'string' ? e : e[0].join(',') + '>' + e[1].join(','));
 const area2 = ([a, b, c]) => (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]);
@@ -308,17 +334,76 @@ function simplifyRing(pts, tol) {
 
 // Кольца суши (градусы) → кольца уровня в сырых единицах от начала карты
 // (ячейка·cellX >> сдвиг), упрощённые с допуском в 1,5 единицы уровня.
-function landForLevel(rings, L) {
+function landForLevel(rings, L, opt = {}) {
   const u = 1 << L.shift;
   const out = [];
   for (const r of rings || []) {
     let pts = r.map(([lon, lat]) => [cellXL(lon, L) * L.cellX / u, cellYL(lat, L) * L.cellY / u]);
-    pts = simplifyRing(pts, 1.5);
+    pts = simplifyRing(pts, opt.tol || 1.5);
     if (pts.length < 3) continue;
+    // суша: всегда против часовой (обмотка +1); у площадных объектов
+    // направление задано при разборе (дыры — по часовой)
+    if (opt.ccw && ringArea(pts) < 0) pts = pts.reverse();
     const xs = pts.map(q => q[0]), ys = pts.map(q => q[1]);
     const bbox = [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
     if (bbox[2] - bbox[0] < 2 && bbox[3] - bbox[1] < 2) continue;      // островок мельче единицы
     out.push({ pts, bbox });
+  }
+  return out;
+}
+
+function ringArea(p) {
+  let a = 0;
+  for (let i = 0, j = p.length - 1; i < p.length; j = i++) a += (p[j][0] - p[i][0]) * (p[j][1] + p[i][1]);
+  return a / 2;
+}
+
+// ── слои поверх суши ───────────────────────────────────────────────────────
+//
+// Классы и уровни — по заводу (docs/formats/gdb.md, «Площадные классы»):
+//   0x60 | ступень<<8 — ступени рельефа, L4…L11, вложенные, по возрастанию;
+//   0x51 лес, 0x52 парки/заповедники, 0x53 застройка, 0x54 промзоны,
+//   0x56 аэродромы — L0…L4; 0x57 перроны — L0…L3; 0x50 вода — все уровни.
+// Порядок в тайле: суша/море, ступени, лес, парки, застройка, промзоны,
+// аэродромы, перроны, вода (у завода вода идёт последней, ступени — сразу за сушей).
+const OVERLAY = [
+  { cls: 'forest', attr: 0x51, maxLevel: 4, e9: () => 20 },
+  { cls: 'park', attr: 0x52, maxLevel: 4, e9: () => 16 },
+  { cls: 'built', attr: 0x53, maxLevel: 4, e9: a => (a >= 5 ? 22 : a >= 1 ? 18 : 13) },
+  { cls: 'industrial', attr: 0x54, maxLevel: 4, e9: () => 19 },
+  { cls: 'airport', attr: 0x56, maxLevel: 4, e9: () => 20 },
+  { cls: 'apron', attr: 0x57, maxLevel: 3, e9: () => 18 },
+  { cls: 'water', attr: 0x50, maxLevel: 11, e9: a => (a >= 5 ? 34 : a >= 0.5 ? 25 : 18) },
+];
+
+// Объект мельче ~4×4 единиц уровня на уровень не идёт
+function minKm2(L) {
+  const unit = (1 << L.shift) * 88.9 / 72000;          // км на сырую единицу по долготе у Кипра
+  return Math.max(0.002, 16 * unit * unit);            // и не меньше 2000 м² — участки-крошки не берём
+}
+// Допуск упрощения слоёв: 6 единиц (на L0 ~7 м) — мельче глазу не видно, а
+// тайл с лесом и застройкой Никосии иначе не влезает ни в какой размер
+const LAYER_TOL = 6;
+
+function layersForLevel(opts, lv, L) {
+  const out = [];
+  if (lv >= 4) {
+    for (const b of (opts.bands || [])) {
+      const rings = landForLevel(b.rings, L, { tol: LAYER_TOL });
+      if (rings.length) out.push({ attr: (0x60 | (b.h << 8)) >>> 0, e9: 0xff, rings });
+    }
+  }
+  const lim = minKm2(L);
+  for (const o of OVERLAY) {
+    if (lv > o.maxLevel) continue;
+    const groups = new Map();
+    for (const f of (opts.areas || [])) {
+      if (f.cls !== o.cls || f.km2 < lim) continue;
+      const e9 = o.e9(f.km2);
+      if (!groups.has(e9)) groups.set(e9, []);
+      groups.get(e9).push(...landForLevel(f.rings, L, { tol: LAYER_TOL }));
+    }
+    for (const [e9, rings] of [...groups].sort((a, b) => a[0] - b[0])) if (rings.length) out.push({ attr: o.attr, e9, rings });
   }
   return out;
 }
@@ -620,6 +705,8 @@ function tileSizes(L) {
 //   L0 мелочь: класс 6 (E0 8) — tertiary, класс 4 (E0 8) — улицы
 // Соответствие тегов OSM этим классам — догадка по плотности и геометрии.
 function classFor(lv, hw) {
+  // реки: линия класса 10, E0 18 — так у завода на L1…L3 (Гвадиана)
+  if (hw === 'river') return { cls: 10, e9: 18 };
   const k = String(hw || '').replace(/_link$/, '');
   const link = /_link$/.test(String(hw || ''));
   if (k === 'motorway') {
@@ -699,7 +786,8 @@ function roadsToLevel(lines, opts = {}) {
 
   // 1б. суша: кольца уровня и кластеры, которых они касаются (в том числе
   //     без единой дороги — суша нужна и там)
-  const land = landForLevel(opts.land, L);
+  const land = landForLevel(opts.land, L, { ccw: true });
+  const layers = layersForLevel(opts, lvNr, L);
   const CWr = CW * L.cellX / u, CHr = CH * L.cellY / u;       // кластер в сырых единицах
   for (const r of land) {
     for (let gx = Math.floor(r.bbox[0] / CWr); gx <= Math.floor(r.bbox[2] / CWr); gx++) {
@@ -719,7 +807,7 @@ function roadsToLevel(lines, opts = {}) {
     let chosen = null;
     // кольца, заранее отсечённые прямоугольником кластера (с запасом)
     const cx0 = c.cx * CWr, cy0 = c.cy * CHr;
-    const cland = land.filter(r => r.bbox[0] <= cx0 + CWr && r.bbox[2] >= cx0 && r.bbox[1] <= cy0 + CHr && r.bbox[3] >= cy0)
+    const cut = rings => rings.filter(r => r.bbox[0] <= cx0 + CWr && r.bbox[2] >= cx0 && r.bbox[1] <= cy0 + CHr && r.bbox[3] >= cy0)
       .map(r => {
         const sh = shiftRings([r], cx0 - 1, cy0 - 1)[0];
         const pts = clipRing(sh.pts, CWr + 2, CHr + 2).map(([x, y]) => [x + cx0 - 1, y + cy0 - 1]);
@@ -727,6 +815,8 @@ function roadsToLevel(lines, opts = {}) {
         const xs = pts.map(q => q[0]), ys = pts.map(q => q[1]);
         return { pts, bbox: [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)], whole: r };
       }).filter(Boolean);
+    const cland = cut(land);
+    const clayers = layers.map(ly => Object.assign({}, ly, { rings: cut(ly.rings) })).filter(ly => ly.rings.length);
     for (const [lw, lh] of tileSizes(L)) {
       // размер кластера в таблице уровня — u16: не больше 3449 записей по 19 байт
       if ((L.potX - lw) + (L.potY - lh) > 11) break;
@@ -764,8 +854,18 @@ function roadsToLevel(lines, opts = {}) {
             const near = cland.filter(r => r.bbox[0] <= tx0 + f.X && r.bbox[2] >= tx0 && r.bbox[1] <= ty0 + f.Y && r.bbox[3] >= ty0);
             let a;
             if (near.length) a = landArea(shiftRings(near, tx0, ty0), f.X, f.Y);
-            else a = insideEO(cland.map(r => r.whole.pts), tx0 + f.X / 2, ty0 + f.Y / 2) ? { full: true } : { empty: true };
+            else a = windingAt(cland.map(r => r.whole), tx0 + f.X / 2, ty0 + f.Y / 2) ? { full: true } : { empty: true };
             if (a.empty) continue;
+            // слои поверх суши: ступени рельефа, лес, застройка, вода …
+            a.layers = [];
+            for (const ly of clayers) {
+              const nearL = ly.rings.filter(r => r.bbox[0] <= tx0 + f.X && r.bbox[2] >= tx0 && r.bbox[1] <= ty0 + f.Y && r.bbox[3] >= ty0);
+              let q;
+              if (nearL.length) q = regionTris(shiftRings(nearL, tx0, ty0), f.X, f.Y);
+              else q = windingAt(ly.rings.map(r => r.whole), tx0 + f.X / 2, ty0 + f.Y / 2) ? { full: true } : { empty: true };
+              if (q.empty) continue;
+              a.layers.push({ attr: ly.attr, e9: ly.e9, tris: q.full ? rectTris(f.X, f.Y) : q.inside });
+            }
             const k = tx + ',' + ty;
             areas.set(k, a);
             if (!byTile.has(k)) byTile.set(k, { tx, ty, roads: [] });
@@ -820,8 +920,9 @@ const LEVEL_CLASSES = [
 // Оставить для уровня только те дороги, чей класс на нём ещё рисуется.
 function linesForLevel(lines, lv) {
   const cls = LEVEL_CLASSES[lv];
-  if (!cls) return lines;
-  const set = new Set(cls.concat(cls.map(c => c + '_link')));
+  // реки — только L1…L3: там их класс у завода установлен; на L0 — нет
+  if (!cls) return lines.filter(ln => Array.isArray(ln) || ln.cls !== 'river');
+  const set = new Set(cls.concat(cls.map(c => c + '_link'), lv >= 1 && lv <= 3 ? ['river'] : []));
   return lines.filter(ln => !Array.isArray(ln) && ln.cls && set.has(ln.cls));
 }
 
@@ -835,8 +936,15 @@ function defaultLand() {
   try { return JSON.parse(fs.readFileSync(DEFAULT_LAND, 'utf8')).rings; } catch (e) { return null; }
 }
 
+const DEFAULT_AREAS = 'out/cyp/areas.json', DEFAULT_BANDS = 'out/cyp/bands.json';
+const readJson = (f, k) => { try { return JSON.parse(fs.readFileSync(f, 'utf8'))[k]; } catch (e) { return null; } };
+
 function volumeFromRoads(lines, opts = {}) {
   if (opts.land === undefined) opts = Object.assign({}, opts, { land: defaultLand() });
+  if (opts.areas === undefined) opts = Object.assign({}, opts, { areas: readJson(DEFAULT_AREAS, 'features') });
+  if (opts.bands === undefined) opts = Object.assign({}, opts, { bands: readJson(DEFAULT_BANDS, 'bands') });
+  if (opts.rivers === undefined) opts = Object.assign({}, opts, { rivers: readJson(DEFAULT_AREAS, 'rivers') });
+  if (opts.rivers) lines = lines.concat(opts.rivers.map(pts => ({ cls: 'river', pts, name: null })));
   const want = opts.levels || [0];
   const stats = new Map();
   for (const lv of want) {
@@ -881,7 +989,7 @@ function component(outDir, v, opt) {
 }
 
 module.exports = {
-  landArea, clipRing, simplifyRing, landForLevel, LAND, SEA,
+  landArea, regionTris, clipRing, simplifyRing, landForLevel, layersForLevel, OVERLAY, LAND, SEA,
   PROLOGUE, SIG, VERSION, FRAME, MAGIC, MAX_BLOB, FRAME_ELEMENT, EUROPE_LEVELS, CLUSTER_REC,
   tileBlob, emptyTile, readTileRoads, tileFormat, classFor, splitGrid, mortonIndex, clusterBlob, build,
   degToTile, degToTileL, cellX, cellY, cellXL, cellYL, roadsToLevel, volumeFromRoads,
@@ -928,7 +1036,9 @@ if (require.main === module) {
   const landFile = opt('--land');
   const land = args.includes('--no-land') ? null
     : landFile ? JSON.parse(fs.readFileSync(landFile, 'utf8')).rings : undefined;
-  const v = volumeFromRoads(lines, { name: opt('--name') || 'EJ211', levels, land });
+  const v = volumeFromRoads(lines, { name: opt('--name') || 'EJ211', levels, land,
+    areas: args.includes('--no-areas') ? null : undefined, bands: args.includes('--no-bands') ? null : undefined,
+    rivers: args.includes('--no-areas') ? null : undefined });
   for (const st of v.stats) {
     console.log('  L' + String(st.nr).padStart(2) + ': дорог ' + String(st.lines).padStart(6) +
       ', тайлов ' + String(st.tiles).padStart(4) + ', кластеров ' + String(st.clusters).padStart(3) +

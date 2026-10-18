@@ -122,6 +122,7 @@ function primitiveBlock(b, sink) {
       if (num === 2) denseNodes(b, ga, gz, strs, deg, latOff, lonOff, sink);
       else if (num === 1) plainNode(b, ga, gz, strs, deg, latOff, lonOff, sink);
       else if (num === 3) way(b, ga, gz, strs, sink);
+      else if (num === 4 && sink.relation) relation(b, ga, gz, strs, sink);
     });
   }
 }
@@ -175,11 +176,30 @@ function way(b, from, to, strs, sink) {
   });
   let tags = null;
   for (let i = 0; i < keys.length; i++) (tags || (tags = {}))[strs[keys[i]]] = strs[vals[i]];
-  if (!tags) return;
+  if (!tags && !sink.untagged) return;
   let node = 0;
   const list = new Array(refs ? refs.length : 0);
   for (let i = 0; refs && i < refs.length; i++) { node += refs[i]; list[i] = node; }
   sink.way(id, tags, list);
+}
+
+// Отношение: поле 1 — номер, 2/3 — теги, 8 — роли (номера строк), 9 — номера
+// участников разностями (зигзаг), 10 — типы участников (0 узел, 1 линия, 2 отношение).
+function relation(b, from, to, strs, sink) {
+  let id = 0, keys = [], vals = [], roles = [], mem = [], types = [];
+  fields(b, from, to, (num, wire, val, a, z) => {
+    if (num === 1 && wire === 0) id = val;
+    else if (num === 2 && wire === 2) keys = packed(b, a, z, false);
+    else if (num === 3 && wire === 2) vals = packed(b, a, z, false);
+    else if (num === 8 && wire === 2) roles = packed(b, a, z, false);
+    else if (num === 9 && wire === 2) mem = packed(b, a, z, true);
+    else if (num === 10 && wire === 2) types = packed(b, a, z, false);
+  });
+  const tags = {};
+  for (let i = 0; i < keys.length; i++) tags[strs[keys[i]]] = strs[vals[i]];
+  let ref = 0;
+  const members = mem.map((d, i) => { ref += d; return { ref, type: types[i], role: strs[roles[i]] }; });
+  sink.relation(id, tags, members);
 }
 
 // --- удобный вход -----------------------------------------------------------
@@ -194,7 +214,7 @@ function read(path, opts) {
   const buf = fs.readFileSync(path);
   let cap = 1 << 20, n = 0;
   let ids = new Float64Array(cap), lons = new Int32Array(cap), lats = new Int32Array(cap);
-  const points = [], ways = [];
+  const points = [], ways = [], relations = [];
   const sink = {
     node(id, lon, lat, tags) {
       if (n === cap) {
@@ -207,11 +227,15 @@ function read(path, opts) {
       if (tags && (!o.node || o.node(tags))) points.push({ id, lon, lat, tags });
     },
     way(id, tags, refs) {
-      if (!o.way || o.way(tags)) ways.push({ id, tags, refs });
+      if (!tags) { if (o.wayIds && o.wayIds.has(id)) ways.push({ id, tags: {}, refs }); return; }
+      if (!o.way || o.way(tags) || (o.wayIds && o.wayIds.has(id))) ways.push({ id, tags, refs });
     },
   };
+  // отношения — только если о них спросили; безтеговые линии — только по списку
+  if (o.relation) sink.relation = (id, tags, members) => { if (o.relation(tags)) relations.push({ id, tags, members }); };
+  if (o.wayIds) sink.untagged = true;
   blocks(buf, (body) => primitiveBlock(body, sink));
-  return { n, ids, lons, lats, points, ways };
+  return { n, ids, lons, lats, points, ways, relations };
 }
 
 // Координата узла по номеру: двоичный поиск в отсортированном индексе.

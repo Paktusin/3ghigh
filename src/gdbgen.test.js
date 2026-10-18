@@ -12,8 +12,9 @@ const gm = require('./gdb');
 const G = require('./gdbgen');
 
 // без суши (иначе подхватится out/cyp/land.json, если он есть рядом)
-const V = (l, o = {}) => G.volumeFromRoads(l, Object.assign({ land: null }, o));
-const RL = (l, o = {}) => G.roadsToLevel(l, Object.assign({ land: null }, o));
+const NONE = { land: null, areas: null, bands: null, rivers: null };
+const V = (l, o = {}) => G.volumeFromRoads(l, Object.assign({}, NONE, o));
+const RL = (l, o = {}) => G.roadsToLevel(l, Object.assign({}, NONE, o));
 
 // Общий пустой тайл из EJ211_v37a.gdb (@334 925 620, 40 байт) — на него
 // ссылаются ~13 580 «морских» клеток L0.
@@ -468,7 +469,7 @@ test('суша: остров на всех уровнях — треугольн
   const want = 0.15 * 0.10 * 2 * (88.9 * 111.1);        // км², грубо
   const lines = [{ cls: 'motorway', pts: [[33.2, 35.15], [33.4, 35.15]] }];
   for (const lv of [0, 1, 4, 8, 11]) {
-    const v = G.volumeFromRoads(lines, { land: [ring], levels: [lv] });
+    const v = V(lines, { land: [ring], levels: [lv] });
     const g = gm.openBuffer(v.gdb, v.gd2);
     const hd = gm.levelHead(gm.read(g, gm.header(g).levels[lv].offset, 100));
     const u = 1 << hd.shift;
@@ -500,5 +501,61 @@ test('суша: остров на всех уровнях — треугольн
     assert.ok(landTiles > 0, 'L' + lv + ': тайлы с сушей есть');
     const km2 = land * u * u * (88.9 / 72000 * 1.0) * (111.1 / 111111.1);
     assert.ok(Math.abs(km2 - want) / want < 0.05 || lv >= 8, 'L' + lv + ': площадь суши ' + km2.toFixed(0) + ' км² против ' + want.toFixed(0));
+  }
+});
+
+
+// ── слои поверх суши: рельеф, лес, вода … ─────────────────────────────────
+
+test('слои: обмотка — перекрытие объектов сливается, дыра по часовой вычитается', () => {
+  const sq = (x0, y0, x1, y1, ccw = true) => {
+    const pts = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+    return { pts: ccw ? pts : pts.reverse(), bbox: [x0, y0, x1, y1] };
+  };
+  const area = r => r.inside.reduce((s, t) => s + triArea(t), 0);
+  assert.equal(area(G.regionTris([sq(0, 0, 200, 200), sq(100, 100, 300, 300)], 400, 400)), 200 * 200 * 2 - 100 * 100);
+  assert.equal(area(G.regionTris([sq(0, 0, 300, 300), sq(100, 100, 200, 200, false)], 400, 400)), 300 * 300 - 100 * 100);
+});
+
+test('слои: лес, вода и ступени рельефа ложатся по-заводски на L0 и L4', () => {
+  // остров-квадрат 0,2° у Никосии; лес и озеро внутри; две ступени рельефа
+  const box = (x0, y0, x1, y1) => [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+  const land = [box(33.20, 35.05, 33.40, 35.25)];
+  const areas = [
+    { cls: 'forest', rings: [box(33.22, 35.07, 33.30, 35.15)], km2: 64 },
+    { cls: 'water', rings: [box(33.32, 35.17, 33.36, 35.21)], km2: 16 },
+  ];
+  const bands = [{ h: 4, rings: [box(33.21, 35.06, 33.39, 35.24)] }, { h: 10, rings: [box(33.25, 35.10, 33.35, 35.20)] }];
+  for (const lv of [0, 4]) {
+    const v = V([], { land, areas, bands, levels: [lv] });
+    const g = gm.openBuffer(v.gdb, v.gd2);
+    const seen = new Map();
+    for (const cl of v.map.levels[lv].clusters) {
+      for (const t of cl.tiles) {
+        if (t.off === v.map.emptyTile.off) continue;
+        const r = gm.readElements(gm.read(g, t.off, t.size), { W: t.attr, simple: !!t.b10, points: true });
+        assert.equal(r.ok, true);
+        const f = G.tileFormat(G.EUROPE_LEVELS[lv], t.lw, t.lh);
+        const polys = r.els.filter(e => e.type === 0);
+        let base = 0;
+        const order = [];
+        for (const p of polys) {
+          const q = gm.polyTriangles(p.pts, p.flags);
+          assert.equal(q.illegal, 0);
+          assert.ok(p.pts.every(([x, y]) => x >= 0 && y >= 0 && x <= f.X && y <= f.Y));
+          const a = q.tris.reduce((s, x) => s + triArea(x), 0);
+          if (p.e9 === 0xff && (p.attr === G.LAND || p.attr === G.SEA)) base += a;
+          else { seen.set(p.attr + '/' + p.e9, (seen.get(p.attr + '/' + p.e9) || 0) + a); order.push(p.attr); }
+        }
+        if (polys.some(p => p.attr === G.LAND)) assert.equal(base, f.X * f.Y, 'L' + lv + ': суша + море = тайл');
+        // порядок: ступени, лес, вода — как у завода
+        const rank = a => (a & 0x3f) === 0x20 ? 0 : a === 0x51 ? 1 : a === 0x50 ? 9 : 5;
+        assert.deepEqual(order.slice().sort((a, b) => rank(a) - rank(b) || (a >> 8) - (b >> 8)), order, 'L' + lv + ': порядок слоёв');
+      }
+    }
+    assert.ok(seen.has(0x51 + '/20'), 'L' + lv + ': лес 0x51 с E0 20');
+    assert.ok(seen.has(0x50 + '/34'), 'L' + lv + ': озеро 0x50 с E0 34');
+    assert.equal(seen.has((0x60 | (4 << 8)) + '/255'), lv >= 4, 'L' + lv + ': ступень 40 м только на L4+');
+    assert.equal(seen.has((0x60 | (10 << 8)) + '/255'), lv >= 4, 'L' + lv + ': ступень 100 м');
   }
 });
