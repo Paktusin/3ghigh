@@ -54,7 +54,7 @@ function split(pois) {
 // Точки группы -> байты листа. Размер считается один раз и запоминается.
 function leafBytes(group, blk, ref, idBase) {
   const items = group.map((p, i) => Object.assign({}, p, {
-    id: idBase + i, ref: ref,
+    id: idBase + i, ref: typeof ref === 'function' ? ref(p) : ref,
   }));
   return B.writeBlock(B.model(items), blk);
 }
@@ -148,17 +148,19 @@ function nodes(root, origin, leafLink, nodeBlk, keyBase) {
 // Собрать всё: листья по донорам и блок с узлами на месте 112447.
 function build(pois, donors, opt) {
   const o = opt || {};
-  const pl = plan(pois, donors, o);
+  // o.plan — готовое деление (второй проход: те же листья, но ссылки 0x66
+  // уже у каждой точки своя, o.refOf(точка))
+  const pl = o.plan || plan(pois, donors, o);
   const leafLink = (leaf) => [leaf.slot.blk, 0];
   const origin = bbox(pois);
   const out = { leaves: [], node: null, plan: pl };
   let idBase = o.idBase === undefined ? 0x30000000 : o.idBase;
   for (const leaf of pl.leaves) {
-    const bytes = leafBytes(leaf.pois, leaf.slot.blk, o.ref, idBase);
-    if (bytes.length > leaf.slot.size)
+    const bytes = leafBytes(leaf.pois, leaf.slot.blk, o.refOf || o.ref, idBase);
+    if (bytes.length > (o.cap || leaf.slot.size))
       throw new Error('лист ' + leaf.slot.blk + ': ' + bytes.length + ' > ' + leaf.slot.size);
-    out.leaves.push({ blk: leaf.slot.blk, size: leaf.slot.size, bytes: bytes,
-                      pois: leaf.pois.length });
+    out.leaves.push({ blk: leaf.slot.blk, size: o.cap || leaf.slot.size, bytes: bytes,
+                      pois: leaf.pois.length, list: leaf.pois });
     idBase += leaf.pois.length;
   }
   const nodeBlk = o.nodeBlk === undefined ? ROOT.block : o.nodeBlk;

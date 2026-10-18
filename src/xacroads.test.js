@@ -57,7 +57,7 @@ test('граф: классы фильтруются, а FRC берётся по 
   ] };
   const all = xr.graphFromGeoJSON(fc);
   assert.equal(all.edges.length, 2);
-  assert.deepEqual(all.edges.map((e) => e.frc).sort(), [0, 6]);
+  assert.deepEqual(all.edges.map((e) => e.frc).sort(), [0, 4], 'жилая улица — уровень 4, как у завода');
 
   const only = xr.graphFromGeoJSON(fc, { classes: ['motorway'] });
   assert.equal(only.edges.length, 1, 'взят только заказанный класс');
@@ -149,7 +149,7 @@ test('тайл из дорог: класс дороги доезжает до з
   const idx = new Set();
   for (const b of blocks) for (const e of xv.blockEdges(b)) idx.add(e.type);
   assert.ok(idx.has(xr.attrByFrc(attr)[0]), 'магистраль записана своим FRC');
-  assert.ok(idx.has(xr.attrByFrc(attr)[6]), 'улица — своим');
+  assert.ok(idx.has(xr.attrByFrc(attr)[4]), 'улица — своим');
 });
 
 test('пустой набор дорог отвергается не молча', () => {

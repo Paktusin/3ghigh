@@ -166,25 +166,37 @@ function country(sym, o) {
       { ref: o.postcodes || null }, { ref: null }, { ref: null }, // вид 3: индексы (последнее — пусто, как у завода)
       { ref: o.streets || null },                                 // вид 7: все улицы страны
       { pair: o.center }, { pair: o.min }, { pair: o.max },
-      { ref: null },                                              // вид 0x10: категории POI — не пишем
+      { ref: o.poi || null },                                     // вид 0x10: поиск POI (узел 0x33)
     ],
   };
 }
 
+// Город (и район — тоже 0x03). Флаги b1: 0x01 улицы, 0x02 центр, 0x04 рамка
+// и 0x215, 0x08 места (0x800), 0x10 индексы (0x1000), 0x20 цикл категорий POI
+// (0x49 категория, 0x3c список её точек), 0x40 дерево поиска POI (0x4000,
+// узел 0x33). 0x208 — следующий город (цепочка городов; у районов — кольцо
+// районов одного города), 0x209 — у города первый район, у района — город,
+// 0x20a — точка-центр (у района — центр его города). Так у Мальты: RABAT
+// 93240:4276 -> 0x209 93241:2374 (IL-BAĦRIJA) -> 0x208 2493 -> 0x208 2374.
 function city(sym, o) {
   const streets = !!o.list;
+  const cats = o.cats || [];
   return {
-    sym, n: 0,
+    sym, n: cats.length, entries: cats.map((_, i) => sym + '#' + i),
     tokens: () => {
-      const t = [{ u8: 0xa2 },
-                 { u8: (streets ? 0x01 : 0) | 0x02 | 0x04 | 0x08 | (o.postcodes ? 0x10 : 0) | 0x40 },
-                 { ref: o.name }];
+      const b1 = (streets ? 0x01 : 0) | 0x02 | 0x04 | (o.places ? 0x08 : 0) | (o.postcodes ? 0x10 : 0) |
+                 (cats.length ? 0x20 : 0) | 0x40;
+      const t = [{ u8: 0xa2 }, { u8: b1 }, { ref: o.name }];
       if (streets) t.push({ ref: o.list }, { ref: o.last }, { ref: o.last });
-      t.push({ pair: o.center }, { pair: o.min }, { pair: o.max }, { u32: o.id >>> 0 },
-             { ref: o.places || null });                 // 0x800, вид 6: места -> точка-центр
+      t.push({ pair: o.center }, { pair: o.min }, { pair: o.max }, { u32: o.id >>> 0 });
+      if (o.places) t.push({ ref: o.places });           // 0x800, вид 6: места -> точка-центр
       if (o.postcodes) t.push({ ref: o.postcodes });     // 0x1000, вид 3: индексы города
-      t.push({ ref: null },                              // 0x4000, вид 0x10: категории POI — нет
-             { ref: null }, { ref: null }, { ref: o.centre || null }); // 0x208, 0x209, 0x20a
+      t.push({ ref: o.poi || null },                     // 0x4000, вид 0x10: поиск POI
+             { ref: o.next || null }, { ref: o.link || null }, { ref: o.centre || null }); // 0x208…0x20a
+      if (cats.length) {
+        t.push({ v: cats.length });
+        for (const c of cats) t.push({ v: c.cat }, { ref: c.target });
+      }
       return t;
     },
   };
@@ -213,7 +225,8 @@ function list31(sym, items, o) {
   return {
     sym, n: items.length, entries: items.map((_, i) => sym + '#' + i),
     tokens: () => {
-      const t = [{ u8: 0xe0 }, { u8: (o.owner ? 0x80 : 0) | items.length }];
+      // бит 0 ведущего — как у 0x30: 1 — самостоятельный список, 0 — часть индекса
+      const t = [{ u8: 0xe0 | (o.direct ? 1 : 0) }, { u8: (o.owner ? 0x80 : 0) | items.length }];
       if (o.owner) t.push({ ref: o.owner });
       for (const it of items) t.push({ ref: it.name });
       for (const it of items) t.push({ ref: it.target });
@@ -423,74 +436,189 @@ function transplant(schema, block, srcBlk, opt) {
 
 function letter(name) { return [...name][0] || ' '; }
 
-// Имена -> списки (по LIST_MAX, режем по смене первой буквы, где можно) и
-// при необходимости индекс над ними. Возвращает записи и имена ключей.
-function names(sym, items, owner) {
+// Имена -> списки не длиннее LIST_MAX и, если имён больше DIRECT_MAX, индекс
+// над ними, многоуровневый: ветвь — символ на глубине d; ветвь длиннее
+// LIST_MAX — свой индекс со строкой-приставкой (ведущий 0xda, как NZ
+// 3383:1227) и ветвями по следующему символу. Каждый список начинается с
+// ветви, поэтому все имена достижимы и из индекса, и перечислением подряд.
+//
+// opt.t31 — списки 0x31 (имя каждого элемента — ссылка it.ref на уже
+// существующее имя или запись, сортировка — по it.name).
+function names(sym, items, owner, opt) {
+  const o = opt || {};
   const sorted = items.slice().sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-  const per = new Map();
-  for (const it of sorted) per.set(letter(it.name), (per.get(letter(it.name)) || 0) + 1);
-  const groups = [];
-  let cur = [];
-  // ключ ветви: первая буква, а у буквы длиннее LIST_MAX — две первые буквы
-  const bkey = (n) => (per.get(letter(n)) > LIST_MAX ? [...n].slice(0, 2).join('') : letter(n));
-  const perKey = new Map();
-  for (const it of sorted) perKey.set(bkey(it.name), (perKey.get(bkey(it.name)) || 0) + 1);
-  for (const it of sorted) {
-    // режем по LIST_MAX; на смене ключа ветви — если новая ветвь в остаток не
-    // влезет: тогда каждый список начинается с ветви и достижим из индекса
-    const brk = cur.length >= LIST_MAX ||
-      (cur.length && bkey(cur[cur.length - 1].name) !== bkey(it.name) &&
-       cur.length + perKey.get(bkey(it.name)) > LIST_MAX);
-    if (brk) { groups.push(cur); cur = []; }
-    cur.push(it);
-  }
-  if (cur.length) groups.push(cur);
-
-  const records = [];
-  const at = new Map();                  // элемент -> имя ключа его имени
+  const mk = (ls, g, direct, own) => (o.t31
+    ? list31(ls, g.map((it) => ({ name: it.ref, target: it.target })), { owner: own, direct })
+    : list(ls, g, { direct, owner: own }));
+  const records = [], listRecs = [], subs = [];
+  const at = new Map();                          // элемент -> имя ключа его имени
+  const where = new Map();                       // элемент -> [номер списка, место]
+  const groupsOut = [];
+  const addList = (g) => { groupsOut.push(g); g.forEach((it, i) => where.set(it, [groupsOut.length - 1, i])); };
+  const lsym = (gi) => sym + ':l' + gi;
+  const posOf = (it) => { const [gi, i] = where.get(it); return i === 0 ? lsym(gi) : lsym(gi) + '#' + i; };
+  const entryOf = (it) => { const [gi, i] = where.get(it); return lsym(gi) + '#' + i; };
   const direct = sorted.length <= DIRECT_MAX;
   const idx = sym + ':idx';
-  groups.forEach((g, gi) => {
-    const ls = sym + ':l' + gi;
-    records.push(list(ls, g, { direct, owner: direct ? owner : idx }));
-    g.forEach((it, i) => at.set(it, ls + '#' + i));
-  });
-  // ссылка на позицию имени: начало списка — ключ структуры, внутри — ключ витка
-  const posOf = (it) => {
-    for (let gi = 0; gi < groups.length; gi++) {
-      const i = groups[gi].indexOf(it);
-      if (i === 0) return sym + ':l' + gi;
-      if (i > 0) return sym + ':l' + gi + '#' + i;
-    }
-    throw new Error('имя вне списков');
-  };
-  let head = sym + ':l0';
-  if (!direct) {
-    // ветвь на первую букву; буква длиннее LIST_MAX — свой индекс второго
-    // уровня с приставкой и ветвями по второй букве (иначе её второй список
-    // остался бы без ветви)
-    const branches = [], subs = [];
-    for (const it of sorted) {
-      const k = letter(it.name);
-      if (branches.length && branches[branches.length - 1].key === k) continue;
-      if (per.get(k) <= LIST_MAX) { branches.push({ key: k, target: posOf(it) }); continue; }
-      const grp = sorted.filter((x) => letter(x.name) === k);
-      const ss = idx + ':' + k;
-      const sb = [];
-      for (const x of grp) {
-        const k2 = [...x.name][1] || ' ';
-        if (!sb.length || sb[sb.length - 1].key !== k2) sb.push({ key: k2, target: posOf(x) });
+  let top = null;
+  if (direct) addList(sorted);
+  else {
+    const build = (its, depth, isym, prefix) => {
+      const groups = [];
+      for (const it of its) {
+        const c = [...it.name][depth] || ' ';
+        if (!groups.length || groups[groups.length - 1].key !== c) groups.push({ key: c, items: [] });
+        groups[groups.length - 1].items.push(it);
       }
-      subs.push(index(ss, { owner: idx, total: grp.length, first: at.get(grp[0]), branches: sb, prefix: k }));
-      branches.push({ key: k, target: ss });
-    }
-    records.unshift(index(idx, { owner, total: sorted.length, first: sym + ':l0#0', branches }), ...subs);
-    head = idx;
+      const branches = [];
+      let cur = null;
+      const flush = () => { if (cur && cur.length) addList(cur); cur = null; };
+      for (const g of groups) {
+        if (g.items.length > LIST_MAX && depth < 8 && g.items.some((x) => [...x.name].length > depth + 1)) {
+          flush();
+          const ss = sym + ':i' + subs.length;
+          subs.push(null);
+          const slot = subs.length - 1;
+          subs[slot] = build(g.items, depth + 1, ss, prefix + g.key);
+          branches.push({ key: g.key, target: ss });
+          continue;
+        }
+        if (g.items.length > LIST_MAX) {           // одинаковые имена: просто подряд по LIST_MAX
+          flush();
+          for (let i = 0; i < g.items.length; i += LIST_MAX) addList(g.items.slice(i, i + LIST_MAX));
+          branches.push({ key: g.key, first: g.items[0] });
+          continue;
+        }
+        if (cur && cur.length + g.items.length > LIST_MAX) flush();
+        if (!cur) cur = [];
+        cur.push(...g.items);
+        branches.push({ key: g.key, first: g.items[0] });
+      }
+      flush();
+      return { isym, depth, prefix, branches, total: its.length, firstItem: its[0] };
+    };
+    top = build(sorted, 0, idx, '');
   }
-  return { records, head, last: at.get(sorted[sorted.length - 1]), entryOf: (it) => at.get(it) };
+  groupsOut.forEach((g, gi) => listRecs.push(mk(lsym(gi), g, direct, direct ? owner : idx)));
+  const mkIndex = (n, own) => index(n.isym, {
+    owner: own, total: n.total, first: entryOf(n.firstItem), prefix: n.depth ? n.prefix : undefined,
+    branches: n.branches.map((b) => ({ key: b.key, target: b.target || posOf(b.first) })),
+  });
+  if (top) {
+    records.push(mkIndex(top, owner));
+    for (const n of subs) records.push(mkIndex(n, idx));
+  }
+  records.push(...listRecs);
+  return { records, head: direct ? lsym(0) : idx, last: entryOf(sorted[sorted.length - 1]), entryOf };
+}
+
+// Узел выбора 0x33 (ведущий 0xf0 | n при n <= 3, иначе байт n): витки
+// «0x49 селектор, 0x3c куда». Селектор решает, что дальше (`FUN_08cd05c0`):
+// {2,3,4,13,14,15,17,19,20,22,23,24,25} и 600…799 — снова узел выбора,
+// прочие — список имён. Ватикан 176815:0: 9 -> телефоны, 9 -> названия, 2 ->
+// категории; город Валлетта: 1 -> названия всех POI города, 19 -> ...
+function select33(sym, sels) {
+  return {
+    sym, n: sels.length, entries: sels.map((_, i) => sym + '#' + i),
+    tokens: () => {
+      const n = sels.length;
+      const t = n <= 3 ? [{ u8: 0xf0 | n }] : [{ u8: 0xf0 }, { u8: n }];
+      for (const s of sels) t.push({ v: s.sel }, { ref: s.target });
+      return t;
+    },
+  };
+}
+
+
+// Повороты названия по словам — так у завода в списках названий POI: «SAN
+// PIETRO%BASILICA DI » (Ватикан 176815:33) — хвост, «%», голова с пробелом.
+// Поворот — с каждого слова, начинающегося с буквы или цифры.
+function rotations(name) {
+  const out = [];
+  const re = /\s+(?=[\p{L}\p{N}])/gu;
+  let m;
+  while ((m = re.exec(name))) {
+    const at = m.index + m[0].length;
+    out.push(name.slice(at) + '%' + name.slice(0, at));
+  }
+  return out;
+}
+
+// Телефон -> цифры с кодом страны, как у завода («39066388333», Мальта — «356…»).
+function phoneKey(ph) {
+  if (!ph) return null;
+  let d = String(ph).split(/[;,]/)[0].replace(/[^0-9+]/g, '');
+  if (d.startsWith('+')) d = d.slice(1);
+  else if (d.startsWith('00')) d = d.slice(2);
+  else if (d.length === 8) d = '357' + d;
+  return /^[0-9]{6,15}$/.test(d) ? d : null;
+}
+
+// Список названий точек: ключ -> точка. У ключа с несколькими точками —
+// узел 0x33 с селектором 1 -> список 0x31 этих точек (как у завода телефон
+// с двумя точками: Ватикан 176815:4 -> 176815:7 -> 0x31 176815:10).
+function poiNames(sym, pois, keys) {
+  const by = new Map();
+  for (const q of pois) {
+    for (const k of new Set(keys(q))) {
+      if (!k) continue;
+      if (!by.has(k)) by.set(k, []);
+      by.get(k).push(q);
+    }
+  }
+  const items = [], extra = [];
+  let g = 0;
+  for (const [k, qs] of by) {
+    if (qs.length === 1) { items.push({ name: k, target: qs[0].pos }); continue; }
+    const gs = sym + ':g' + (g++);
+    const l = names(gs + 'l', qs.map((q) => ({ name: q.name, ref: q.pos, target: q.pos })), null, { t31: true });
+    extra.push(select33(gs, [{ sel: 1, target: l.head }]), ...l.records);
+    items.push({ name: k, target: gs });
+  }
+  const n = names(sym, items, null);
+  return { records: n.records.concat(extra), head: n.head, entries: items.length };
+}
+
+// Оценка размера записи (ссылка — до 5 байт), чтобы раскладывать по блокам.
+function estimate(r) {
+  if (r.bytes) return r.bytes.length;
+  let n = 0;
+  for (const t of r.tokens()) {
+    if (t.u8 !== undefined) n += 1;
+    else if (t.u16 !== undefined) n += 2;
+    else if (t.u32 !== undefined) n += 4;
+    else if (t.v !== undefined) n += t.v < 252 ? 1 : t.v <= 0xffff ? 3 : t.v <= 0xffffff ? 4 : 5;
+    else if (t.raw !== undefined) n += t.raw.length;
+    else if (t.pair !== undefined) n += 6;
+    else n += 5;
+  }
+  return n;
+}
+const keysOf = (r) => (r.keys !== undefined ? r.keys : r.n > 0 ? r.n + 1 : 1);
+
+// Записи группы -> блоки подряд с blk, не больше budget байт и 60 000 ключей
+// в блоке; опора и ширина — общие у группы. Записи не рвутся; следующая
+// запись (список) продолжает предыдущую уже в следующем блоке — так у завода
+// списки городов NZ идут через 3383…3385.
+const BLOCK_BUDGET = 40000;
+function pack(records, blk, origin, budget) {
+  const out = [];
+  let cur = null, bytes = 0, keys = 0;
+  for (const r of records) {
+    const s = estimate(r), k = keysOf(r);
+    if (!cur || (cur.records.length && (bytes + s > (budget || BLOCK_BUDGET) || keys + k > 60000))) {
+      cur = { blk: blk + out.length, origin, width: 24, records: [] };
+      out.push(cur);
+      bytes = 13; keys = 0;
+    }
+    cur.records.push(r);
+    bytes += s; keys += k;
+  }
+  return out;
 }
 
 function bboxOf(pts) {
+
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
   for (const [x, y] of pts) {
     if (x < x0) x0 = x; if (y < y0) y0 = y; if (x > x1) x1 = x; if (y > y1) y1 = y;
@@ -516,8 +644,16 @@ function anchor(pts) {
 function directory(model, opt) {
   const o = opt || {};
   const cb = o.countryBlk;
-  const places = model.places.map((p, i) => Object.assign({ i, streets: [] }, p));
+  const idBase = o.idBase || 0x31000000;
+  const places = model.places.map((p, i) => Object.assign({ i, streets: [], districts: [], pois: [] }, p));
   model.streets.forEach((s, si) => { if (places[s.place]) places[s.place].streets.push(Object.assign({ si }, s)); });
+  const districts = (model.districts || []).map((d, i) => Object.assign({ i, streets: [] }, d));
+  for (const d of districts) places[d.parent].districts.push(d);
+  places.forEach((p) => p.streets.forEach((s) => { if (s.district !== undefined) districts[s.district].streets.push(s); }));
+  // точки интереса: к ближайшему городу (как улицы)
+  const nearest = model.nearest || nearestFn(places);
+  const pois = (o.pois || []).filter((q) => q.name);
+  for (const q of pois) { const c = nearest(q.x, q.y); if (c >= 0) places[c].pois.push(q); }
   // индексы — только те, у которых нашлась хотя бы одна наша улица: у завода
   // у почтовой области 0x04 список улиц есть всегда (28 из 28)
   const pcs = (model.postcodes || []).filter((q) => q.streets.length);
@@ -527,72 +663,112 @@ function directory(model, opt) {
     all.push([p.x, p.y]);
     for (const s of p.streets) for (const q of s.pts) all.push(q);
   }
+  for (const d of districts) all.push([d.x, d.y]);
   for (const q of pcs) for (const pt of q.pts) all.push(pt);
   const box = bboxOf(all);
   const corigin = { x: box.x0, y: box.y0 };
   const rel = (org) => (p) => [p[0] - org.x, p[1] - org.y];
   const crel = rel(corigin);
 
+  // список городов страны: города и районы — районы такие же записи 0x03
   const cityItems = places.map((p) => ({ name: p.name, target: 'city' + p.i, p }));
-  const cn = names('cy:cities', cityItems, 'country');
+  const distItems = districts.map((d) => ({ name: d.name, target: 'dist' + d.i, d }));
+  const cn = names('cy:cities', cityItems.concat(distItems), 'country');
 
-  // почта на уровне страны: список индексов -> 0x04
   const pcItems = pcs.map((q, k) => ({ name: q.code, target: 'pa' + k, q }));
   const pn = pcItems.length ? names('cy:pc', pcItems, 'country') : null;
 
-  // улицы по городам: имя улицы в списке города (нужно и общему списку улиц)
   const streetEntry = new Map();          // номер улицы модели -> ключ имени в списке города
-  const cityBlocks = [];
   const t31Entry = new Map();             // `${индекс}@${улица}` -> ключ витка 0x31
-  const stats = { cities: places.length, streets: 0, blocks: 1, postcodes: pcs.length, centres: 0 };
+  const poiEntry = new Map();             // точка -> ключ её витка в списке категории города
+  const stats = { cities: places.length, districts: districts.length, streets: 0, postcodes: pcs.length,
+                  centres: 0, poisInCities: 0, districtStreets: 0 };
+  const groups = [];                      // [{records, origin}] — города, по порядку
+  const withRecs = places;
   places.forEach((p, k) => {
-    const blk = cb + 1 + k;
     const pts = [[p.x, p.y]];
     for (const s of p.streets) for (const q of s.pts) pts.push(q);
+    for (const d of p.districts) pts.push([d.x, d.y]);
+    for (const q of p.pois) pts.push([q.x, q.y]);
     const b = bboxOf(pts);
     const org = { x: b.x0, y: b.y0 };
     const r = rel(org);
+    const cs = 'city' + p.i;
     const items = p.streets.map((s, j) => ({ name: s.name, target: 'c' + p.i + 's' + j, s }));
     const recs = [];
-    const sn = items.length ? names('c' + p.i, items, 'city' + p.i) : null;
+    const sn = items.length ? names('c' + p.i, items, cs) : null;
     if (sn) items.forEach((it) => streetEntry.set(it.s.si, sn.entryOf(it)));
+    const stSym = new Map(items.map((it) => [it.s.si, it.target]));
     // места города (0x800): своё имя -> точка-центр
-    const pl = list('c' + p.i + ':pl', [{ name: p.name, target: 'ctr' + p.i }], { direct: true, owner: 'city' + p.i });
-    // индексы города (0x1000): индекс -> 0x31 со своими улицами
+    const pl = list('c' + p.i + ':pl', [{ name: p.name, target: 'ctr' + p.i }], { direct: true, owner: cs });
+    // индексы города (0x1000): индекс -> 0x31 (или индекс 0x32 над 0x31) со своими улицами
     const mine = pcs.map((q, qk) => ({ q, qk, st: q.streets.filter((si) => model.streets[si].place === p.i) }))
       .filter((x) => x.st.length);
     const ppItems = mine.map((x) => ({ name: x.q.code, target: 'c' + p.i + 'pc' + x.qk, x }));
-    const pp = ppItems.length ? names('c' + p.i + ':pcn', ppItems, 'city' + p.i) : null;
-    recs.push(city('city' + p.i, {
+    const pp = ppItems.length ? names('c' + p.i + ':pcn', ppItems, cs) : null;
+    const pcRecs = [];
+    for (const it of ppItems) {
+      const sts = it.x.st.map((si) => ({ si, name: model.streets[si].name, ref: streetEntry.get(si), target: stSym.get(si) }));
+      const l = names(it.target, sts, pp.entryOf(it), { t31: true });
+      pcRecs.push(...l.records);
+      it.target = l.head;                         // список читает target лениво, при сборке
+      sts.forEach((x) => t31Entry.set(it.x.qk + '@' + x.si, l.entryOf(x)));
+    }
+    // поиск POI в городе (0x4000): узел 0x33, селектор 1 -> названия всех точек
+    // города (как Валлетта 245491:1847); категории (цикл 0x2000) -> 0x31 точек
+    let poiTree = null, cats = [], poiRecs = [];
+    if (p.pois.length) {
+      const pn2 = poiNames('c' + p.i + ':pn', p.pois, (q) => [q.name].concat(rotations(q.name)));
+      poiTree = 'c' + p.i + ':pt';
+      poiRecs.push(select33(poiTree, [{ sel: 1, target: pn2.head }]), ...pn2.records);
+      const byCat = new Map();
+      for (const q of p.pois) { if (!byCat.has(q.cat)) byCat.set(q.cat, []); byCat.get(q.cat).push(q); }
+      for (const [cat, qs] of [...byCat].sort((a, b) => a[0] - b[0])) {
+        const its = qs.map((q) => ({ name: q.name, ref: q.pos, target: q.pos, q }));
+        const cl = names('c' + p.i + ':k' + cat, its, cs, { t31: true });
+        cats.push({ cat, target: cl.head });
+        poiRecs.push(...cl.records);
+        its.forEach((it) => poiEntry.set(it.q, cl.entryOf(it)));
+      }
+      stats.poisInCities += p.pois.length;
+    }
+    const dl = p.districts;
+    recs.push(city(cs, {
       name: cn.entryOf(cityItems[k]), list: sn && sn.head, last: sn && sn.last,
       center: r([p.x, p.y]), min: r([b.x0, b.y0]), max: r([b.x1, b.y1]),
-      id: (o.idBase || 0x31000000) + p.i,
-      places: 'c' + p.i + ':pl', postcodes: pp && pp.head, centre: 'ctr' + p.i,
+      id: idBase + p.i, places: 'c' + p.i + ':pl', postcodes: pp && pp.head, centre: 'ctr' + p.i,
+      poi: poiTree, cats, next: k + 1 < withRecs.length ? 'city' + withRecs[k + 1].i : null,
+      link: dl.length ? 'dist' + dl[0].i : null,
     }));
     if (sn) recs.push(...sn.records);
     recs.push(pl);
     if (pp) {
       recs.push(...pp.records);
-      for (const it of ppItems) {
-        const sts = it.x.st.map((si) => ({ si, name: streetEntry.get(si), sort: model.streets[si].name,
-                                           target: 'c' + p.i + 's' + p.streets.findIndex((s) => s.si === si) }))
-          .sort((a, b) => (a.sort < b.sort ? -1 : a.sort > b.sort ? 1 : 0));
-        recs.push(list31(it.target, sts, { owner: pp.entryOf(it) }));
-        sts.forEach((x, j) => t31Entry.set(it.x.qk + '@' + x.si, it.target + '#' + j));
-      }
+        recs.push(...pcRecs);
     }
-    recs.push(centre('ctr' + p.i, { name: 'c' + p.i + ':pl#0', center: r([p.x, p.y]),
-                                     id: (o.idBase || 0x31000000) + 0x100000 + p.i }));
+    recs.push(...poiRecs);
+    recs.push(centre('ctr' + p.i, { name: 'c' + p.i + ':pl#0', center: r([p.x, p.y]), id: idBase + 0x100000 + p.i }));
     stats.centres++;
     items.forEach((it) => {
       const sb = bboxOf(it.s.pts);
-      recs.push(street(it.target, {
-        center: r(anchor(it.s.pts)), min: r([sb.x0, sb.y0]), max: r([sb.x1, sb.y1]),
-      }));
+      recs.push(street(it.target, { center: r(anchor(it.s.pts)), min: r([sb.x0, sb.y0]), max: r([sb.x1, sb.y1]) }));
     });
     stats.streets += items.length;
-    cityBlocks.push({ blk, origin: org, width: 24, records: recs });
-    stats.blocks++;
+    // районы: запись 0x03, улицы — 0x31 со ссылками на имена улиц города
+    dl.forEach((d, j) => {
+      const ds = 'dist' + d.i;
+      const sts = d.streets.map((s) => ({ name: s.name, ref: streetEntry.get(s.si), target: stSym.get(s.si) }))
+        .filter((x) => x.ref && x.target);
+      const l = sts.length ? names('d' + d.i, sts, ds, { t31: true }) : null;
+      recs.push(city(ds, {
+        name: cn.entryOf(distItems[d.i]), list: l && l.head, last: l && l.last,
+        center: r([d.x, d.y]), min: r([d.x, d.y]), max: r([d.x, d.y]), id: idBase + 0x200000 + d.i,
+        next: 'dist' + dl[(j + 1) % dl.length].i, link: cs, centre: 'ctr' + p.i,
+      }));
+      if (l) recs.push(...l.records);
+      stats.districtStreets += sts.length;
+    });
+    groups.push({ records: recs, origin: org });
   });
 
   // почтовые области 0x04: города индекса и его улицы (-> витки 0x31 в городах)
@@ -608,18 +784,41 @@ function directory(model, opt) {
   });
 
   // все улицы страны (вид 7): имя -> имя улицы в списке её города
-  const allItems = model.streets.map((s, si) => ({ name: s.name, target: streetEntry.get(si) }))
-    .filter((x) => x.target);
+  const allItems = model.streets.map((s, si) => ({ name: s.name, target: streetEntry.get(si) })).filter((x) => x.target);
   const an = allItems.length ? names('cy:streets', allItems, null) : null;
-
+  // поиск POI в стране (вид 0x10): узел 0x33, селектор 9 -> названия всех точек
+  // (Ватикан 176815:0, Мальта 245455:2)
+  let cpoi = null, cpRecs = [];
+  if (pois.length) {
+    // первый селектор 9 — телефоны (у Мальты индекс с приставкой «356»),
+    // второй 9 — названия с поворотами слов
+    const sels = [], recs = [];
+    const ph = pois.filter((q) => phoneKey(q.phone));
+    if (ph.length) {
+      const l = poiNames('cy:ph', ph, (q) => [phoneKey(q.phone)]);
+      sels.push({ sel: 9, target: l.head }); recs.push(...l.records);
+    }
+    const cp = poiNames('cy:pn', pois, (q) => [q.name].concat(rotations(q.name)));
+    sels.push({ sel: 9, target: cp.head }); recs.push(...cp.records);
+    cpoi = 'cy:pt';
+    cpRecs = [select33(cpoi, sels)].concat(recs);
+    stats.poiNames = cp.entries; stats.phones = ph.length;
+  }
   const cx = Math.round((box.x0 + box.x1) / 2), cyy = Math.round((box.y0 + box.y1) / 2);
   const countryRecs = [country('country', {
     code: model.code, iso2: model.iso2, iso3: model.iso3,
-    list: cn.head, last: cn.last, postcodes: pn && pn.head, streets: an && an.head,
+    list: cn.head, last: cn.last, postcodes: pn && pn.head, streets: an && an.head, poi: cpoi,
     center: crel([cx, cyy]), min: [0, 0], max: crel([box.x1, box.y1]),
-  })].concat(pn ? pn.records : [], cn.records, paRecs, an ? an.records : []);
+  })].concat(pn ? pn.records : [], cn.records, paRecs, an ? an.records : [], cpRecs);
 
-  return { blocks: [{ blk: cb, origin: corigin, width: 24, records: countryRecs }].concat(cityBlocks), stats };
+  // раскладка по блокам подряд: страна, затем города
+  const blocks = pack(countryRecs, cb, corigin);
+  for (const g of groups) {
+    const bs = pack(g.records, cb + blocks.length, g.origin);
+    blocks.push(...bs);
+  }
+  stats.blocks = blocks.length;
+  return { blocks, stats, poiEntry };
 }
 
 // Названия страны по языкам интерфейса. Источник — таблица названий стран в
@@ -632,6 +831,36 @@ const CY_NAMES = {
   pol: 'CYPR', tur: 'KIBRIS',
 };
 
+// Ближайший город: сетка с ячейкой ~5 км, поиск расширяющимися кольцами.
+function nearestFn(pl) {
+  const C = 5000;
+  const grid = new Map();
+  pl.forEach((p, i) => {
+    const k = Math.floor(p.x / C) + ',' + Math.floor(p.y / C);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  });
+  return (x, y) => {
+    if (!pl.length) return -1;
+    const cx = Math.floor(x / C), cy = Math.floor(y / C);
+    let best = -1, bd = Infinity;
+    for (let r = 0; r < 400; r++) {
+      for (let dx = -r; dx <= r; dx++) {
+        for (let dy = -r; dy <= r; dy++) {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+          for (const i of grid.get((cx + dx) + ',' + (cy + dy)) || []) {
+            const p = pl[i], d = (p.x - x) * (p.x - x) + (p.y - y) * (p.y - y);
+            if (d < bd) { bd = d; best = i; }
+          }
+        }
+      }
+      // всё, что дальше кольца r, дальше (r * C)^2 — можно остановиться
+      if (best >= 0 && bd <= Math.pow(r * C, 2)) break;
+    }
+    return best;
+  };
+}
+
 // Города и улицы из того же графа, что идёт в XAC (xacroads.graphFromGeoJSON):
 // имена совпадают с именами XAC буква в букву. Улица привязывается к
 // ближайшему городу по середине каждого ребра — как в zenModel для
@@ -642,15 +871,9 @@ function modelFromRoads(fc, places, opt) {
   const graph = R.graphFromGeoJSON(fc, { classes: o.classes });
   const pl = places.filter((p) => p && p.lon != null && p.lat != null).map((p) => ({
     name: R.latinize(p.name), x: Math.round(p.lon * 72000), y: Math.round(p.lat * (40000000 / 360)),
+    kind: p.kind,
   }));
-  const nearest = (x, y) => {
-    let best = -1, bd = Infinity;
-    pl.forEach((p, i) => {
-      const d = (p.x - x) * (p.x - x) + (p.y - y) * (p.y - y);
-      if (d < bd) { bd = d; best = i; }
-    });
-    return best;
-  };
+  const nearest = nearestFn(pl);
   const by = new Map();
   const rawTo = new Map();                       // сырое имя OSM -> показываемые (как в XAC)
   for (const e of graph.edges) {
@@ -659,11 +882,32 @@ function modelFromRoads(fc, places, opt) {
       rawTo.get(e.raw).add(e.name);
     }
   }
+  // addr:city домов: улица (сырое имя) -> за какой город голосуют адреса на ней.
+  // Голос учитывается, только если этот город не дальше 5 км от ребра.
+  const byName = new Map(pl.map((p, i) => [p.name, i]));
+  const votes = new Map();                       // сырое имя -> Map(город -> голоса)
+  for (const a of o.addrs || []) {
+    if (!a.street || !a.city) continue;
+    const ri = graph.byRaw.get(R.latinize(a.street));
+    const ci = byName.get(R.latinize(a.city).toUpperCase().replace(/\s+/g, ' ').trim());
+    if (ri === undefined || ci === undefined) continue;
+    if (!votes.has(ri)) votes.set(ri, new Map());
+    votes.get(ri).set(ci, (votes.get(ri).get(ci) || 0) + 1);
+  }
+  const km5 = Math.pow(5000 / 0.9, 2);           // ~5 км в единицах карты (грубо)
+  let byVote = 0;
   for (const e of graph.edges) {
     if (e.name < 0) continue;
     const a = graph.nodes[e.a], b = graph.nodes[e.b];
-    const place = nearest((a.x + b.x) / 2, (a.y + b.y) / 2);
+    const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+    let place = nearest(mx, my);
     if (place < 0) continue;
+    const v = e.raw >= 0 ? votes.get(e.raw) : null;
+    if (v) {
+      const [ci] = [...v].sort((x, y) => y[1] - x[1])[0];
+      const q = pl[ci];
+      if (ci !== place && (q.x - mx) * (q.x - mx) + (q.y - my) * (q.y - my) < km5) { place = ci; byVote++; }
+    }
     const k = e.name + '@' + place;
     let st = by.get(k);
     if (!st) by.set(k, st = { name: graph.names[e.name], place, pts: [] });
@@ -699,18 +943,39 @@ function modelFromRoads(fc, places, opt) {
     const streetsIn = [...q.streets].filter((si) => cities.includes(streets[si].place));
     postcodes.push({ code: q.code, pts: q.pts, cities: cities.sort((a, b) => a - b), streets: streetsIn });
   }
+  // районы: улица города с районами — ещё и в ближайшем районе, если он ближе
+  // центра города (в списке города улица остаётся, район ссылается на неё)
+  const districts = (o.districts || []).map((d) => ({
+    name: R.latinize(d.name), x: Math.round(d.lon * 72000), y: Math.round(d.lat * (40000000 / 360)),
+    parent: d.parent, kind: d.kind,
+  })).filter((d) => pl[d.parent]);
+  const ofPlace = new Map();
+  districts.forEach((d, i) => { if (!ofPlace.has(d.parent)) ofPlace.set(d.parent, []); ofPlace.get(d.parent).push(i); });
+  for (const st of streets) {
+    const ds = ofPlace.get(st.place);
+    if (!ds) continue;
+    const [ax, ay] = anchor(st.pts);
+    const c = pl[st.place];
+    let best = -1, bd = (c.x - ax) * (c.x - ax) + (c.y - ay) * (c.y - ay);
+    for (const di of ds) {
+      const d = districts[di], x = (d.x - ax) * (d.x - ax) + (d.y - ay) * (d.y - ay);
+      if (x < bd) { bd = x; best = di; }
+    }
+    if (best >= 0) st.district = best;
+  }
   return { code: o.code || 113, iso2: o.iso2 || 'CY', iso3: o.iso3 || 'CYP',
-           places: pl, streets, postcodes };
+           places: pl, streets, postcodes, districts, byVote, nearest };
 }
 
 // Адреса с почтовым индексом из OSM: [{x, y, pc, street}].
 function readAddresses(pbf) {
   const P = require('./osmpbf');
-  const want = (t) => t['addr:postcode'] !== undefined;
+  const want = (t) => t['addr:postcode'] !== undefined || (t['addr:city'] !== undefined && t['addr:street'] !== undefined);
   const idx = P.read(pbf, { node: want, way: want });
   const out = [];
   const add = (lon, lat, t) => out.push({ x: Math.round(lon * 72000), y: Math.round(lat * (40000000 / 360)),
-                                          pc: String(t['addr:postcode']).trim(), street: t['addr:street'] || '' });
+                                          pc: String(t['addr:postcode'] || '').trim(), street: t['addr:street'] || '',
+                                          city: t['addr:city'] || '' });
   for (const p of idx.points) add(p.lon / 1e7, p.lat / 1e7, p.tags);
   for (const w of idx.ways) {
     const c = P.center(idx, w.refs);
@@ -729,7 +994,7 @@ function readAddresses(pbf) {
 function entriesFrom(get, ref) {
   const g = get(ref[0]);
   const e = g.map.get(ref[1]);
-  if (!e || e.type !== 0x30) throw new Error('в ' + ref + ' не список 0x30');
+  if (!e || (e.type !== 0x30 && e.type !== 0x31)) throw new Error('в ' + ref + ' не список 0x30/0x31');
   const out = [];
   const startEl = g.els.find((x) => x.key === ref[1] || (x.keys && x.keys[0] === ref[1]))
                || g.els.find((x) => x.keys && x.keys[1] === ref[1]);
@@ -748,17 +1013,10 @@ function namesUnder(get, ref) {
   const g = get(ref[0]);
   const e = g.map.get(ref[1]);
   if (!e) throw new Error('в ' + ref + ' пусто');
-  if (e.type === 0x30) return entriesFrom(get, ref);
+  if (e.type === 0x30 || e.type === 0x31) return entriesFrom(get, ref);
   if (e.type !== 0x32) throw new Error('в ' + ref + ' не список и не индекс: 0x' + e.type.toString(16));
-  const seen = new Map();
-  const kids = [e].concat(g.els.filter((x) => x.loop && x.type === 0x32 && x.key > e.key &&
-                                              x.key <= e.key + e.f['65'] + 1));
-  for (const k of kids) {
-    const t = k.f['3c'];
-    if (!t) continue;
-    for (const it of namesUnder(get, t)) if (!seen.has(it.key)) seen.set(it.key, it);
-  }
-  return [...seen.values()];
+  // индекс: как прошивка (FUN_08cd5d10 + FUN_08cd4400) — с его 0x2d подряд
+  return require('./litcity').enumerate(get, ref, null, 10000000).out;
 }
 
 function walk(get, opt) {
@@ -812,11 +1070,9 @@ function walk(get, opt) {
     if (pcRef && pcRef[0] >= 0) {
       for (const pe of namesUnder(get, pcRef)) {
         const l = get(pe.target[0]).map.get(pe.target[1]);
-        if (!l || l.type !== 0x31) { res.errors.push('индекс ' + pe.name + ' в городе: не 0x31'); continue; }
-        const g = get(pe.target[0]);
-        const its = [l].concat(g.els.filter((x) => x.loop && x.type === 0x31 && x.key > l.key && x.key <= l.key + 200));
-        for (const x of its.slice(0, (l.f['56*'] || []).length + 1)) {
-          const t = get(x.f['3c'][0]).map.get(x.f['3c'][1]);
+        if (!l || (l.type !== 0x31 && l.type !== 0x32)) { res.errors.push('индекс ' + pe.name + ' в городе: не 0x31'); continue; }
+        for (const x of namesUnder(get, pe.target)) {
+          const t = get(x.target[0]).map.get(x.target[1]);
           if (!t || t.type !== 7) res.errors.push('0x31 индекса ' + pe.name + ': не улица');
         }
         res.cityPostcodes = (res.cityPostcodes || 0) + 1;
@@ -854,6 +1110,6 @@ function walk(get, opt) {
   return res;
 }
 
-module.exports = { centre, postArea, list31, readAddresses, t18, pos4, countryRecord, spellStats, statNames, STAT_IDS, modelFromRoads, walk, namesUnder, entriesFrom, encode, root, list, index, country, city, street, layer, verbatim,
+module.exports = { layout, rotations, phoneKey, poiNames, select33, pack, estimate, nearestFn, centre, postArea, list31, readAddresses, t18, pos4, countryRecord, spellStats, statNames, STAT_IDS, modelFromRoads, walk, namesUnder, entriesFrom, encode, root, list, index, country, city, street, layer, verbatim,
                    layout, assemble, transplant, names, directory, anchor, bboxOf, prefix,
                    CY_NAMES, LIST_MAX, DIRECT_MAX };

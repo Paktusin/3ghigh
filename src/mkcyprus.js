@@ -57,24 +57,41 @@ function component(outDir, name, file, data, root, log) {
   return { name, file, size: data.length };
 }
 
+// Классы дорог образа — один набор для XAC (граф, имена, дома) и адресного
+// справочника LIT. С 20.10 — вся сеть из roads.geojson: до этого брались
+// только магистрали, и в Лимасоле было видно около десятка улиц.
+const DEFAULT_CLASSES = ['motorway', 'motorway_link', 'trunk', 'trunk_link', 'primary',
+  'primary_link', 'secondary', 'secondary_link', 'tertiary', 'tertiary_link',
+  'unclassified', 'residential'];
+
 function mkcyprus(outDir, opt) {
   const o = opt || {};
   const log = o.log || (() => {});
   const root = o.root || dataset.resolveRoot();
   const roadsFile = o.roads || 'out/cyp/roads.geojson';
+  const classes = o.classes || DEFAULT_CLASSES;
   const out = { outDir, components: [] };
   fs.mkdirSync(outDir, { recursive: true });
 
   // города — один список для XAC и LIT, двойники склеены (src/places.js)
   const pbf = o.pbf || 'out/cyp/cyprus-latest.osm.pbf';
-  const rawPlaces = o.places || JSON.parse(fs.readFileSync('out/cyp/places_geo.json', 'utf8'));
-  const places = placesMod.dedupe(rawPlaces, fs.existsSync(pbf) ? placesMod.englishNames(pbf) : null);
-  if (places.length !== rawPlaces.length) log('города: ' + rawPlaces.length + ' -> ' + places.length + ' (склеены двойники)');
+  // без --places — города и районы прямо из OSM (place=city…hamlet, районы —
+  // suburb/quarter/neighbourhood при своём городе)
+  let places, districts = null;
+  if (!o.places && fs.existsSync(pbf)) {
+    const osm = placesMod.fromOsm(pbf);
+    places = osm.places; districts = osm.districts;
+    log('города из OSM: ' + places.length + ', районов ' + districts.length);
+  } else {
+    const rawPlaces = o.places || JSON.parse(fs.readFileSync('out/cyp/places_geo.json', 'utf8'));
+    places = placesMod.dedupe(rawPlaces, fs.existsSync(pbf) ? placesMod.englishNames(pbf) : null);
+    if (places.length !== rawPlaces.length) log('города: ' + rawPlaces.length + ' -> ' + places.length + ' (склеены двойники)');
+  }
 
   // ---- XAC: свой контейнер ----
   log('=== XAC: свой контейнер ===');
   const xacSrc = fs.readdirSync(path.join(root, 'pkgdb', 'XAC')).find((f) => /\.db$/i.test(f));
-  const x = mkxac({ root, roads: roadsFile, classes: o.classes, places,
+  const x = mkxac({ root, roads: roadsFile, classes, places,
                     houses: o.houses, code: o.code, log });
   out.components.push(component(outDir, 'XAC', xacSrc, x.container, root, log));
   out.xac = { blocks: x.blocks, nodes: x.nodes, edges: x.edges };
@@ -105,7 +122,7 @@ function mkcyprus(outDir, opt) {
   // адресный справочник: те же города и улицы, что в XAC (тот же граф, те же классы)
   const addr = litaddr.modelFromRoads(JSON.parse(fs.readFileSync(roadsFile, 'utf8')),
                                       places,
-                                      { classes: o.classes,
+                                      { classes, districts,
                                         addrs: litaddr.readAddresses(o.pbf || 'out/cyp/cyprus-latest.osm.pbf') });
   const factory = ['LIT', 'LIT2', 'LIT3', 'LIT4'].map((d) => path.join(root, 'pkgdb', d));
   const l = cyplit.build(pois, { from: litPath, addr, factory });
@@ -179,7 +196,7 @@ function mkcyprus(outDir, opt) {
   return out;
 }
 
-module.exports = { mkcyprus };
+module.exports = { DEFAULT_CLASSES, mkcyprus };
 
 if (require.main === module) {
   const args = process.argv.slice(2);
@@ -189,12 +206,12 @@ if (require.main === module) {
     console.error('использование: node src/mkcyprus.js <каталог-выхода> [--roads ...] [--places ...] [--houses ...]');
     process.exit(2);
   }
-  const places = flag('places', 'out/cyp/places_geo.json');
+  const places = flag('places', null);
   const houses = flag('houses', 'out/cyp/cyprus-latest.osm.pbf');
   const r = mkcyprus(outDir, {
     roads: flag('roads', 'out/cyp/roads.geojson'),
-    classes: flag('classes', 'motorway,motorway_link,trunk,trunk_link,primary,primary_link').split(','),
-    places: fs.existsSync(places) ? JSON.parse(fs.readFileSync(places, 'utf8')) : null,
+    classes: flag('classes', DEFAULT_CLASSES.join(',')).split(','),
+    places: places && fs.existsSync(places) ? JSON.parse(fs.readFileSync(places, 'utf8')) : null,
     houses: fs.existsSync(houses) ? readHouses(houses) : null,
     pbf: houses,
     code: flag('code', 'CY00'),

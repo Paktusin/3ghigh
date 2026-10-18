@@ -143,7 +143,9 @@ function countrySet(A, model, C, pois, template) {
   for (const p of model.places) { xs.push(p.x); ys.push(p.y); }
   for (const st of model.streets) for (const q of st.pts) { xs.push(q[0]); ys.push(q[1]); }
   const cap = model.places.find((p) => /^(NICOSIA|LEFKOSIA)$/.test(p.name));
-  const min = [Math.min(...xs), Math.min(...ys)], max = [Math.max(...xs), Math.max(...ys)];
+  const lo = (a) => a.reduce((m, v) => (v < m ? v : m), Infinity);
+  const hi = (a) => a.reduce((m, v) => (v > m ? v : m), -Infinity);
+  const min = [lo(xs), lo(ys)], max = [hi(xs), hi(ys)];
   const center = cap ? [cap.x, cap.y] : [Math.round((min[0] + max[0]) / 2), Math.round((min[1] + max[1]) / 2)];
   const rec = A.countryRecord({ template, blk: C, code: model.code, f3a: 2, lang: 5,
                                 car: model.iso2, cc: model.cc || model.iso2, iso2: model.iso2,
@@ -183,28 +185,50 @@ function buildAddr(pois, o, tpl, cap, slots) {
   const layerOf = (p) => (!fac ? 0 : fac.t2l[p.cat] !== undefined ? fac.t2l[p.cat] : NONMAP_LAYER);
   const groups = Array.from({ length: nl }, () => []);
   for (const p of pois) groups[layerOf(p)].push(p);
-  const layers = [];
+  // Два прохода. Первый делит точки на листья (с запасом по размеру: ссылка
+  // 0x66 у каждой точки потом своя и длиннее), отсюда позиции точек (лист,
+  // 1 + номер). По ним строится справочник: названия POI -> точки, списки
+  // категорий города -> точки. Второй проход пишет те же листья, а 0x66
+  // точки — на её виток в списке категории города (так у завода: Мальта
+  // 102270:88 -> 93241:2264, виток 0x31 категории 8 города RABAT).
+  const plans = [];
   for (let li = 0; li < nl; li++) {
     const Ni = next++;
     const g = groups[li];
+    if (!g.length) { plans.push({ li, Ni, g }); continue; }
+    const donors = Array.from({ length: slots }, (_, i) => ({ blk: Ni + 1 + i, size: Math.floor(cap * 0.85) }));
+    const plan = T.plan(g, donors, { ref: o.ref || [Ni + 1, 0] });
+    const used = plan.leaves.map((l) => l.slot.blk).sort((a, b) => a - b);
+    if (used.some((b, i) => b !== Ni + 1 + i)) throw new Error('номера листьев идут не подряд');
+    plans.push({ li, Ni, g, plan, donors });
+    next = Ni + 1 + used.length;
+  }
+  const posOf = new Map();
+  for (const P1 of plans) if (P1.plan) for (const lf of P1.plan.leaves) lf.pois.forEach((q, i) => posOf.set(q, [lf.slot.blk, 1 + i]));
+  const C = next;
+  const wrap = pois.filter((q) => posOf.has(q)).map((q) => ({ name: q.name, cat: q.cat, x: q.x, y: q.y,
+                                                                phone: q.phone, pos: posOf.get(q), src: q }));
+  const dir = A.directory(o.addr, { countryBlk: C, pois: wrap });
+  const dpos = A.layout(dir.blocks);
+  const refOf = new Map();
+  for (const [w, sym] of dir.poiEntry) if (dpos.has(sym)) refOf.set(w.src, dpos.get(sym));
+
+  const layers = [];
+  for (const { li, Ni, g, plan, donors } of plans) {
     if (!g.length) {                                  // пустой слой: заголовок и пустой узел
       layers.push({ idx: li, nodeBlk: Ni, leaves: [], node: B.writeBlock(emptyLayer(li), Ni), pois: [] });
       continue;
     }
-    const donors = Array.from({ length: slots }, (_, i) => ({ blk: Ni + 1 + i, size: cap }));
-    const r = T.build(g, donors, { ref: o.ref || [Ni + 1, 0], nodeBlk: Ni,
+    const r = T.build(g, donors, { plan, cap, refOf: (q) => refOf.get(q) || o.ref || [Ni + 1, 0], nodeBlk: Ni,
                                    layer: (lv) => ({ f4c: li, f41: g.length,
                                                      b: [Math.min(...lv.map((l) => l.blk)), 0],
                                                      plus: [Math.max(...lv.map((l) => l.blk)), 0] }) });
     const used = r.leaves.slice().sort((a, b) => a.blk - b.blk);
-    if (used.some((l, i) => l.blk !== Ni + 1 + i)) throw new Error('номера листьев идут не подряд');
     layers.push({ idx: li, nodeBlk: Ni, leaves: used, node: r.node.bytes, pois: g });
-    next = Ni + 1 + used.length;
   }
   const N = layers[0].nodeBlk;
   const used = [].concat(...layers.map((l) => l.leaves));
-  const C = next;
-  const dir = A.directory(o.addr, { countryBlk: C });
+  const poiRefs = refOf.size;
 
   // корень и списки названий страны
   const fallback = [{ code: Buffer.from('2a0000', 'hex'), id: 0, tableCount: 0, table: null },
@@ -260,6 +284,7 @@ function buildAddr(pois, o, tpl, cap, slots) {
                                         last: l.leaves.length ? l.leaves[l.leaves.length - 1].blk : null,
                                         leaves: l.leaves.map((x) => x.blk) })),
            layerOf,
+           poiRefs, dirStats: dir.stats,
            cities: dir.stats.cities, streets: dir.stats.streets, postcodes: dir.stats.postcodes,
            bytes: list.reduce((a, b) => a + b.length, 0),
            parts: { root: list[0].length, tables: fac ? sizeOf(1, EU_TABLE_LAST_BLOCK + 1) : 0,
@@ -343,6 +368,45 @@ function verify(buf, r, pois) {
     }
     if (r.countryBlk !== undefined) {
       rep.addr = A.walk(ks.get);
+      // поиск POI по названию — эмулятор пути прошивки (src/litcity.js poiSearch):
+      // страна, вид 0x10 (последняя 0x36) -> узел 0x33 -> второй селектор 9
+      // (названия), первый 9 (телефоны); город, 0x4000 -> селектор 1
+      const LC = require('./litcity');
+      const root0 = ks.get(0).map.get(0);
+      const ce = A.entriesFrom(ks.get, root0.f['3c'])[0].target;
+      const cty = ks.get(ce[0]).map.get(ce[1]);
+      const cr = [cty.f['36']].concat(cty.f['36*'] || []);
+      const node = cr[4];
+      if (node && node[0] >= 0) {
+        // телефонов нет — селектор 9 один, и это названия
+        const two = LC.selectors(ks.get, node).filter((x) => x.sel === 9).length > 1;
+        const nm = LC.poiSearch(ks.get, node, 9, two ? 1 : 0);
+        const ph = two ? LC.poiSearch(ks.get, node, 9, 0) : { names: 0, pois: 0, bad: [] };
+        rep.poiSearch = { names: nm.names, pois: nm.pois, bad: nm.bad.length + ph.bad.length,
+                          phones: ph.names, phonePois: ph.pois, sample: nm.sample, cities: 0, cityPois: 0 };
+        // города: 0x4000 — последняя 0x36 записи города
+        for (const c of LC.enumerate(ks.get, cr[0], null, 1e6).out) {
+          const city = ks.get(c.target[0]).map.get(c.target[1]);
+          if (!city || city.type !== 3 || !(city.b1 & 0x40)) continue;
+          const rr = [city.f['36']].concat(city.f['36*'] || []);
+          const t = rr[rr.length - 1];
+          if (!t || t[0] < 0) continue;
+          const cs = LC.poiSearch(ks.get, t, 1, 0);
+          rep.poiSearch.cities++; rep.poiSearch.cityPois += cs.pois; rep.poiSearch.bad += cs.bad.length;
+        }
+        // 0x66 точки -> виток 0x31 категории её города, а его 0x3c — сама точка
+        let ok = 0, n = 0;
+        for (const L of lays) for (const b of L.leaves) {
+          for (const e of ks.get(b).els) {
+            if (e.type !== 0x24 || n >= 2000) continue;
+            n++;
+            const back = e.f['66'], t = back && back[0] >= 0 ? ks.get(back[0]).map.get(back[1]) : null;
+            const it = t && t.type === 0x31 ? ks.get(back[0]).els.find((x) => (x.keys ? x.keys[1] : x.key) === back[1]) : null;
+            if (it && it.f['3c'] && it.f['3c'][0] === b && it.f['3c'][1] === e.key) ok++;
+          }
+        }
+        rep.poiSearch.backOk = ok; rep.poiSearch.backSeen = n;
+      }
       // набор стран: запись 7000 ведёт на запись 0x02 с тем же кодом, у каждой
       // статистики позиция — та же страна; 0x40 корня = записей 0x18 подряд с (1, 0)
       const root = ks.get(0).map.get(0);
@@ -384,13 +448,17 @@ function verify(buf, r, pois) {
   }
   rep.bad = rep.keysOk !== rep.blocks || rep.parsedOk !== rep.blocks || rep.leavesEnd !== r.leaves ||
             rep.poisBack !== r.pois || rep.hit !== rep.seen || rep.poiPath === false || rep.layerHdr === false ||
-            (rep.emul && (rep.emul.cities !== r.cities || rep.emul.notCity || rep.emul.byCode !== 'ок')) ||
+            (rep.poiSearch && (rep.poiSearch.bad || rep.poiSearch.pois !== (r.dirStats.poisInCities || 0) ||
+                               rep.poiSearch.cityPois !== (r.dirStats.poisInCities || 0) ||
+                               rep.poiSearch.backOk !== rep.poiSearch.backSeen)) ||
+            (rep.emul && (rep.emul.cities !== r.cities + ((r.dirStats && r.dirStats.districts) || 0) || rep.emul.notCity || rep.emul.byCode !== 'ок')) ||
             (rep.countrySet && (!rep.countrySet.length || rep.countrySet.some((c) => !c.ok) ||
                                 rep.tableCount.root !== rep.tableCount.found)) ||
             (rep.addr && ((rep.addr.postcodes || 0) !== (r.postcodes || 0) ||
                           (rep.addr.centres || 0) !== r.cities || (rep.addr.allStreets || 0) !== r.streets)) ||
-            (rep.addr && (rep.addr.errors.length > 0 || rep.addr.cities.length !== r.cities ||
-                          rep.addr.streets !== r.streets));
+            (rep.addr && (rep.addr.errors.length > 0 ||
+                          rep.addr.cities.length !== r.cities + ((r.dirStats && r.dirStats.districts) || 0) ||
+                          rep.addr.streets !== r.streets + ((r.dirStats && r.dirStats.districtStreets) || 0)));
   return rep;
 }
 
@@ -407,7 +475,8 @@ function report(rep, r, log) {
   if (rep.addr) {
     const a = rep.addr;
     log('адреса: корень -> «' + a.countryName.join(', ') + '» -> страна ' + a.code + ' ' + a.iso.join('/') +
-        ' -> городов ' + a.cities.length + ' из ' + r.cities + ' -> улиц ' + a.streets + ' из ' + r.streets +
+        ' -> городов и районов ' + a.cities.length + ' из ' + (r.cities + ((r.dirStats && r.dirStats.districts) || 0)) +
+        ' -> улиц ' + a.streets + ' из ' + (r.streets + ((r.dirStats && r.dirStats.districtStreets) || 0)) +
         (a.errors.length ? ', ошибок ' + a.errors.length + ': ' + a.errors.slice(0, 3).join('; ') : ''));
     log('  индексы страны -> 0x04: ' + (a.postcodes || 0) + ' из ' + (r.postcodes || 0) +
         '; индексы в городах -> 0x31: ' + (a.cityPostcodes || 0) + '; точки-центры 0x24: ' + (a.centres || 0) +
@@ -419,6 +488,16 @@ function report(rep, r, log) {
     log('набор стран (0x18/7000): ' + rep.countrySet.map((c) => c.code + ' -> (' + c.pos + ')' + (c.ok ? '' : ' НЕ 0x02')).join(', ') +
         '; статистик символов ' + rep.stats + '; записей таблицы: в корне ' + rep.tableCount.root +
         ', подряд с (1,0) ' + rep.tableCount.found);
+  }
+  if (r.dirStats) log('районы: ' + r.dirStats.districts + ' (записи 0x03 в списке городов страны, улиц по 0x31: ' +
+                     r.dirStats.districtStreets + ')');
+  if (rep.poiSearch) {
+    const q = rep.poiSearch;
+    log('поиск POI (litcity.poiSearch): страна, селектор 9 «названия» — имён ' + q.names + ' -> точек ' + q.pois +
+        ' (напр. «' + q.sample[0] + '»); 9 «телефоны» — ' + q.phones + ' -> ' + q.phonePois +
+        '; города с 0x4000: ' + q.cities + ', селектор 1 -> точек ' + q.cityPois +
+        '; 0x66 точки -> виток 0x31 категории города и обратно: ' + q.backOk + ' из ' + q.backSeen +
+        (q.bad ? '; ОШИБОК ' + q.bad : ''));
   }
   log(rep.bad ? 'ЕСТЬ РАСХОЖДЕНИЯ' : 'расхождений нет');
 }

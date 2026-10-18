@@ -451,7 +451,7 @@ if (require.main === module) {
   const houses = flag('houses', 'out/cyp/cyprus-latest.osm.pbf');
   const r = mkxac({
     roads: flag('roads', 'out/cyp/roads.geojson'),
-    classes: flag('classes', 'motorway,motorway_link,trunk,trunk_link,primary,primary_link').split(','),
+    classes: flag('classes', require('./mkcyprus').DEFAULT_CLASSES.join(',')).split(','),
     places: fs.existsSync(places) ? JSON.parse(fs.readFileSync(places, 'utf8')) : null,
     houses: fs.existsSync(houses) ? readHouses(houses) : null,
     code: flag('code', 'CY00'),

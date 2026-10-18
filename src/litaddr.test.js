@@ -154,15 +154,41 @@ test('буква длиннее 50 имён: индекс второго уро�
   for (let i = 0; i < 70; i++) items.push({ name: 'L' + String.fromCharCode(65 + (i % 7)) + 'X' + String(i).padStart(2, '0') });
   for (let i = 0; i < 10; i++) items.push({ name: 'B' + i });
   const r = A.names('t', items, 'owner');
-  const subs = r.records.filter((x) => x.sym === 't:idx:L');
+  const subs = r.records.filter((x) => /^t:i\d+$/.test(x.sym));
   assert.equal(subs.length, 1);
   const t = subs[0].tokens();
   assert.equal(t[0].u8, 0xda);
   assert.equal(t[4].raw.toString(), 'L');
   const lists = r.records.filter((x) => /:l\d+$/.test(x.sym));
   const reached = new Set();
-  for (const ix of r.records.filter((x) => /idx/.test(x.sym))) {
+  for (const ix of r.records.filter((x) => /:(idx|i\d+)$/.test(x.sym))) {
     for (const tk of ix.tokens()) if (typeof tk.ref === 'string') reached.add(tk.ref.split('#')[0]);
   }
   for (const l of lists) assert.ok(reached.has(l.sym), 'список ' + l.sym + ' без ветви');
+});
+
+// Три уровня: ветвь «LA» длиннее 50 — свой индекс с приставкой «LA».
+test('многоуровневый индекс: приставка растёт, все списки достижимы', () => {
+  const items = [];
+  for (let i = 0; i < 120; i++) items.push({ name: 'LA' + String.fromCharCode(65 + (i % 3)) + String(i).padStart(3, '0') });
+  const r = A.names('t', items, null);
+  const pre = r.records.filter((x) => /^t:i\d+$/.test(x.sym)).map((x) => x.tokens()[4].raw.toString());
+  assert.deepEqual(pre.sort(), ['L', 'LA']);
+  const lists = r.records.filter((x) => /:l\d+$/.test(x.sym));
+  assert.ok(lists.every((l) => l.n <= 50));
+  assert.equal(lists.reduce((a, l) => a + l.n, 0), 120);
+});
+
+test('POI: повороты названий, телефоны, двойники — узел 0x33 со списком 0x31', () => {
+  assert.deepEqual(A.rotations('SAN PIETRO'), ['PIETRO%SAN ']);
+  assert.equal(A.phoneKey('+357 22 942 742'), '35722942742');
+  assert.equal(A.phoneKey('22942742'), '35722942742');
+  const pois = [{ name: 'EKO', pos: [5, 1] }, { name: 'EKO', pos: [5, 2] }, { name: 'LIDL STORE', pos: [6, 1] }];
+  const r = A.poiNames('p', pois, (q) => [q.name].concat(A.rotations(q.name)));
+  assert.equal(r.entries, 3);                          // EKO, LIDL STORE, STORE%LIDL
+  const sel = r.records.find((x) => x.sym === 'p:g0');
+  assert.equal(sel.tokens()[0].u8, 0xf1);
+  const l31 = r.records.find((x) => x.sym === 'p:g0l:l0');
+  assert.equal(l31.tokens()[0].u8, 0xe1);
+  assert.equal(l31.n, 2);
 });

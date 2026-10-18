@@ -41,7 +41,11 @@ function enumerate(get, pos, last, limit) {
       if (!x.loop) {
         if (started) {
           // следующая запись: продолжаем только в список с 0x38 == 0
-          if (x.type === 0x32) continue;
+          // вложенный индекс (0xda, бит 0 сброшен) лежит между списками —
+          // пропускается; верхний (0xd9, бит 0 = 1) — уже чужая группа. Так у
+          // Мальты 93227: индексы почты (1) и городов (96) — 0xd9 вплотную за
+          // списками соседа, вложенные 0xda (700, 721…) — между своими списками
+          if (x.type === 0x32 && !(x.lead & 1)) continue;
           if ((x.type !== 0x30 && x.type !== 0x31) || (x.lead & 1)) return { out, why: 'конец списка' };
         }
         started = true;
@@ -128,7 +132,62 @@ function countryByCode(dirs, code, lang) {
   return rep;
 }
 
-module.exports = { enumerate, cities, countryByCode };
+// Поиск POI по названию (вид 0x10 -> узел 0x33 -> список названий -> точка).
+// Узел 0x33: витки «0x49 селектор, 0x3c куда»; уровень поиска 7…18 — нечётный
+// вид 0x10 (узел), чётный — по селектору: {2,3,4,13,14,15,17,19,20,22,23,24,25}
+// и 600…799 -> снова узел (вид 0x12), прочие -> список имён (вид 0x11)
+// (FUN_08ccdd2c, FUN_08cd05c0). Какой виток выбирает интерфейс — из кода не
+// дочитано; у завода порядок постоянный: страна — 9 телефоны, 9 названия, 2
+// категории (Ватикан 176815:0, Мальта 245455:0), город — 1 названия (Валлетта
+// 245484:2188). Имя с несколькими точками ведёт в узел 0x33 с селектором 1 ->
+// список 0x31 точек (Ватикан 176815:4 -> :7 -> :10).
+function elAt(get, pos) {
+  const g = get(pos[0]);
+  const e = g.map.get(pos[1]);
+  return e || null;
+}
+function selectors(get, pos) {
+  const g = get(pos[0]);
+  const i = g.els.findIndex((e) => e.key === pos[1]);
+  if (i < 0 || g.els[i].type !== 0x33) return null;
+  const out = [{ sel: g.els[i].f['49'], target: g.els[i].f['3c'] }];
+  for (let j = i + 1; j < g.els.length && g.els[j].loop && g.els[j].type === 0x33; j++)
+    out.push({ sel: g.els[j].f['49'], target: g.els[j].f['3c'] });
+  return out;
+}
+const POI_NODE_SELS = new Set([2, 3, 4, 13, 14, 15, 17, 19, 20, 22, 23, 24, 25]);
+function poisOf(get, target, out, depth) {
+  const e = elAt(get, target);
+  if (!e) { out.bad.push('нет ' + target); return; }
+  if (e.type === 0x24) { out.pois.add(target.join(':')); return; }
+  if (e.type === 0x33 && (depth || 0) < 4) {
+    const s = selectors(get, target).find((x) => x.sel === 1);
+    if (!s) { out.bad.push('0x33 без селектора 1 ' + target); return; }
+    for (const x of enumerate(get, s.target, null, 100000).out) poisOf(get, x.target, out, (depth || 0) + 1);
+    return;
+  }
+  out.bad.push('0x' + e.type.toString(16) + ' вместо точки ' + target);
+}
+// node — позиция узла 0x33; sel — селектор; nth — который из витков с ним.
+function poiSearch(get, node, sel, nth) {
+  const rep = { names: 0, pois: new Set(), bad: [], sample: [] };
+  const ss = selectors(get, node);
+  if (!ss) { rep.bad.push('не узел 0x33 ' + node); return rep; }
+  const s = ss.filter((x) => x.sel === sel)[nth || 0];
+  if (!s) { rep.bad.push('нет селектора ' + sel); return rep; }
+  if (POI_NODE_SELS.has(sel) || (sel >= 600 && sel < 800)) { rep.bad.push('селектор ' + sel + ' — узел, не список'); return rep; }
+  const list = enumerate(get, s.target, null, 1000000);
+  rep.names = list.out.length;
+  rep.why = list.why;
+  for (const x of list.out) {
+    if (rep.sample.length < 3) rep.sample.push(x.name);
+    poisOf(get, x.target, rep);
+  }
+  rep.pois = rep.pois.size;
+  return rep;
+}
+
+module.exports = { enumerate, cities, countryByCode, selectors, poiSearch };
 
 if (require.main === module) {
   const [dirs, country] = process.argv.slice(2);

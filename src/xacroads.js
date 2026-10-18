@@ -60,10 +60,14 @@ const FRC = {
   trunk: 1, trunk_link: 1,
   primary: 2, primary_link: 2,
   secondary: 3, secondary_link: 3,
-  tertiary: 4, tertiary_link: 4,
-  residential: 6, unclassified: 6, living_street: 6, road: 6,
-  service: 7, track: 7, pedestrian: 7,
+  tertiary: 3, tertiary_link: 3,
+  residential: 4, unclassified: 4, living_street: 4, road: 4, service: 4,
 };
+// Уровень 4 — обычная улица: у завода (MJ00, 47 119 векторов) им заняты
+// 36 тысяч записей, 3 — около 3 тысяч, 2 — сотни. Значения 5…7 улицам не
+// годятся: 6 обходчик маршрута `FUN_082b3638` считает «Limited Access», 7 у
+// завода почти всегда с направлением 3, «проезда нет» (3172 из 3254).
+// До 20.10 жилые улицы писались уровнем 6, а третичные — 4.
 
 // Биты 3…4 описателя — направление проезда относительно порядка записи:
 // A — узел, у которого лежит запись вектора, B — узел, на который она ссылается.
@@ -183,7 +187,7 @@ function graphFromGeoJSON(fc, opt) {
     if (!f.geometry || f.geometry.type !== 'LineString') continue;
     const hw = (f.properties || {}).highway || 'unclassified';
     if (classes && !classes.has(hw)) continue;
-    const frc = FRC[hw] === undefined ? 6 : FRC[hw];
+    const frc = FRC[hw] === undefined ? 4 : FRC[hw];
     const ow = +((f.properties || {}).oneway || 0);   // 1, -1 или 0 — см. src/osm2geo.js
     const nm = roadName(f.properties);
     let ni = -1;
@@ -258,7 +262,7 @@ function layout(graph, groups, attrIdx, named) {
     // записи лежит список имён, у простых хвоста нет вовсе.
     const zf = named && e.name >= 0 ? named.of[e.name] : -1;
     const tab = zf >= 0 ? named.attr : attrIdx;
-    const frc = tab[e.frc] === undefined ? 6 : e.frc;
+    const frc = tab[e.frc] === undefined ? 4 : e.frc;
     let idx = tab[frc];
     if (e.ow) {
       if (tab.one && tab.one[frc] !== undefined) { idx = tab.one[frc]; oneway++; } else owLost++;
