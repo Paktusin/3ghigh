@@ -71,22 +71,8 @@ function ourAreaTags() {
   return m;
 }
 
-// Типы, которые карта вообще рисует: поле 0x49 шапки POI (структура 0x20) в LIT —
-// по ним CLitPoiTileDb строит тайлы точек (docs/formats/xar.md). Точка другого
-// типа на карту не попадает, даже если стиль у типа есть.
 const LIT_DIR = 'out/cyprus/pkgdb/LIT';
-function mapTypes() {
-  if (!fs.existsSync(LIT_DIR)) return null;
-  const o = litkeys.open([LIT_DIR]);
-  for (let i = 0; i < o.cat.length; i++) {
-    const k = o.get(i);
-    if (!k.els.length || k.els[0].type !== 0x20) continue;
-    const n = k.els[0].f['44'] !== undefined ? k.els[0].f['44'] : 58;
-    const t = k.els.slice(1).map(e => e.f && e.f['49']).filter(v => v !== undefined);
-    return new Set(t.slice(0, n));
-  }
-  return null;
-}
+const mapTypes = () => (fs.existsSync(LIT_DIR) ? litkeys.mapTypes(LIT_DIR) : null);
 
 function poiCounts() {
   const n = new Map();

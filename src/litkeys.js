@@ -98,7 +98,23 @@ function open(dirs) {
   return { L, schema, cat, get };
 }
 
-module.exports = { keyed, index, open };
+// Типы точек, которые карта вообще рисует: поле 0x49 шапки POI (структура 0x20,
+// первые «поле 0x44» витков; дальше — слои). По ним CLitPoiTileDb строит тайлы
+// точек (docs/formats/xar.md): точка другого типа на карту не попадает, даже
+// если стиль у типа есть. null — шапки нет.
+function mapTypes(dir) {
+  const o = open([dir]);
+  for (let i = 0; i < o.cat.length; i++) {
+    const k = o.get(i);
+    if (!k.els.length || k.els[0].type !== 0x20) continue;
+    const n = k.els[0].f['44'] !== undefined ? k.els[0].f['44'] : 58;
+    const t = k.els.slice(1).map(e => e.f && e.f['49']).filter(v => v !== undefined);
+    return new Set(t.slice(0, n));
+  }
+  return null;
+}
+
+module.exports = { keyed, index, open, mapTypes };
 
 if (require.main === module) {
   const [dirs, bi, from, to] = process.argv.slice(2);

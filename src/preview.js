@@ -15,6 +15,8 @@ const fs = require('fs');
 const path = require('path');
 const gm = require('./gdb');
 const xar = require('./xar');
+const litpoi = require('./litpoi');
+const litkeys = require('./litkeys');
 
 const CYPRUS = [32.2, 34.5, 34.7, 35.75];
 
@@ -156,6 +158,37 @@ function xarStyles(file) {
   };
 }
 
+// Точки интереса из собранного LIT — листья дерева POI (блоки, что начинаются
+// записью-тайлом 0x23), как их читает setcheck. Значок — по правилам прошивки
+// (xar.iconFor, sub 0); «видна» — у типа есть значок и тип есть в шапке POI.
+function litPois(root, styleFile) {
+  const dir = path.join(root, 'pkgdb', 'LIT');
+  if (!fs.existsSync(dir)) return null;
+  const P = litpoi.open([dir]);
+  const K = litkeys.open([dir]);
+  const onMap = litkeys.mapTypes(dir);
+  const ps = styleFile ? xar.poiStyles(xar.tree(xar.open(fs.readFileSync(styleFile)))) : null;
+  const a = styleFile ? xar.open(fs.readFileSync(styleFile)) : null;
+  const list = [], names = [], icons = {};
+  for (let i = 0; i < P.catalog().length; i++) {
+    if ((K.get(i).els[0] || {}).type !== 0x23) continue;
+    for (const q of P.pois(i)) {
+      list.push([Math.round(q.lon * 1e5), Math.round(q.lat * 1e5), q.cat || 0, names.length]);
+      names.push(q.name || '');
+      const c = q.cat || 0;
+      if (icons[c] !== undefined) continue;
+      const ic = ps && iconForSafe(ps, c);
+      const visible = !!ic && (!onMap || onMap.has(c));
+      let uri = null;
+      if (ic) { try { uri = 'data:image/png;base64,' + xar.png(xar.bitmap(a, ic.bitmap)).toString('base64'); } catch (e) { uri = null; } }
+      icons[c] = { name: litpoi.category(c) || String(c), visible, uri, from: ic ? ic.entries[0].from : 0,
+                   to: ic ? ic.entries[ic.entries.length - 1].to : 43, w: ic ? ic.entries[0].w : 0, h: ic ? ic.entries[0].h : 0 };
+    }
+  }
+  return { list, names, icons };
+}
+const iconForSafe = (ps, c) => { try { return xar.iconFor(ps, c, 0); } catch (e) { return null; } };
+
 function build(root, opt = {}) {
   const box = opt.box || CYPRUS;
   const g = gm.openGdb(root);
@@ -179,7 +212,10 @@ function build(root, opt = {}) {
   const xf = opt.xar === undefined ? findXar(root) : opt.xar;
   const styles = xf ? xarStyles(xf) : null;
   if (opt.log) opt.log(styles ? 'стили: ' + xf : 'стили: архив не найден, цвета условные');
-  return page({ title: path.basename(path.resolve(root)), box, data, pal, styles });
+  const pois = opt.pois === false ? null : litPois(root, xf);
+  if (opt.log && pois) opt.log('точек интереса: ' + pois.list.length + ', видимых типов ' +
+    Object.values(pois.icons).filter(x => x.visible).length + ' из ' + Object.keys(pois.icons).length);
+  return page({ title: path.basename(path.resolve(root)), box, data, pal, styles, pois });
 }
 
 function page(model) {
@@ -213,6 +249,7 @@ select,button{font:inherit}
 <div class="stat" id="st"></div>
 <h2>Площади</h2><div id="lp"></div>
 <h2>Линии</h2><div id="ll"></div>
+<h2>Точки интереса</h2><div id="lpoi"></div>
 <p class="stat" id="src"></p>
 <p class="stat">Колесо — масштаб, перетаскивание — сдвиг. «Масштаб» — индекс 0…43 таблицы стилей: по нему прошивка выбирает цвет и толщину (у каждого уровня GDB свой диапазон; соответствие уровня индексу здесь — прикидка).</p>
 </aside>
@@ -277,7 +314,22 @@ function legend() {
     l.querySelector('input').onchange = e => { e.target.checked ? off.delete(id) : off.add(id); redraw(); };
     $('ll').append(l);
   }
+  $('lpoi').innerHTML = '';
+  if (!M.pois) { $('lpoi').textContent = 'LIT не найден'; return; }
+  const vis = M.pois.list.filter(p => M.pois.icons[p[2]].visible).length;
+  for (const [id, txt] of [['poiV', 'видимые на карте MMI (' + vis + ')'], ['poiH', 'невидимые: нет значка или типа нет в шапке (' + (M.pois.list.length - vis) + ')']]) {
+    const l = document.createElement('label');
+    l.innerHTML = '<input type="checkbox"' + (off.has(id) ? '' : ' checked') + '>' + txt;
+    l.querySelector('input').onchange = e => { e.target.checked ? off.delete(id) : off.add(id); redraw(); };
+    $('lpoi').append(l);
+  }
+  const p = document.createElement('p'); p.className = 'stat';
+  p.textContent = 'Значок рисуется, если выбранный индекс масштаба попадает в диапазон его стиля. Наведите на точку — имя и категория.';
+  $('lpoi').append(p);
 }
+// значки точек
+const IMG = {};
+if (M.pois) for (const [c, ic] of Object.entries(M.pois.icons)) if (ic.uri) { const im = new Image(); im.src = ic.uri; im.onload = () => redraw(); IMG[c] = im; }
 const cv = $('c'), cx = cv.getContext('2d');
 const [lon0, lat0, lon1, lat1] = M.box;
 const kx = Math.cos((lat0 + lat1) / 2 * Math.PI / 180);
@@ -335,6 +387,23 @@ function draw() {
     if (s.casing) { cx.strokeStyle = s.casing; cx.lineWidth = s.cw / 2 * unit; for (const c of vis) if (c.l[k]) cx.stroke(c.l[k]); }
     cx.strokeStyle = s.color; cx.lineWidth = s.width / 2 * unit; for (const c of vis) if (c.l[k]) cx.stroke(c.l[k]);
   }
+  cx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if (M.pois) {
+    const sx = v => v * kx * view.s + view.x, sy = v => view.y - v * view.s;
+    for (const p of M.pois.list) {
+      if (p[0] < vx0 || p[0] > vx1 || p[1] < vy0 || p[1] > vy1) continue;
+      const ic = M.pois.icons[p[2]];
+      const x = sx(p[0]), y = sy(p[1]);
+      if (ic.visible) {
+        if (off.has('poiV') || sc < ic.from || sc > ic.to) continue;
+        const im = IMG[p[2]];
+        if (im && im.complete) cx.drawImage(im, x - ic.w / 2, y - ic.h / 2, ic.w, ic.h);
+      } else {
+        if (off.has('poiH')) continue;
+        cx.fillStyle = 'rgba(120,120,120,0.6)'; cx.beginPath(); cx.arc(x, y, 2, 0, 7); cx.fill();
+      }
+    }
+  }
   cx.setTransform(1, 0, 0, 1, 0, 0);
 }
 let queued = false;
@@ -351,7 +420,16 @@ cv.onpointerdown = e => {
 cv.onpointerup = () => { if (drag) { drag = null; redraw(); } };
 cv.onpointermove = e => {
   const r = cv.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
-  $('info').textContent = (((px - view.x) / view.s / kx) / 1e5).toFixed(4) + '°E ' + (((view.y - py) / view.s) / 1e5).toFixed(4) + '°N';
+  let txt = (((px - view.x) / view.s / kx) / 1e5).toFixed(4) + '°E ' + (((view.y - py) / view.s) / 1e5).toFixed(4) + '°N';
+  if (M.pois && !drag) {
+    let best = null, bd = 64;
+    for (const p of M.pois.list) {
+      const dx = p[0] * kx * view.s + view.x - px, dy = view.y - p[1] * view.s - py, d = dx * dx + dy * dy;
+      if (d < bd) { bd = d; best = p; }
+    }
+    if (best) { const ic = M.pois.icons[best[2]]; txt += ' — ' + M.pois.names[best[3]] + ' · ' + best[2] + ' ' + ic.name + (ic.visible ? '' : ' (на карте MMI не видна)'); }
+  }
+  $('info').textContent = txt;
   if (!drag) return;
   const dx = e.clientX - drag[0], dy = e.clientY - drag[1];
   view.x += dx; view.y += dy; moved[0] += dx; moved[1] += dy; drag = [e.clientX, e.clientY];
