@@ -176,7 +176,17 @@ function catNo(name) {
 }
 
 // Разметка тегов: первая подошедшая строка таблицы и задаёт категорию.
+// Точечные правила раньше общего соответствия: объекты, которые по тегам OSM
+// попадают в категорию без значка, а в заводских типах карты у них есть своя.
+// AlphaGrand AutoService (Лимассол) — сервис Audi по словам пользователя (18.10),
+// в OSM это просто `shop=car_repair` без бренда.
+const SPECIAL = [
+  { cat: 'AUDI SERVICE', test: (t) => /alpha\s*grand/i.test([t.name, t.alt_name, t['name:en']].join(' ')) },
+  { cat: 'AUDI ZENTRUM', test: (t) => t.shop === 'car' && /(^|;)\s*audi\s*(;|$)/i.test(t.brand || '') },
+];
+
 function classify(tags) {
+  for (const s of SPECIAL) if (s.test(tags)) return { rank: -1, cat: catNo(s.cat), category: s.cat };
   let best = null;
   for (const [k, v, name, rank] of MAP)
     if (tags[k] === v && (!best || rank < best.rank))
@@ -211,6 +221,7 @@ function fieldsOf(tags) {
 function collect(pbf) {
   const keys = new Set(MAP.map((m) => m[0]));
   const want = (tags) => {
+    if (SPECIAL.some((s) => s.test(tags))) return true;
     for (const [k, v] of MAP) if (tags[k] === v) return true;
     return false;
   };
@@ -283,7 +294,7 @@ function build(pois, opt) {
   return { model: m, bytes: best.bytes, used: best.n, dropped: list.length - best.n };
 }
 
-module.exports = { MAP, BY_CATEGORY, REMAP, classify, nameOf, fieldsOf, collect, build, order, catNo, DEG };
+module.exports = { MAP, BY_CATEGORY, REMAP, SPECIAL, classify, nameOf, fieldsOf, collect, build, order, catNo, DEG };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
