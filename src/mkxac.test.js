@@ -39,23 +39,26 @@ test('запись реестра берёт смещения и размеры 
   assert.equal(r.readUInt32BE(0x30), 0);
 });
 
-test('строка уровня 1 несёт рамку, число блоков и область VEKTORBLOCK', () => {
-  const box = [100, 200, 300, 400];
-  const row = M.levelRow(TILE, box, 1, null);
-  assert.deepEqual([0, 4, 8, 12].map((o) => row.readUInt32BE(o)), box);
+test('строка уровня 1 несёт рамку шапки, число блоков и область VEKTORBLOCK', () => {
+  const t = Buffer.from(TILE);
+  const vb = require('./xac').sections(t).list.filter((x) => x.name === 'VEKTORBLOCK');
+  [[100, 250, 300, 400], [150, 200, 350, 380]].forEach((bb, k) =>
+    bb.forEach((v, i) => t.writeInt32BE(v, vb[k].offset + 0x18 + i * 4)));
+  const row = M.levelRow(t, 1, null, 7);
+  assert.deepEqual([0, 4, 8, 12].map((o) => row.readUInt32BE(o)), [100, 200, 350, 400], 'объединение рамок блоков');
   assert.equal(row.readUInt16BE(0x10), 2, 'блоков');
-  assert.equal(row.readUInt16BE(0x12), 0, 'первый блок базы');
+  assert.equal(row.readUInt16BE(0x12), 7, 'первый блок тайла в сквозной нумерации');
   assert.equal(row.readUInt32BE(0x18), (1000 + 20) + (2000 + 20));
 });
 
 test('уровни 2…4 объявляются пустыми, но счёт блоков уходит вперёд', () => {
   for (const n of [2, 3, 4]) {
-    const row = M.levelRow(TILE, [0, 0, 0, 0], n, null);
+    const row = M.levelRow(TILE, n, null, 5);
     assert.equal(row.readUInt32BE(0), 0x7fffffff, 'уровень ' + n + ': данных нет');
     assert.equal(row.readUInt32BE(8), 0x80000000, 'рамка пустая, как у завода');
     assert.equal(row.readUInt32BE(0x24), 0, 'длины заглушки здесь нет');
     assert.equal(row.readUInt16BE(0x10), 0, 'блоков нет');
-    assert.equal(row.readUInt16BE(0x12), 2, 'но первый блок уже за нашими двумя');
+    assert.equal(row.readUInt16BE(0x12), 7, 'но первый блок уже за нашими двумя');
   }
 });
 
@@ -106,6 +109,18 @@ test('файлы области L3: оглавление VERYSMART и пусты
   assert.equal(a.v.readUInt32BE(32), 0);
   for (const b of [a.b, a.v, M.globalL4(1)]) assert.equal(b.length % 4, 0, 'длины кратны 4');
   assert.equal(M.globalL4(3).length, 24 + 3 * 16);
+  const a3 = M.emptyAreaFiles([0, 1, 2]);
+  assert.equal(a3.b.readUInt16BE(22), 3, 'область из трёх тайлов');
+  assert.deepEqual([0, 1, 2].map((k) => a3.b.readUInt16BE(24 + k * 16)), [0, 1, 2]);
   assert.equal(M.EMPTY_ZF.length, 112);
   assert.equal(M.EMPTY_ZF.readUInt32BE(16) + 20, 112);
+});
+
+test('маска тайла: сетка — зона в ячейках .ras, рамка шире на две ячейки вправо и вверх', () => {
+  const raster = require('./raster');
+  const grid = { x0: 1000, y0: 5000, step: 1000 };
+  const r = raster.parseRaster(M.rasterSection(grid, [2, 3, 6, 5]));
+  assert.deepEqual([r.nx, r.ny], [4, 2]);
+  assert.deepEqual(r.bbox, [3000, 8000, 9000, 12000]);
+  assert.ok(r.cells.every((v) => v === 0), 'вся зона своя');
 });

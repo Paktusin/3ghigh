@@ -3,22 +3,23 @@
 //
 //   node src/mkxac.js out/cyp/CY.xac.db
 //        [--roads out/cyp/roads.geojson] [--places out/cyp/places_geo.json]
-//        [--houses out/cyp/cyprus-latest.osm.pbf] [--code CY00]
+//        [--houses out/cyp/cyprus-latest.osm.pbf] [--code CY00] [--tile-nodes 65000]
 //
-// Отличие от снятого `src/mkcyp.js`. Тот сажал кипрский тайл в слот донорского `IS01`
-// внутри заводского контейнера на 2 ГБ: длина файла не меняется, индекс
-// остаётся заводским, а образ требует заводской базы под собой. Здесь
-// контейнер свой: один тайл, свой индекс `.xah`, свой растр, свои имена
-// городов — и ничего чужого.
+// Контейнер свой: свой индекс `.xah`, свой растр, свои имена городов — и
+// ничего чужого. С 20.10 тайлов несколько (`src/xacsplit.js`): у завода тайл
+// не крупнее 19 блоков и 2,0 МБ области блоков, а DBM грузит уровень 1 тайла
+// одним куском. Сеть делится на прямоугольные зоны по сетке `.ras` (по
+// умолчанию до 65 000 узлов в зоне), рёбра на границе режутся, половинки
+// связываются нульвекторами.
 //
 // ── Что внутри ────────────────────────────────────────────────────────────
-//   EJ211.xah        индекс: шапка, реестр из одной записи, четыре строки
-//                    уровней, группы, страна, соседи (пусто), плюс таблицы,
+//   EJ211.xah        индекс: шапка, реестр, строки уровней, группа FE и
+//                    страна на все тайлы, область L3, соседи, плюс таблицы,
 //                    не зависящие от покрытия, — переносятся из заводского
-//   EJ211.ras        растр по рамке Кипра (`src/rasidx.js`)
-//   EJ211_CY00_1.xac тайл: дороги, `ZF-NAMEN`, `ZE-NAMEN`, `ZE-NAMEN-MMI`,
+//   EJ211.ras        растр по рамке Кипра: ячейка -> тайл (`src/rasidx.js`)
+//   EJ211_CY0n_1.xac тайлы: дороги, `ZF-NAMEN`, `ZE-NAMEN`, `ZE-NAMEN-MMI`,
 //                    `HAUSNUMMERN`, `RASTERINFOS`
-//   EJ211_CY00_2.xac заглушка уровня 2 — так же поступает завод у 347 тайлов
+//   EJ211_CY0n_2.xac заглушки уровня 2 — так же поступает завод у 347 тайлов
 //   EJ211_0.ort      имена городов Кипра
 //   EJ211_0_3.b/.v, EJ211_0_4.b/.v, EJ211_4.b
 //                    файлы области L3 без блоков — без них не строится маршрут
@@ -57,19 +58,21 @@ const zfnamen = require('./zfnamen');
 const dataset = require('./dataset');
 const raster = require('./raster');
 const osmpbf = require('./osmpbf');
+const split = require('./xacsplit');
+const xg = require('./xacgraph');
 
 const CYPRUS = 113;                 // код страны в шапке блока и в записи `LD`
 const NO_DATA = 0x7fffffff;
 const ALIGN = 2048;
 const align = (n) => Math.ceil(n / ALIGN) * ALIGN;
 
-// Маска зоны обслуживания тайла: у нас весь прямоугольник свой, поэтому все
-// ячейки нулевые (0 — ячейка отдана этому тайлу, см. src/raster.js). Рамка
-// растра шире сетки ровно на ячейку с каждой стороны.
-function rasterSection(bbox) {
-  const cell = 1000;
-  const nx = Math.max(1, Math.floor((bbox[2] - bbox[0]) / cell) - 1);
-  const ny = Math.max(1, Math.floor((bbox[3] - bbox[1]) / cell) - 1);
+// Маска зоны обслуживания тайла. Как у завода (20 тайлов из 20, 17.10):
+// сетка — ровно рамка зоны тайла в ячейках `.ras`, рамка раздела шире сетки
+// на две ячейки вправо и вверх. Зона у нас прямоугольная — все ячейки свои (0).
+function rasterSection(grid, r) {
+  const nx = r[2] - r[0], ny = r[3] - r[1];
+  const bbox = [grid.x0 + r[0] * grid.step, grid.y0 + r[1] * grid.step,
+                grid.x0 + (r[2] + 2) * grid.step, grid.y0 + (r[3] + 2) * grid.step];
   return raster.buildRaster({ cells: new Uint8Array(nx * ny), nx, ny, bbox,
                               label: 'RASTERINFOS', version: 0x00020000 });
 }
@@ -209,7 +212,7 @@ function readHouses(file) {
   return out;
 }
 
-// ── Индекс .xah на один тайл ──────────────────────────────────────────────
+// ── Индекс .xah ───────────────────────────────────────────────────────────
 //
 // Записи собираются с нуля, а не выбираются из заводских: у нас свой тайл, и
 // его поля берутся из собранного файла. Поля +0x34, +0x38, +0x4C и +0x50
@@ -240,18 +243,18 @@ function strukturRecord(code, file1) {
 // Строка уровня. Уровень 1 — наш файл, уровни 2…4 объявляются пустыми.
 //
 // `firstBlock` — накопительный счёт по всей базе: тайл за тайлом, внутри тайла
-// уровни 1, 2, 3, 4. У единственного тайла это ноль на первом уровне и число
-// его блоков на остальных трёх.
-function levelRow(file1, bbox, level, stub) {
+// уровни 1, 2, 3, 4 (`base` — первый блок тайла). Рамка уровня 1 — рамка шапки
+// тайла, объединение рамок блоков: так у завода (20 тайлов из 20).
+function levelRow(file1, level, stub, base) {
   const b = Buffer.alloc(st.LEVEL_REC);
   const S = xac.sections(file1).list;
   const vb = S.filter((x) => x.name === 'VEKTORBLOCK');
   const hdr = S.find((x) => x.name === 'XAC HEADER');
   const zf = S.find((x) => x.name === 'ZF-NAMEN');
   if (level === 1) {
-    bbox.forEach((v, i) => b.writeUInt32BE(v, i * 4));
+    tile.bboxOf(file1, vb).forEach((v, i) => b.writeInt32BE(v, i * 4));
     b.writeUInt16BE(vb.length, 0x10);
-    b.writeUInt16BE(0, 0x12);                       // первый тайл базы, счёт с нуля
+    b.writeUInt16BE(base, 0x12);
     b.writeUInt32BE(vb.length ? vb[0].offset : 0, 0x14);
     b.writeUInt32BE(vb.reduce((a, x) => a + x.total, 0), 0x18);
     b.writeUInt32BE(hdr ? hdr.total : 0, 0x1c);
@@ -262,7 +265,7 @@ function levelRow(file1, bbox, level, stub) {
     // а ZF-NAMEN — раздел самой заглушки, а не файла уровня 1.
     [NO_DATA, NO_DATA, 0x80000000, 0x80000000].forEach((v, i) => b.writeUInt32BE(v, i * 4));
     b.writeUInt16BE(0, 0x10);                       // блоков на уровне нет
-    b.writeUInt16BE(vb.length, 0x12);               // но счёт уже ушёл вперёд
+    b.writeUInt16BE(base + vb.length, 0x12);        // но счёт уже ушёл вперёд
     const stubSecs = stub ? xac.sections(stub).list : [];
     const shdr = stubSecs.find((x) => x.name === 'XAC HEADER');
     const szf = stubSecs.find((x) => x.name === 'ZF-NAMEN');
@@ -274,9 +277,15 @@ function levelRow(file1, bbox, level, stub) {
 
 // Индекс целиком. Таблицы, не зависящие от покрытия, переносятся из
 // заводского; всё, что зависит от состава тайлов, пишется заново.
+//   spec.regs       записи XAC-STRUKTUR по тайлам
+//   spec.rows       [тайл][уровень 0…3] строки XAC-STRUKTUR L1…L4
+//   spec.blocks     блоков во всей базе
+//   spec.neighbors  списки соседей NACHBARN
+// Группа FE одна (страна Кипр, у завода группа = страна, 45 из 45), область
+// L3 одна — все тайлы.
 function buildXah(src, spec) {
   const out = [];
-  const blocks = xac.sections(spec.file1).list.filter((x) => x.name === 'VEKTORBLOCK').length;
+  const all = spec.regs.map((_, t) => t);
 
   for (const s of xah.sections(src).list) {
     const name = s.name;
@@ -285,28 +294,27 @@ function buildXah(src, spec) {
 
     if (name === 'XACDB HEADER') {
       const h = Buffer.from(raw);
-      h.writeUInt32BE(1, xah.H.tiles - 20);
-      h.writeUInt32BE(blocks, xah.H.blocks - 20);
+      h.writeUInt32BE(all.length, xah.H.tiles - 20);
+      h.writeUInt32BE(spec.blocks, xah.H.blocks - 20);
       h.writeUInt32BE(1, 0x50 - 20);                // областей третьего уровня
       out.push({ name, data: h });
     } else if (name === 'XAC-STRUKTUR') {
-      out.push({ name, data: Buffer.concat([raw.subarray(0, 4), spec.reg]) });
+      out.push({ name, data: Buffer.concat([raw.subarray(0, 4)].concat(spec.regs)) });
     } else if (/^XAC-STRUKTUR L[1-4]$/.test(name)) {
       const n = +name.slice(-1);
-      out.push({ name, data: Buffer.concat([raw.subarray(0, 4), spec.rows[n - 1]]) });
+      out.push({ name, data: Buffer.concat([raw.subarray(0, 4)].concat(spec.rows.map((r) => r[n - 1]))) });
     } else if (name === 'NACHBARN') {
-      out.push({ name, data: st.buildNeighbors([[]], raw.subarray(0, 4)) });
+      out.push({ name, data: st.buildNeighbors(spec.neighbors, raw.subarray(0, 4)) });
     } else if (name === fg.SEC) {
       const src2 = fg.read(src);
       // Записи стран начинаются с кратного 4 смещения, как у Австралии (gap 2).
-      const grEnd = 20 + src2.head.length + 8 + 2;   // шапка + одна группа из одного тайла
+      const grEnd = 20 + src2.head.length + 8 + 2 * all.length;
       out.push({ name, data: fg.build({ head: src2.head, gap: (4 - grEnd % 4) % 4, tail: 0,
-        groups: [{ id: 0, tiles: [0] }],
-        lands: [{ id: CYPRUS, byte6: 0, flags: 2, value: 0, tiles: [0] }] }) });
+        groups: [{ id: 0, tiles: all }],
+        lands: [{ id: CYPRUS, byte6: 0, flags: 2, value: 0, tiles: all }] }) });
     } else if (name === fg.SEC_L3) {
       const src3 = fg.readL3(src);
-      out.push({ name, data: fg.buildL3({ head: src3.head, tail: 0,
-                                          groups: [{ id: 0, tiles: [0] }] }) });
+      out.push({ name, data: fg.buildL3({ head: src3.head, tail: 0, groups: [{ id: 0, tiles: all }] }) });
     } else {
       out.push({ name, data: raw });               // от покрытия не зависит
     }
@@ -349,7 +357,7 @@ function mkxac(opt) {
   const o = opt || {};
   const log = o.log || (() => {});
   const root = o.root || dataset.resolveRoot();
-  const code = (o.code || 'CY00').toUpperCase();
+  const cc = (o.code || 'CY00').slice(0, 2).toUpperCase();
   const prefix = o.prefix || 'EJ211';
   const built14 = o.built || '20260923120000';
 
@@ -365,22 +373,15 @@ function mkxac(opt) {
   const headSrc = Buffer.alloc(fldb.DIR_OFFSET);
   fs.readSync(db.fd, headSrc, 0, headSrc.length, 0);
 
-  // ---- тайл ----
+  // ---- граф ----
   const fc = JSON.parse(fs.readFileSync(o.roads || 'out/cyp/roads.geojson', 'utf8'));
   const areasFile = o.areas || 'out/cyp/areas.json';
   const urban = fs.existsSync(areasFile) ? urbanIndex(JSON.parse(fs.readFileSync(areasFile, 'utf8'))) : null;
-  const graph = roads.graphFromGeoJSON(fc, { classes: o.classes, speeds: true, urban });
+  // линии упрощаются с допуском 6 единиц (~6–8 м): узлов в разы меньше,
+  // привязке к дороге этого хватает
+  const graph = roads.graphFromGeoJSON(fc, { classes: o.classes, speeds: true, urban, tol: 6 });
   const attr = roads.setAttributes(root);
-  let named = null, zfSection = null;
-  if (graph.names.length) {
-    const order = graph.names.map((_, k) => k)
-      .sort((a, b) => (graph.names[a] < graph.names[b] ? -1 : graph.names[a] > graph.names[b] ? 1 : a - b));
-    const of = new Int32Array(graph.names.length).fill(-1);
-    order.forEach((g, k) => { of[g] = k; });
-    named = { of, attr: roads.attrByFrcNamed(attr) };
-    zfSection = zfnamen.buildSection(order.map((g) => ({ text: graph.names[g], kind: 0 })),
-                                     zfnamen.tokens(xahSrc));
-  }
+  const attrIdx = roads.attrByFrc(attr), attrNamed = roads.attrByFrcNamed(attr);
   // запреты поворотов из отношений OSM `type=restriction`
   let bans = null;
   const pbf = o.pbf === undefined ? 'out/cyp/cyprus-latest.osm.pbf' : o.pbf;
@@ -393,66 +394,116 @@ function mkxac(opt) {
     bans = tb.bans;
     log('запреты поворотов OSM: ' + JSON.stringify(tb.stat));
   }
-  const built = roads.buildBlocks(graph, { attr, attrIdx: roads.attrByFrc(attr), named, bans,
-                                           base: 0, country: CYPRUS, maxNodes: o.maxNodes || 9000 });
-  if (bans) log('запретов записано в узлы: ' + built.turns + (built.turnLost ? ', не уложилось: ' + built.turnLost : ''));
-  log('дорог ' + graph.ways + ', узлов ' + graph.nodes.length + ', рёбер ' + graph.edges.length +
-      ' -> блоков ' + built.blocks.length + ', односторонних рёбер ' + built.oneway +
-      (built.owLost ? ' (без одностороннего индекса — двусторонними: ' + built.owLost + ')' : ''));
+  log('дорог ' + graph.ways + ', узлов ' + graph.nodes.length + ', рёбер ' + graph.edges.length);
 
+  // ---- тайлы: зоны по сетке растра, разрез рёбер на границах ----
   const bb = [Infinity, Infinity, -Infinity, -Infinity];
   for (const n of graph.nodes) {
     if (n.x < bb[0]) bb[0] = n.x; if (n.x > bb[2]) bb[2] = n.x;
     if (n.y < bb[1]) bb[1] = n.y; if (n.y > bb[3]) bb[3] = n.y;
   }
-
-  const names = [];
-  let zen = null;
-  if (o.places) {
-    zen = roads.zenModel(graph, built, { places: o.places, houses: o.houses,
-                                         countryName: o.countryName || 'CYPRUS' });
-    names.push(zenamen.buildSection({ names: zen.names, refs: zen.refs, blocks: zen.blocks,
-                                      version: 2, label: 'ZE-NAMEN', country: CYPRUS }));
-    names.push(zenamen.mmiBuildSection(zen.mmi));
-    if (zen.houses) names.push(require('./hausnr').buildSection({ rows: zen.hnr }));
-    log('имена: ' + zen.names.length + ' (городов ' + zen.places + ', улиц ' + zen.streets +
-        (zen.houses ? ', домов ' + zen.houses : '') + ')');
-  }
-
-  const name1 = prefix + '_' + code + '_1';
-  const file1 = tile.buildTile({
-    code, file: name1, index: 0, country: CYPRUS, built: built14,
-    zf: zfSection || tile.section('ZF-NAMEN', Buffer.alloc(92)),
-    blocks: built.blocks,
-    extra: names.concat([rasterSection([bb[0] - 1000, bb[1] - 1000, bb[2] + 1000, bb[3] + 1000])]),
+  const box = [bb[0] - 1000, bb[1] - 1000, bb[2] + 1000, bb[3] + 1000];
+  const R = ras.blank({ bbox: box });
+  const grid = { x0: box[0], y0: box[1], nx: R.nx, ny: R.ny, step: 1000 };
+  const rects = split.zones(graph, grid, o.tileNodes || 65000);
+  const sp = split.cut(graph, grid, rects);
+  rects.forEach((r, t) => {
+    for (let cx = r[0]; cx < r[2]; cx++) for (let cy = r[1]; cy < r[3]; cy++) ras.set(R, cx, cy, t);
   });
-  const file2 = stubLevel2(code, prefix + '_' + code + '_2', 0, built14);
-  log('тайл ' + code + ': ' + (file1.length / 1024).toFixed(0) + ' КБ, заглушка уровня 2 ' +
-      file2.length + ' б');
+  const N = rects.length;
+  const codes = rects.map((_, t) => cc + t.toString(36).toUpperCase().padStart(2, '0'));
+  const tBans = bans && split.bansByTile(sp, bans);
+  const hs = o.houses ? split.housesByTile(sp, o.houses, roads.latinize, roads.segDist2) : null;
+  log('тайлов ' + N + ', узлов разреза ' + sp.tiles.reduce((a, t) => a + t.links.length, 0) / 2 +
+      (hs ? ', домов без своей улицы в сети ' + hs.lost : ''));
+
+  // имена ведения тайла: свои, по возрастанию
+  const guide = sp.tiles.map((tl) => {
+    if (!tl.names.length) return { named: null, zf: null };
+    const order = tl.names.map((_, k) => k)
+      .sort((a, b) => (tl.names[a] < tl.names[b] ? -1 : tl.names[a] > tl.names[b] ? 1 : a - b));
+    const of = new Int32Array(tl.names.length).fill(-1);
+    order.forEach((g, k) => { of[g] = k; });
+    return { named: { of, attr: attrNamed },
+             zf: zfnamen.buildSection(order.map((g) => ({ text: tl.names[g], kind: 0 })), zfnamen.tokens(xahSrc)) };
+  });
+
+  // Два прохода: нульвектор узла разреза ссылается на номер записи двойника в
+  // чужом тайле, а номера записей раздаёт раскладка. Первый проход даёт
+  // раскладку и число блоков (отсюда сквозные номера), второй пишет блоки уже
+  // с нульвекторами. Нульвектор не занимает номера в таблице, поэтому
+  // раскладка во втором проходе та же — это проверяется.
+  const blocksOf = (t, base, maxNodes, links) => roads.buildBlocks(sp.tiles[t], {
+    attr, attrIdx, named: guide[t].named, bans: tBans && tBans[t], base, country: CYPRUS,
+    maxNodes: maxNodes || o.maxNodes || 9000, links });
+  const plan = sp.tiles.map((_, t) => blocksOf(t, 0));
+  const base = [];
+  plan.reduce((a, p, t) => { base[t] = a; return a + p.blocks.length; }, 0);
+  const builtAll = sp.tiles.map((tl, t) => {
+    const twin = new Map(tl.links.map((l) => [l.node, l]));
+    const b = blocksOf(t, base[t], plan[t].maxNodes, (n) => {
+      const l = twin.get(n);
+      if (!l) return undefined;
+      const P = plan[l.tile], k = P.blockOf[l.twin];
+      // в блок с таблицей ссылка — номер записи, умноженный на два (у завода
+      // чётная у 507 из 507), docs/formats/xac.md «Элемент 0x0000»
+      return [{ level: 1, block: base[l.tile] + k, ref: 2 * P.firsts[k].first[P.localOf[l.twin]] }];
+    });
+    if (b.maxNodes !== plan[t].maxNodes || b.blocks.length !== plan[t].blocks.length)
+      throw new Error('тайл ' + codes[t] + ': раскладка второго прохода разошлась с первым');
+    return b;
+  });
+
+  // ---- файлы тайлов ----
+  const files = [], tiles = [], regs = [], rows = [];
+  let turns = 0, turnLost = 0;
+  for (let t = 0; t < N; t++) {
+    const tl = sp.tiles[t], built = builtAll[t], code = codes[t];
+    turns += built.turns; turnLost += built.turnLost;
+    const names = [];
+    let zen = null;
+    if (o.places) {
+      zen = roads.zenModel(tl, built, { places: o.places, houses: hs && hs.out[t],
+                                        countryName: o.countryName || 'CYPRUS',
+                                        placeIn: (x, y) => sp.tileAt(x, y) === t });
+      names.push(zenamen.buildSection({ names: zen.names, refs: zen.refs, blocks: zen.blocks,
+                                        version: 2, label: 'ZE-NAMEN', country: CYPRUS }));
+      names.push(zenamen.mmiBuildSection(zen.mmi));
+      if (zen.houses) names.push(require('./hausnr').buildSection({ rows: zen.hnr }));
+    }
+    const name1 = prefix + '_' + code + '_1';
+    const file1 = tile.buildTile({
+      code, file: name1, index: t, country: CYPRUS, built: built14,
+      zf: guide[t].zf || tile.section('ZF-NAMEN', Buffer.alloc(92)),
+      blocks: built.blocks,
+      extra: names.concat([rasterSection(grid, rects[t])]),
+    });
+    const file2 = stubLevel2(code, prefix + '_' + code + '_2', t, built14);
+    const reg = strukturRecord(code, file1);
+    tile.finishHeader(file1, { group: 0, country: CYPRUS, l3: 0, record: reg });
+    regs.push(reg);
+    rows.push([1, 2, 3, 4].map((n) => levelRow(file1, n, file2, base[t])));
+    files.push({ name: name1 + '.xac', data: file1 }, { name: prefix + '_' + code + '_2.xac', data: file2 });
+    const area = built.blocks.reduce((a, b) => a + b.length, 0);
+    tiles.push({ code, nodes: tl.nodes.length, edges: tl.edges.length, blocks: built.blocks.length,
+                 area, size: file1.length, links: tl.links.length, names: tl.names.length,
+                 houses: zen ? zen.houses : 0, file: file1, graph: tl, built });
+    log('тайл ' + code + ': узлов ' + tl.nodes.length + ', рёбер ' + tl.edges.length +
+        ', узлов разреза ' + tl.links.length + ' -> блоков ' + built.blocks.length + ' с ' + base[t] +
+        ', область блоков ' + (area / 1048576).toFixed(2) + ' МБ, файл ' + (file1.length / 1048576).toFixed(2) + ' МБ' +
+        (zen ? '; имён ' + zen.names.length + ' (городов ' + zen.places + ', улиц ' + zen.streets +
+               ', домов ' + zen.houses + ')' : ''));
+  }
+  if (bans) log('запретов записано в узлы: ' + turns + (turnLost ? ', не уложилось: ' + turnLost : ''));
+  const blocks = base[N - 1] + builtAll[N - 1].blocks.length;
 
   // ---- индекс ----
-  const box = [bb[0] - 1000, bb[1] - 1000, bb[2] + 1000, bb[3] + 1000];
-  const reg = strukturRecord(code, file1);
-  tile.finishHeader(file1, { group: 0, country: CYPRUS, l3: 0, record: reg });
-  const xahBuf = buildXah(xahSrc, {
-    file1,
-    reg,
-    rows: [1, 2, 3, 4].map((n) => levelRow(file1, box, n, file2)),
-  });
+  const xahBuf = buildXah(xahSrc, { regs, rows, blocks, neighbors: split.neighbors(rects) });
   log('индекс .xah: ' + xahBuf.length + ' б (заводской ' + xahSrc.length + ')');
+  const rasBuf = ras.build(R);
+  log('растр: сетка ' + R.nx + '×' + R.ny + ', ' + rasBuf.length + ' б');
 
-  // ---- растр ----
-  const r = ras.blank({ bbox: box });
-  const fill = ras.fill(r, box, 0);
-  const rasBuf = ras.build(r);
-  log('растр: сетка ' + r.nx + '×' + r.ny + ', занято ячеек ' + fill.taken + ', ' +
-      rasBuf.length + ' б');
-
-  // ---- имена городов ----
-  const files = [
-    { name: prefix + '.ras', data: rasBuf },
-    { name: prefix + '.xah', data: xahBuf },
-  ];
+  files.push({ name: prefix + '.ras', data: rasBuf }, { name: prefix + '.xah', data: xahBuf });
   if (o.places) {
     const cities = [...new Set((o.places.features || o.places)
       .map((f) => (f.properties ? f.properties.name : f.name)).filter(Boolean))].sort();
@@ -466,24 +517,68 @@ function mkxac(opt) {
     const e = ents.find((x) => new RegExp('_\\d+\\.' + ext + '$').test(x.name));
     if (e) files.push({ name: prefix + '_0.' + ext, data: fldb.read(db, e) });
   }
-  files.push({ name: name1 + '.xac', data: file1 });
-  files.push({ name: prefix + '_' + code + '_2.xac', data: file2 });
-  // Область L3 номер 0 из одного тайла 0 (так объявлено в `L3 GRUPPEN`,
-  // `+0x50` шапки и `+0xb4` шапки тайла).
-  const area = emptyAreaFiles([0]);
+  // Область L3 номер 0 из всех тайлов (так объявлено в `L3 GRUPPEN`, `+0x50`
+  // шапки и `+0xb4` шапки тайла).
+  const area = emptyAreaFiles(rects.map((_, t) => t));
   for (const L of [3, 4]) {
     files.push({ name: prefix + '_0_' + L + '.b', data: area.b });
     files.push({ name: prefix + '_0_' + L + '.v', data: area.v });
   }
-  files.push({ name: prefix + '_4.b', data: globalL4(1) });
+  files.push({ name: prefix + '_4.b', data: globalL4(N) });
   files.sort((a, b) => (a.name < b.name ? -1 : 1));
 
   const container = buildContainer(files, headSrc);
-  return { container, files, xah: xahBuf, tile: file1, blocks: built.blocks.length,
+  return { container, files, xah: xahBuf, tiles, graph, sp, blocks, turns,
            nodes: graph.nodes.length, edges: graph.edges.length, bbox: box };
 }
 
-module.exports = { mkxac, buildXah, buildContainer, strukturRecord, levelRow,
+// Сверка с исходным графом: каждое ребро графа обязано найтись в тайлах ровно
+// один раз — целиком в одном тайле или кусками через узлы разреза, — а
+// кусков в тайлах ровно столько, сколько их сделал разрез. Рёбра читаются из
+// собранных файлов (`xacgraph.tileEdges`), узлы разреза — по координатам.
+function verifyEdges(r) {
+  const key = (p) => p.x + ',' + p.y;
+  const cut = new Set();
+  r.sp.tiles.forEach((tl) => tl.links.forEach((l) => cut.add(key(tl.nodes[l.node]))));
+  const at = new Map(), list = [];
+  let lost = 0;
+  for (const t of r.tiles) {
+    const got = xg.tileEdges(xac.sections(t.file).list.filter((x) => x.name === 'VEKTORBLOCK')
+      .map((x) => t.file.subarray(x.offset, x.offset + x.total)));
+    lost += got.lost;
+    for (const k of got.edges) {
+      const [a, b] = k.split('->'), i = list.length;
+      list.push([a, b]);
+      for (const c of [a, b]) if (cut.has(c)) { if (!at.has(c)) at.set(c, []); at.get(c).push(i); }
+    }
+  }
+  // куски склеиваются в исходные рёбра по узлам разреза
+  const seen = new Set(), whole = new Map();
+  let badCut = 0;
+  list.forEach(([a, b], i) => {
+    if (seen.has(i) || cut.has(a) && cut.has(b)) return;
+    let end = cut.has(a) ? a : b, far = cut.has(a) ? b : a, cur = i;
+    seen.add(i);
+    while (cut.has(end)) {
+      const nx = (at.get(end) || []).filter((j) => j !== cur);
+      if (nx.length !== 1) { badCut++; break; }
+      cur = nx[0]; seen.add(cur);
+      end = list[cur][0] === end ? list[cur][1] : list[cur][0];
+    }
+    const k = [far, end].sort().join('-');
+    whole.set(k, (whole.get(k) || 0) + 1);
+  });
+  let once = 0, twice = 0, missing = 0;
+  for (const e of r.graph.edges) {
+    const n = whole.get([key(r.graph.nodes[e.a]), key(r.graph.nodes[e.b])].sort().join('-')) || 0;
+    if (n === 1) once++; else if (n) twice++; else missing++;
+  }
+  const pieces = r.sp.halves.reduce((a, h) => a + h.length, 0);
+  return { edges: r.graph.edges.length, once, twice, missing, extra: whole.size - once - twice,
+           pieces, read: list.length, unused: list.length - seen.size, badCut, lost };
+}
+
+module.exports = { mkxac, buildXah, buildContainer, strukturRecord, levelRow, verifyEdges,
                    rasterSection, stubLevel2, readHouses, emptyAreaFiles, globalL4, urbanIndex,
                    EMPTY_ZF, CYPRUS };
 
@@ -492,7 +587,7 @@ if (require.main === module) {
   const out = args[0];
   const flag = (n, d) => { const i = args.indexOf('--' + n); return i >= 0 && args[i + 1] ? args[i + 1] : d; };
   if (!out || out.startsWith('--')) {
-    console.error('использование: node src/mkxac.js <выход.db> [--roads ...] [--places ...] [--houses ...]');
+    console.error('использование: node src/mkxac.js <выход.db> [--roads ...] [--places ...] [--houses ...] [--tile-nodes 65000]');
     process.exit(2);
   }
   const places = flag('places', 'out/cyp/places_geo.json');
@@ -503,6 +598,7 @@ if (require.main === module) {
     places: fs.existsSync(places) ? JSON.parse(fs.readFileSync(places, 'utf8')) : null,
     houses: fs.existsSync(houses) ? readHouses(houses) : null,
     code: flag('code', 'CY00'),
+    tileNodes: +flag('tile-nodes', 65000),
     log: (m) => console.log(m),
   });
 
@@ -511,46 +607,20 @@ if (require.main === module) {
   console.log('контейнер ' + r.container.length + ' байт (' +
               (r.container.length / 1048576).toFixed(2) + ' МБ), файлов ' + r.files.length);
 
-  // ---- сверка своими читателями ----
-  const db = fldb.open(out);
-  const ents = fldb.entries(db);
-  const v = fldb.verify(db);
-  const xahBuf = fldb.read(db, ents.find((e) => /\.xah$/.test(e.name)));
-  const reg = st.parse(xahBuf), lv = st.parseLevels(xahBuf), h = xah.header(xahBuf);
-  const code = [...reg.keys()][0];
-  const rec = reg.get(code);
-  const t = fldb.read(db, ents.find((e) => /_1\.xac$/.test(e.name)));
-  const S = xac.sections(t);
-  const byName = (n) => S.list.find((x) => x.name === n);
-  const xg = require('./xacgraph');
-  const edges = xg.tileEdges(S.list.filter((x) => x.name === 'VEKTORBLOCK')
-                              .map((x) => t.subarray(x.offset, x.offset + x.total)));
-  const R = ras.load(fldb.read(db, ents.find((e) => /\.ras$/.test(e.name))), 'CY.ras');
-
-  let regBad = 0;
-  for (const [n, off] of [['ZE-NAMEN', 0x14], ['ZE-NAMEN-MMI', 0x1c], ['HAUSNUMMERN', 0x24],
-                          ['RASTERINFOS', 0x3c]]) {
-    const s = byName(n);
-    const a = rec.sections[n] || { offset: xahBuf.readUInt32BE(0), size: 0 };
-    const ro = n === 'RASTERINFOS' ? rec.sections['RASTERINFOS'] : rec.sections[n];
-    if (!ro) continue;
-    if (s ? (ro.offset !== s.offset || ro.size !== s.total) : (ro.offset || ro.size)) regBad++;
+  // ---- сверка с исходным графом; набор целиком сверяет src/setcheck.js ----
+  const v = verifyEdges(r);
+  console.log('рёбра графа: ' + v.edges + ', ровно один раз ' + v.once + ', дважды ' + v.twice +
+              ', нет ' + v.missing + ', лишних ' + v.extra + '; кусков в тайлах ' + v.read +
+              ' (разрез дал ' + v.pieces + '), не склеено ' + v.unused + ', сбоев склейки ' + v.badCut +
+              ', неразобранных ссылок ' + v.lost);
+  let names = 0, hit = 0, coords = 0;
+  for (const t of r.tiles) {
+    const n = roads.verifyNames(t.file, t.graph, t.built);
+    names += n.total; hit += n.hit; coords += n.coords;
   }
-  const lon = (x) => x / 72000, lat = (y) => y / (40000000 / 360);
-  const nic = ras.lookup(R, Math.round(33.3823 * 72000), Math.round(35.1856 * (40000000 / 360)));
-
-  console.log('--- сверка своими читателями ---');
-  console.log('каталог FLDB: файлов ' + ents.length + ', аномалий ' + v.anomalies);
-  console.log('шапка: тайлов ' + h.tiles + ', блоков ' + h.blocks + ', разрядности ' +
-              (xah.bitsAccepted(h.bits) ? 'заводские' : 'ИЗМЕНЕНЫ'));
-  console.log('реестр: тайл ' + code + ', расхождений с файлом ' + regBad);
-  console.log('уровень 1: блоков ' + lv[1].rows[0].blockCount + ', firstBlock ' +
-              lv[1].rows[0].firstBlock + ', рамка ' +
-              lon(lv[1].rows[0].bbox[0]).toFixed(2) + '…' + lon(lv[1].rows[0].bbox[2]).toFixed(2) + ' в.д., ' +
-              lat(lv[1].rows[0].bbox[1]).toFixed(2) + '…' + lat(lv[1].rows[0].bbox[3]).toFixed(2) + ' с.ш.');
-  console.log('рёбра тайла: ' + edges.edges.size + ', неразобранных ссылок ' + edges.lost);
-  console.log('растр: Никосия указывает на тайл ' + nic);
-  const bad = v.anomalies || regBad || edges.lost || nic !== 0 || h.tiles !== 1;
+  console.log('ссылки «имя -> дорога»: ' + names + ', попали в запись ' + hit + ', концы совпали ' + coords);
+  const bad = v.once !== v.edges || v.extra || v.read !== v.pieces || v.unused || v.badCut || v.lost ||
+              hit !== names || coords !== names;
   console.log(bad ? 'ЕСТЬ РАСХОЖДЕНИЯ' : 'расхождений нет');
   process.exit(bad ? 1 : 0);
 }

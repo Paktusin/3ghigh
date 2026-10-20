@@ -394,8 +394,16 @@ test('уровни: тайл любого уровня влезает в u16 п�
 test('грубые уровни: дорога через весь Кипр возвращается из тома в градусах', () => {
   const road = [[32.42, 34.75], [33.00, 35.10], [33.36, 35.17], [34.55, 35.65]];
   const lines = [{ name: 'A1', cls: 'motorway', pts: road }];
-  // предел разрешения уровня: половина сырой единицы в километрах по долготе
-  const limit = L => Math.max(0.002, (1 << L.shift) / gm.UNITS_PER_LON * 88.9);
+  // предел: допуск упрощения линий (1,5 единицы уровня) плюс половина единицы, в км
+  const limit = L => Math.max(0.002, (lvTol(L) + 1) * (1 << L.shift) / gm.UNITS_PER_LON * 88.9);
+  const lvTol = L => (L.shift ? 1.5 : 0);
+  const km = (p, q) => [(p[0] - q[0]) * 88.9, (p[1] - q[1]) * 111.1];
+  // расстояние от точки до ломаной, км
+  const toLine = (q, pts) => Math.min(...pts.slice(1).map((b, i) => {
+    const a = pts[i], [dx, dy] = km(b, a), [px, py] = km(q, a);
+    const t = Math.max(0, Math.min(1, (px * dx + py * dy) / (dx * dx + dy * dy || 1)));
+    return Math.hypot(px - t * dx, py - t * dy);
+  }));
   for (const lv of [0, 1, 2, 3, 5, 8, 11]) {
     const v = V(lines, { levels: [lv] });
     const ls = linesOf(v, lv);
@@ -405,9 +413,8 @@ test('грубые уровни: дорога через весь Кипр во�
       assert.equal(l.t.b10, lv === 0 ? 0 : 1, 'L' + lv + ': путь записи как у завода');
       assert.ok(l.raw.every(p => p.x <= l.f.X && p.y <= l.f.Y), 'L' + lv + ': внутри тайла');
     }
-    const all = ls.flatMap(l => l.pts);
     for (const q of road) {
-      const err = Math.min(...all.map(p => Math.hypot((p[0] - q[0]) * 88.9, (p[1] - q[1]) * 111.1)));
+      const err = Math.min(...ls.map(l => (l.pts.length > 1 ? toLine(q, l.pts) : Infinity)));
       assert.ok(err <= limit(L), 'L' + lv + ': вершина ' + q + ' — промах ' + err.toFixed(3) + ' км');
     }
   }
@@ -581,4 +588,18 @@ test('подписи: имя улицы на L0…L2, номер дороги н
     const want = new Set([...(lv <= 2 ? ['LEOFOROS MAKARIOY/0'] : []), ...(lv <= 4 ? ['A1/354'] : [])]);
     assert.deepEqual(new Set(got), want, 'L' + lv);
   }
+});
+
+test('дороги: куски одной улицы, сходящиеся концами, склеиваются в одну линию', () => {
+  const a = [33.30, 35.16], b = [33.301, 35.16], c = [33.302, 35.161], d = [33.303, 35.161];
+  const lines = [
+    { name: 'MAKARIOU', cls: 'primary', pts: [b, c] },
+    { name: 'MAKARIOU', cls: 'primary', pts: [a, b] },
+    { name: 'MAKARIOU', cls: 'primary', pts: [d, c] },     // оцифрован навстречу
+  ];
+  const m = G.mergeLines(lines, 0);
+  assert.equal(m.length, 1, 'одна линия');
+  assert.deepEqual(m[0].pts, [a, b, c, d]);
+  // развилка: в точке сходятся три — не склеиваем через неё
+  assert.equal(G.mergeLines(lines.concat([{ name: 'MAKARIOU', cls: 'primary', pts: [c, [33.302, 35.17]] }]), 0).length, 3);
 });

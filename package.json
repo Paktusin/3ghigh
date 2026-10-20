@@ -10,7 +10,7 @@
     "build": "npm run image && npm run meta && npm run check",
     "image": "node src/mkcyprus.js out/cyprus",
     "meta": "node src/mkmeta.js out/cyprus",
-    "check": "node src/setcheck.js out/cyprus --donor CY00",
+    "check": "node src/setcheck.js out/cyprus",
     "card": "tools/write_maps.sh cyprus",
     "probe": "tools/write_probe.sh",
     "xac": "node src/mkxac.js out/cyp/CY.xac.db",

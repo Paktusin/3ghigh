@@ -1,7 +1,9 @@
 'use strict';
 // Сверка собранного набора перед поездкой к машине.
 //
-//   node src/setcheck.js out/cyp-set-named [--donor IS01]
+//   node src/setcheck.js out/cyprus [--donor CY01]
+//
+// Без `--donor` проверяются все тайлы набора и связи между ними (`checkTiles`).
 //
 // Проверяется только то, что можно проверить здесь: сходится ли реестр с
 // настоящим файлом тайла, цела ли сквозная нумерация блоков, читаются ли
@@ -179,6 +181,89 @@ function check(root, donor) {
            edgesErr: edges.err || null, names };
 }
 
+// Связи тайлов между собой — то, чего не видно по одному тайлу:
+//   * шапка тайла (+0x4c) и блоки (0x34, 0x36) согласны с реестром, рамка
+//     строки L1 = рамке шапки (так у завода);
+//   * `.ras` и `RASTERINFOS` каждого тайла: ячейка отдана тайлу в `.ras` <=>
+//     в его маске 0 (сверка как по заводу, docs/formats/xac.md);
+//   * нульвекторы: пара 1 ведёт в соседа по `NACHBARN`, в блок уровня 1,
+//     узел-цель с той же координатой, у него нульвектор обратно в наш узел,
+//     и у обеих копий ровно по одной записи (так у завода, 438 из 438).
+function checkTiles(root) {
+  const c = findContainer(root);
+  const xah = fldb.read(c.db, c.ents.find((e) => /[.]xah$/.test(e.name)));
+  const order = [...st.parse(xah).keys()], lv = st.parseLevels(xah);
+  const nb = st.parseNeighbors(xah);
+  const attr = require('./xacrec').attributes(xah);
+  const nv = require('./nullvec'), raster = require('./raster'), ras = require('./rasidx'), xt = require('./xactile');
+  const whose = nv.blockIndex(xah, order);
+  const R = ras.load(fldb.read(c.db, c.ents.find((e) => /[.]ras$/.test(e.name))), 'ras');
+  const r = { tiles: order.length, head: 0, cells: 0, cellBad: 0, orphan: 0, links: 0, nbBad: 0,
+              levelBad: 0, coordBad: 0, backBad: 0, degBad: 0 };
+  const tiles = order.map((code, t) => {
+    const buf = fldb.read(c.db, c.ents.find((e) => e.name.indexOf('_' + code + '_1.xac') > 0));
+    const S = xac.sections(buf).list, row = lv[1].rows[t];
+    const blocks = S.filter((x) => x.name === 'VEKTORBLOCK').map((x) => buf.subarray(x.offset, x.offset + x.total));
+    const h = xt.readTile(buf);
+    const ok = h.index === t && h.bbox.join() === row.bbox.map((v) => v | 0).join() &&
+      blocks.every((b, k) => b.readUInt16BE(0x36) === row.firstBlock && b.readUInt16BE(0x34) === row.firstBlock + k);
+    if (!ok) r.head++;
+    const ri = S.find((x) => x.name === 'RASTERINFOS');
+    const m = raster.parseRaster(buf.subarray(ri.offset, ri.offset + ri.total));
+    for (let cx = 0; cx < m.nx; cx++) for (let cy = 0; cy < m.ny; cy++) {
+      r.cells++;
+      const v = ras.lookup(R, m.bbox[0] + cx * 1000 + 500, m.bbox[1] + cy * 1000 + 500);
+      if ((v === t) !== (m.cells[cx * m.ny + cy] === 0)) r.cellBad++;
+    }
+    return { blocks, graphs: blocks.map((b) => withLinks(b, xg.graphOf(b), attr, nv)), m };
+  });
+  // каждая занятая ячейка .ras лежит в сетке своего тайла
+  for (let cx = 0; cx < R.nx; cx++) for (let cy = 0; cy < R.ny; cy++) {
+    const v = ras.get(R, cx, cy);
+    if (v === ras.EMPTY) continue;
+    const m = tiles[v] && tiles[v].m, x = R.bbox[0] + cx * 1000, y = R.bbox[1] + cy * 1000;
+    if (!m || x < m.bbox[0] || y < m.bbox[1] || x >= m.bbox[0] + m.nx * 1000 || y >= m.bbox[1] + m.ny * 1000) r.orphan++;
+  }
+  // нульвекторы; узел -> его первый номер в таблице
+  const first = (g, ni) => g.entryNode.indexOf(ni);
+  tiles.forEach((T, t) => T.graphs.forEach((g, bi) => g.nodes.forEach((n, ni) => {
+    for (const q of n.links) {
+      r.links++;
+      const w = whose(q.block);
+      if (!w || w.level !== 1 || q.level !== 1) { r.levelBad++; continue; }
+      const u = order.indexOf(w.code);
+      if (nb[t].indexOf(u) < 0) r.nbBad++;
+      const tb = tiles[u].blocks[w.local], tg = tiles[u].graphs[w.local];
+      const got = nv.resolve(tb, q.ref);
+      if (!got || got.c.x !== n.x || got.c.y !== n.y) { r.coordBad++; continue; }
+      const tw = tg.nodes.find((x) => x.off === got.at);
+      const back = tw && tw.links.find((l) => l.level === 1);
+      if (!back || back.block !== lv[1].rows[t].firstBlock + bi || back.ref !== 2 * first(g, ni)) r.backBad++;
+      if (n.entries.length !== 1 || !tw || tw.entries.length !== 1) r.degBad++;
+    }
+  })));
+  r.bad = r.head + r.cellBad + r.orphan + r.nbBad + r.levelBad + r.coordBad + r.backBad + r.degBad;
+  return r;
+}
+
+// Нульвекторы узлов. Ищутся так, как их находит обходчик прошивки: за
+// последней записью узла (номера записей — по таблице блока). Разбор блока
+// подряд (`xacwrite.readBlock`) для этого не годится: слово 0x8xxx
+// (встречная ссылка в другой блок) он не знает и дальше списка не идёт.
+function withLinks(b, g, attr, nv) {
+  const tab = b.readUInt32BE(0x6c), last = new Int32Array(g.nodes.length).fill(-1);
+  g.entryNode.forEach((ni, i) => { if (ni >= 0) last[ni] = i; });
+  g.nodes.forEach((n, ni) => {
+    n.links = [];
+    if (last[ni] < 0) return;
+    const p = b.readUInt16BE(tab + last[ni] * 2) * 2, k = b.readUInt16BE(p) >>> 14;
+    // слово 0x0xxx — узел без записей: таблица указывает прямо за координату
+    const end = k === 1 ? p + 2 : k === 2 ? p + 4 : k === 3 ? require('./xacrec').record(b, p, attr, () => {}).end : p;
+    if (end + 14 <= tab && b.readUInt16BE(end) === 0) n.links = nv.pairs(b, end, nv.wideMask(b)).list.filter(Boolean);
+  });
+  return g;
+}
+
 // Рамка Кипра. Точки за её пределами — не сбой: в кипрском извлечении OSM
 // есть паромные терминалы на турецком берегу (Анамур, переправа на север
 // острова), они и выходят наружу. Поэтому считаются отдельно, а не в ошибки.
@@ -330,7 +415,7 @@ function checkGdb(root) {
            bad: levels.filter((l) => l.ok !== l.n).length };
 }
 
-module.exports = { check, checkLit, checkGdb };
+module.exports = { check, checkTiles, checkLit, checkGdb };
 
 if (require.main === module) {
   const args = process.argv.slice(2);
@@ -344,9 +429,15 @@ if (require.main === module) {
   // или только с отрисовкой) — тогда проверяется то, что есть.
   const pkgdb = path.join(root, 'pkgdb');
   const hasXac = fs.existsSync(pkgdb) && fs.readdirSync(pkgdb).some((d) => /^XAC/.test(d));
-  const r = hasXac ? check(root, (flag('donor', 'CY00')).toUpperCase()) : null;
-  if (!r) console.log('набор ' + root + ': компонента XAC нет, проверяю остальное');
-  if (r) {
+  let rs = [], links = null;
+  if (hasXac) {
+    const c = findContainer(root);
+    const xah = fldb.read(c.db, c.ents.find((e) => /[.]xah$/.test(e.name)));
+    const donor = flag('donor', null);
+    rs = (donor ? [donor.toUpperCase()] : [...st.parse(xah).keys()]).map((t) => check(root, t));
+    if (!donor) links = checkTiles(root);
+  } else console.log('набор ' + root + ': компонента XAC нет, проверяю остальное');
+  for (const r of rs) {
   console.log('набор ' + root + ', компонент ' + r.container + ', тайл ' + r.donor +
               ' (номер ' + r.gi + ')');
   for (const x of r.reg) {
@@ -382,6 +473,15 @@ if (require.main === module) {
       ', ссылок ' + n.refs + (n.err ? ', ОШИБКА ' + n.err : ''));
     console.log('дерево: записей ' + n.mmi + ', корней ' + n.roots + ', листьев ' + n.leaves);
   }
+  }
+  if (links) {
+    const l = links;
+    console.log('тайлов ' + l.tiles + ': шапки и блоки против реестра — расхождений ' + l.head +
+      '; RASTERINFOS против .ras — ячеек ' + l.cells + ', расхождений ' + l.cellBad +
+      ', ячеек .ras вне сетки своего тайла ' + l.orphan);
+    console.log('нульвекторов ' + l.links + ': не уровень 1 ' + l.levelBad + ', не в соседа ' + l.nbBad +
+      ', координата не сошлась ' + l.coordBad + ', нет обратной связи ' + l.backBad +
+      ', не по одной записи у копий ' + l.degBad);
   }
   const gdb = checkGdb(root);
   if (gdb) {
@@ -420,11 +520,12 @@ if (require.main === module) {
               (poi && (poi.bad.length || !poi.leaves || !poi.inside ||
                        (poi.own && (poi.stops !== poi.blocks || poi.hit !== poi.seen ||
                                     poi.poiPath === false || (poi.addr && poi.addr.errors.length))))) ||
-              (r && (r.regBad || r.numErr || r.lost || r.fldb.anomalies ||
+              (links && links.bad) ||
+              rs.some((r) => r.regBad || r.numErr || r.lost || r.fldb.anomalies ||
               (r.names && (!r.names.streamExact || !r.names.refsExact || r.names.err)) ||
               (r.houses && (r.houses.bad || !r.houses.indexOk ||
                             r.houses.refs !== r.houses.inRefs)) ||
-              (r.guide && (r.guide.err || r.guide.parsed !== r.guide.count))));
+              (r.guide && (r.guide.err || r.guide.parsed !== r.guide.count)));
   console.log(bad ? 'ЕСТЬ РАСХОЖДЕНИЯ' : 'расхождений нет');
   process.exit(bad ? 1 : 0);
 }

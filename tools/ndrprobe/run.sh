@@ -36,16 +36,41 @@ done
 # сторожем с лимитом, и снимок доходит до конца в любом случае.
 guard() {
   s=$1; f=$2; shift 2
-  ( "$@" > "$f" 2>&1 ; echo "__ЗАВЕРШЕНО__" >> "$f" ; sync ) &
+  rm -f "$f.ok"
+  ( "$@" > "$f" 2>&1 ; echo "__ЗАВЕРШЕНО__" >> "$f" ; : > "$f.ok" ; sync ) &
   p=$!; n=0
   while [ $n -lt $s ] ; do kill -0 $p 2>/dev/null || break; sleep 1; n=$((n+1)); done
   kill -9 $p 2>/dev/null; sleep 1
-  grep -q "__ЗАВЕРШЕНО__" "$f" 2>/dev/null || echo "__ЗАВИСЛО после ${s}с__" >> "$f"
+  # grep на машине нет — признак завершения отдельным файлом
+  [ -f "$f.ok" ] && rm -f "$f.ok" || echo "__ЗАВИСЛО после ${s}с__" >> "$f"
   sync
 }
 for f in dbglvl 0 g p ; do
   guard 5 "${OUT}/navi_$f.txt" cat "/hbsystem/multicore/navi/$f"
 done
+
+# --- следы прошлых загрузок: sloginfo в памяти и после перезагрузки пуст,
+#     а дампы падений и времена записи файлов на флеше остаются ---
+pidin info > "${OUT}/pidin_info.txt" 2>&1
+# кто крутит диск: открытые файлы и набег времени процессора по потокам
+pidin -p MMI3GApplication fds > "${OUT}/fds_mmi3gapp.txt" 2>&1
+pidin -p ndr fds              > "${OUT}/fds_ndr.txt"     2>&1
+# где крутятся потоки: регистры (PC) — пять снимков, чтобы поймать цикл
+for i in 1 2 3 4 5 ; do
+  echo "===== срез $i =====" >> "${OUT}/regs_mmi3gapp.txt"
+  pidin -p MMI3GApplication regs >> "${OUT}/regs_mmi3gapp.txt" 2>&1
+  sleep 1
+done
+for i in 1 2 3 ; do
+  echo "===== срез $i =====" >> "${OUT}/times_repeat.txt"
+  pidin -p MMI3GApplication times >> "${OUT}/times_repeat.txt" 2>&1
+  pidin -p ndr times              >> "${OUT}/times_repeat.txt" 2>&1
+  sleep 5
+done
+guard 15 "${OUT}/hbp_listing.txt" ls -laR /HBpersistence/
+# дампы падений (core), архив ошибок и журналы irc (Exception, MAPINFO) — копия
+mkdir -p "${OUT}/hbp_syslog"
+guard 30 "${OUT}/hbp_syslog_copy.txt" cp -R /HBpersistence/syslog/. "${OUT}/hbp_syslog/"
 
 # --- описатель базы и нав-персистентность (флеш, не /mnt/nav — безопасно) ---
 guard 10 "${OUT}/hbp_navi_listing.txt" ls -laR /HBpersistence/navi

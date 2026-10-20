@@ -175,7 +175,9 @@ const attrOf = r => (r.attr === undefined ? r.cls : r.attr) >>> 0;
 // них. Многоугольник моря поверх суши не кладётся: у завода вода (0x50)
 // рисуется ПОСЛЕ суши (озёра в тайле Германии идут последними).
 const LAND = 0x5f, SEA = 0x50;
-const MAX_TRIS = 21845;                  // 3·n ≤ 65535 точек в одном элементе
+// 3·n точек в элементе; поле позволяет 65535, но у завода во всей Европе нет
+// многоугольника больше 1818 точек — режем на куски по 1500 (500 треугольников)
+const MAX_TRIS = 500;
 
 function areaElements(area, f) {
   if (!area || area.empty) return [gm.encodeFrame(f.X, f.Y, f.W, f.simple)];
@@ -308,17 +310,12 @@ function landArea(rings, X, Y) {
 const edgeKey = e => (typeof e === 'string' ? e : e[0].join(',') + '>' + e[1].join(','));
 const area2 = ([a, b, c]) => (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]);
 
-// Дуглас — Пекер для замкнутого кольца (допуск в тех же единицах)
-function simplifyRing(pts, tol) {
-  if (pts.length < 8 || tol <= 0) return pts;
+// Дуглас — Пекер для ломаной: концы остаются (допуск в тех же единицах)
+function simplifyLine(pts, tol) {
+  if (pts.length < 3 || tol <= 0) return pts;
   const keep = new Uint8Array(pts.length);
-  const stack = [[0, pts.length - 1]];
   keep[0] = keep[pts.length - 1] = 1;
-  // кольцо режем на две дуги по самой дальней от первой точке
-  let far = 0, fd = -1;
-  for (let i = 1; i < pts.length; i++) { const d = Math.hypot(pts[i][0] - pts[0][0], pts[i][1] - pts[0][1]); if (d > fd) { fd = d; far = i; } }
-  keep[far] = 1;
-  stack.length = 0; stack.push([0, far], [far, pts.length - 1]);
+  const stack = [[0, pts.length - 1]];
   while (stack.length) {
     const [i0, i1] = stack.pop();
     const [ax, ay] = pts[i0], [bx, by] = pts[i1];
@@ -331,6 +328,14 @@ function simplifyRing(pts, tol) {
     if (mi >= 0) { keep[mi] = 1; stack.push([i0, mi], [mi, i1]); }
   }
   return pts.filter((_, i) => keep[i]);
+}
+
+// То же для замкнутого кольца: режем на две дуги по самой дальней от первой точке
+function simplifyRing(pts, tol) {
+  if (pts.length < 8 || tol <= 0) return pts;
+  let far = 0, fd = -1;
+  for (let i = 1; i < pts.length; i++) { const d = Math.hypot(pts[i][0] - pts[0][0], pts[i][1] - pts[0][1]); if (d > fd) { fd = d; far = i; } }
+  return simplifyLine(pts.slice(0, far + 1), tol).concat(simplifyLine(pts.slice(far), tol).slice(1));
 }
 
 // Кольца суши (градусы) → кольца уровня в сырых единицах от начала карты
@@ -377,20 +382,26 @@ const OVERLAY = [
   { cls: 'water', attr: 0x50, maxLevel: 11, e9: a => (a >= 5 ? 34 : a >= 0.5 ? 25 : 18) },
 ];
 
-// Объект мельче ~4×4 единиц уровня на уровень не идёт
+// Объект мельче ~4×4 единиц уровня (выше L0 — 8×8) на уровень не идёт
 function minKm2(L) {
   const unit = (1 << L.shift) * 88.9 / 72000;          // км на сырую единицу по долготе у Кипра
-  return Math.max(0.002, 16 * unit * unit);            // и не меньше 2000 м² — участки-крошки не берём
+  const side = L.shift ? 8 : 4;
+  return Math.max(0.002, side * side * unit * unit);   // и не меньше 2000 м² — участки-крошки не берём
 }
 // Допуск упрощения слоёв: 6 единиц (на L0 ~7 м) — мельче глазу не видно, а
 // тайл с лесом и застройкой Никосии иначе не влезает ни в какой размер
 const LAYER_TOL = 6;
+// Выше L0 — грубее: с допуском 6 и крошками 4×4 площади давали тайлам L1–L2
+// вдвое больше тайлов на кластер, чем у завода
+const layerTol = L => (L.shift ? 16 : LAYER_TOL);
+// Допуск упрощения линий выше L0 — 1,5 единицы уровня, как у суши
+const LINE_TOL = 1.5;
 
 function layersForLevel(opts, lv, L) {
   const out = [];
   if (lv >= 4) {
     for (const b of (opts.bands || [])) {
-      const rings = landForLevel(b.rings, L, { tol: LAYER_TOL });
+      const rings = landForLevel(b.rings, L, { tol: layerTol(L) });
       if (rings.length) out.push({ attr: (0x60 | (b.h << 8)) >>> 0, e9: 0xff, rings });
     }
   }
@@ -402,7 +413,7 @@ function layersForLevel(opts, lv, L) {
       if (f.cls !== o.cls || f.km2 < lim) continue;
       const e9 = o.e9(f.km2);
       if (!groups.has(e9)) groups.set(e9, []);
-      groups.get(e9).push(...landForLevel(f.rings, L, { tol: LAYER_TOL }));
+      groups.get(e9).push(...landForLevel(f.rings, L, { tol: layerTol(L) }));
     }
     for (const [e9, rings] of [...groups].sort((a, b) => a[0] - b[0])) if (rings.length) out.push({ attr: o.attr, e9, rings });
   }
@@ -781,6 +792,55 @@ function splitGrid(pts, sx, sy) {
 // кластера размер тайла один, а между кластерами он гуляет от 2^5 до 2^0.
 //
 // opts.level — номер уровня (по умолчанию 0).
+// Склейка линий: пути OSM одного класса и с одной подписью, сходящиеся концами
+// ровно вдвоём, становятся одной линией. Без этого тайл набирался из тысяч
+// коротких обрезков — элементов втрое больше заводского максимума, а каждый
+// элемент занимает место в куче NDL (5 МиБ).
+function mergeLines(lines, lv) {
+  const items = lines.map((ln) => {
+    const raw = Array.isArray(ln);
+    const c = classFor(lv, raw ? null : ln.cls);
+    const labels = raw ? [] : labelsFor(lv, ln);
+    return { pts: (raw ? ln : ln.pts) || [], c, labels,
+             key: c.cls + '|' + c.e9 + '|' + labels.map(l => l.hi + ':' + l.text).join(';') };
+  });
+  const at = new Map();                        // группа + точка -> номера линий с концом в ней
+  const end = (it, p) => it.key + '@' + p[0] + ',' + p[1];
+  items.forEach((it, i) => {
+    if (it.pts.length < 2) return;
+    for (const p of [it.pts[0], it.pts[it.pts.length - 1]]) {
+      const k = end(it, p);
+      if (!at.has(k)) at.set(k, []);
+      at.get(k).push(i);
+    }
+  });
+  const used = new Uint8Array(items.length);
+  const other = (i, p) => {                    // второй, ещё не взятый конец в точке p
+    const l = at.get(end(items[i], p));
+    if (!l || l.length !== 2 || l[0] === l[1]) return -1;
+    const j = l.find(x => !used[x]);
+    return j === undefined ? -1 : j;
+  };
+  // нарастить линию с конца, пока в нём ровно один сосед своей группы
+  const grow = (i, pts) => {
+    for (let j; (j = other(i, pts[pts.length - 1])) >= 0;) {
+      used[j] = 1;
+      const q = items[j].pts, last = pts[pts.length - 1];
+      const fwd = q[0][0] === last[0] && q[0][1] === last[1];
+      pts = pts.concat((fwd ? q : q.slice().reverse()).slice(1));
+    }
+    return pts;
+  };
+  const out = [];
+  items.forEach((it, i) => {
+    if (used[i]) return;
+    used[i] = 1;
+    const pts = it.pts.length < 2 ? it.pts : grow(i, grow(i, it.pts.slice()).reverse()).reverse();
+    out.push({ pts, c: it.c, labels: it.labels });
+  });
+  return out;
+}
+
 function roadsToLevel(lines, opts = {}) {
   const lvNr = opts.level || 0;
   const L = Object.assign({}, EUROPE_LEVELS[lvNr]);
@@ -790,21 +850,20 @@ function roadsToLevel(lines, opts = {}) {
   // 1. дороги по кластерам — в ячейках уровня (дробных)
   const perCluster = new Map();
   let skipped = 0;
-  for (const ln of lines) {
-    const coords = Array.isArray(ln) ? ln : ln.pts;
-    if (!coords || coords.length < 2) { skipped++; continue; }
-    const c = classFor(lvNr, Array.isArray(ln) ? null : ln.cls);
-    const cells = coords.map(([lon, lat]) => [cellXL(lon, L), cellYL(lat, L)]);
+  for (const ln of mergeLines(lines, lvNr)) {
+    if (ln.pts.length < 2) { skipped++; continue; }
+    const cells = ln.pts.map(([lon, lat]) => [cellXL(lon, L), cellYL(lat, L)]);
     for (const run of splitGrid(cells, CW, CH)) {
       const k = run.gx + ',' + run.gy;
       if (!perCluster.has(k)) perCluster.set(k, { cx: run.gx, cy: run.gy, pieces: [] });
-      perCluster.get(k).pieces.push({ cells: run.pts, cls: c.cls, e9: c.e9, labels: Array.isArray(ln) ? [] : labelsFor(lvNr, ln) });
+      perCluster.get(k).pieces.push({ cells: run.pts, cls: ln.c.cls, e9: ln.c.e9, labels: ln.labels });
     }
   }
 
   // 1б. суша: кольца уровня и кластеры, которых они касаются (в том числе
   //     без единой дороги — суша нужна и там)
-  const land = landForLevel(opts.land, L, { ccw: true });
+  // берег выше L0 грубее (4 единицы): с 1,5 он давал половину самых тяжёлых тайлов L1
+  const land = landForLevel(opts.land, L, { ccw: true, tol: L.shift ? 4 : 1.5 });
   const layers = layersForLevel(opts, lvNr, L);
   const CWr = CW * L.cellX / u, CHr = CH * L.cellY / u;       // кластер в сырых единицах
   for (const r of land) {
@@ -835,13 +894,15 @@ function roadsToLevel(lines, opts = {}) {
       }).filter(Boolean);
     const cland = cut(land);
     const clayers = layers.map(ly => Object.assign({}, ly, { rings: cut(ly.rings) })).filter(ly => ly.rings.length);
-    // если ни один размер не влез — вторая попытка без подписей (лучше дороги
-    // без имён, чем без дорог)
-    for (let attempt = 0; attempt < 2 && !chosen; attempt++) {
-      if (attempt === 1) { for (const pc of c.pieces) pc.labels = []; unlabeled++; }
+    // если ни один размер не влез в заводские рамки — вторая попытка до
+    // пределов формата, третья без подписей (лучше дороги без имён, чем без дорог)
+    for (let attempt = 0; attempt < 3 && !chosen; attempt++) {
+      const cap = attempt === 0 ? budget : MAX_BLOB;
+      if (attempt === 2) { for (const pc of c.pieces) pc.labels = []; unlabeled++; }
       for (const [lw, lh] of tileSizes(L)) {
-        // размер кластера в таблице уровня — u16: не больше 3449 записей по 19 байт
-        if ((L.potX - lw) + (L.potY - lh) > 11) break;
+        // размер кластера в таблице уровня — u16: не больше 3449 записей по 19 байт;
+        // в первой попытке 1024 (19 456 б) — у завода индекс не больше 22 809 б
+        if ((L.potX - lw) + (L.potY - lh) > (attempt === 0 ? 10 : 11)) break;
         const f = tileFormat(L, lw, lh);
         const step = [1 << lw, 1 << lh];
         const byTile = new Map();
@@ -858,10 +919,13 @@ function roadsToLevel(lines, opts = {}) {
             }
             // на грубых уровнях единица крупная: кусок может схлопнуться в точку
             if (raw.length < 2) { out++; continue; }
-            for (let s = 0; s < raw.length - 1; s += 0xfffe) {
+            // выше L0 линии упрощаются, как площади: у завода детальность
+            // уровня — его единица, точки OSM как есть раздувают тайлы L1–L4
+            const line = lvNr > 0 ? simplifyLine(raw, LINE_TOL) : raw;
+            for (let s = 0; s < line.length - 1; s += 0xfffe) {
               const k = tx + ',' + ty;
               if (!byTile.has(k)) byTile.set(k, { tx, ty, roads: [] });
-              byTile.get(k).roads.push({ pts: raw.slice(s, s + 0xffff), cls: pc.cls, e9: pc.e9, labels: pc.labels });
+              byTile.get(k).roads.push({ pts: line.slice(s, s + 0xffff), cls: pc.cls, e9: pc.e9, labels: pc.labels });
             }
           }
         }
@@ -900,7 +964,7 @@ function roadsToLevel(lines, opts = {}) {
           let blob;
           const area = areas.get(t.tx + ',' + t.ty) || null;
           try { blob = tileBlob(t.roads, f, area); } catch (e) { fits = false; break; }
-          if (blob.length > budget) { fits = false; break; }
+          if (blob.length > cap) { fits = false; break; }
           tiles.push({
             ix: (t.tx - c.cx * CW) >> lw, iy: (t.ty - c.cy * CH) >> lh,
             lw, lh, blob, attr: f.W, b10: f.simple ? 1 : 0, lines: t.roads.length, land: area ? (area.full ? 'full' : 'coast') : null,
@@ -1014,7 +1078,7 @@ function component(outDir, v, opt) {
 module.exports = {
   landArea, regionTris, clipRing, simplifyRing, landForLevel, layersForLevel, OVERLAY, LAND, SEA,
   PROLOGUE, SIG, VERSION, FRAME, MAGIC, MAX_BLOB, FRAME_ELEMENT, EUROPE_LEVELS, CLUSTER_REC,
-  tileBlob, emptyTile, readTileRoads, tileFormat, classFor, splitGrid, mortonIndex, clusterBlob, build,
+  tileBlob, emptyTile, readTileRoads, tileFormat, classFor, splitGrid, mergeLines, mortonIndex, clusterBlob, build,
   degToTile, degToTileL, cellX, cellY, cellXL, cellYL, roadsToLevel, volumeFromRoads,
   linesForLevel, labelsFor, LEVEL_CLASSES, TILE_CELLS, TILE_SIZES, tileSizes, component,
 };

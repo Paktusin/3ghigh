@@ -244,6 +244,25 @@ function speedFor(f, hw, urban) {
   return town ? 50 : 80;
 }
 
+// Дуглас — Пекер по отрезку [s, e] массива xy: номера оставленных точек после
+// s, включая e.
+function keepIdx(xy, s, e, tol) {
+  const keep = [e];
+  const stack = [[s, e]];
+  while (stack.length) {
+    const [i0, i1] = stack.pop();
+    const [ax, ay] = xy[i0], [bx, by] = xy[i1];
+    const L = Math.hypot(bx - ax, by - ay) || 1;
+    let mi = -1, md = tol;
+    for (let i = i0 + 1; i < i1; i++) {
+      const d = Math.abs((bx - ax) * (ay - xy[i][1]) - (ax - xy[i][0]) * (by - ay)) / L;
+      if (d > md) { md = d; mi = i; }
+    }
+    if (mi >= 0) { keep.push(mi); stack.push([i0, mi], [mi, i1]); }
+  }
+  return keep.sort((a, b) => a - b);
+}
+
 // GeoJSON -> узлы и рёбра в единицах карты. Точки, севшие в одну единицу,
 // склеиваются; петля (ребро из узла в него же) отбрасывается.
 function graphFromGeoJSON(fc, opt) {
@@ -261,6 +280,36 @@ function graphFromGeoJSON(fc, opt) {
     let i = byKey.get(k);
     if (i === undefined) { i = nodes.length; nodes.push({ x, y }); byKey.set(k, i); }
     return i;
+  };
+  // Узла «точка изгиба» в XAC нет — каждая точка линии становится узлом. С
+  // `opt.tol` (единицы карты) линии между опорными точками — концами и общими
+  // для нескольких дорог — упрощаются, и узлов становится в разы меньше.
+  const tol = (opt && opt.tol) || 0;
+  const keyOf = (q) => Math.round(q[0] * LON) + ',' + Math.round(q[1] * LAT);
+  const shared = new Set();
+  if (tol) {
+    const uses = new Map();
+    for (const f of fc.features || []) {
+      if (!f.geometry || f.geometry.type !== 'LineString') continue;
+      for (const k of new Set(f.geometry.coordinates.map(keyOf))) uses.set(k, (uses.get(k) || 0) + 1);
+    }
+    for (const [k, n] of uses) if (n > 1) shared.add(k);
+  }
+  const thin = (c) => {
+    if (!tol || c.length < 3) return c;
+    const xy = c.map((q) => [q[0] * LON, q[1] * LAT]);
+    const out = [c[0]];
+    let s = 0;
+    const seen = new Set([keyOf(c[0])]);
+    for (let k = 1; k < c.length; k++) {
+      const key = keyOf(c[k]);
+      const anchor = k === c.length - 1 || shared.has(key) || seen.has(key);
+      seen.add(key);
+      if (!anchor) continue;
+      for (const i of keepIdx(xy, s, k, tol)) out.push(c[i]);
+      s = k;
+    }
+    return out;
   };
 
   for (const f of fc.features || []) {
@@ -289,8 +338,8 @@ function graphFromGeoJSON(fc, opt) {
       if (ri === undefined) { ri = rawNames.length; rawNames.push(rawText); byRaw.set(rawText, ri); }
     }
     ways++;
-    const c = f.geometry.coordinates;
-    points += c.length;
+    points += f.geometry.coordinates.length;
+    const c = thin(f.geometry.coordinates);
     let prev = c.length ? nodeAt(c[0][0], c[0][1]) : -1;
     for (let k = 1; k < c.length; k++) {
       const cur = nodeAt(c[k][0], c[k][1]);
@@ -508,6 +557,7 @@ function buildBlocks(graph, opt) {
         }
         return {
           turns,
+          links: o.links && o.links(gi),
           x: graph.nodes[gi].x, y: graph.nodes[gi].y,
           vectors: r.vecs.map((v) => v.cross === undefined
             ? { to: v.to, idx: v.idx, names: v.names }
@@ -525,6 +575,7 @@ function buildBlocks(graph, opt) {
     }
     if (over) { maxNodes = Math.floor(maxNodes * 0.7); continue; }
     return { blocks, groups, local: lay.local, cross: lay.cross, maxNodes,
+             blockOf: lay.blockOf, localOf: lay.localOf, firsts,
              oneway: lay.oneway, owLost: lay.owLost, turns: turnsWritten, turnLost,
              names: nameRefs(graph, lay, firsts, groups.length) };
   }
@@ -644,11 +695,19 @@ function zenModel(graph, built, opt) {
     }
   }
 
-  // 0 — страна, дальше города, дальше улицы; порядок пока свой, сортируем ниже
+  // 0 — страна, дальше города, дальше улицы; порядок пока свой, сортируем ниже.
+  // С `o.placeIn(x, y)` (тайл из нескольких) город берётся, если на нём висит
+  // улица этого тайла или он сам лежит в зоне тайла.
   const rows = [{ name: latinize(o.countryName || 'COUNTRY'), refs: null, kind: 'root', up: -1 }];
-  places.forEach((p) => rows.push({ name: p.name, refs: null, kind: 'place', up: 0 }));
+  const used = new Set([...streets.values()].map((st) => st.place));
+  const row = [];
+  places.forEach((p, i) => {
+    if (o.placeIn && !used.has(i) && !o.placeIn(p.x, p.y)) return;
+    row[i] = rows.length;
+    rows.push({ name: p.name, refs: null, kind: 'place', up: 0 });
+  });
   for (const st of streets.values()) rows.push({
-    name: st.name, kind: 'street', up: st.place < 0 ? 0 : 1 + st.place,
+    name: st.name, kind: 'street', up: st.place < 0 ? 0 : row[st.place],
     refs: [...st.by.keys()].sort((a, b) => a - b)
       .map((block) => ({ block, recs: [...st.by.get(block)].sort((a, b) => a - b) })),
     houses: st.houses || null,
@@ -683,7 +742,7 @@ function zenModel(graph, built, opt) {
     return out;
   });
   return { names, refs, mmi, hnr, blocks: built.names.blocks,
-           places: places.length, streets: streets.size,
+           places: row.filter((x) => x !== undefined).length, streets: streets.size,
            houses: hnr.reduce((a, x) => a + (x ? x.length : 0), 0), houseStat: stat };
 }
 
