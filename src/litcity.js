@@ -133,14 +133,17 @@ function countryByCode(dirs, code, lang) {
 }
 
 // Поиск POI по названию (вид 0x10 -> узел 0x33 -> список названий -> точка).
-// Узел 0x33: витки «0x49 селектор, 0x3c куда»; уровень поиска 7…18 — нечётный
-// вид 0x10 (узел), чётный — по селектору: {2,3,4,13,14,15,17,19,20,22,23,24,25}
-// и 600…799 -> снова узел (вид 0x12), прочие -> список имён (вид 0x11)
-// (FUN_08ccdd2c, FUN_08cd05c0). Какой виток выбирает интерфейс — из кода не
-// дочитано; у завода порядок постоянный: страна — 9 телефоны, 9 названия, 2
-// категории (Ватикан 176815:0, Мальта 245455:0), город — 1 названия (Валлетта
-// 245484:2188). Имя с несколькими точками ведёт в узел 0x33 с селектором 1 ->
-// список 0x31 точек (Ватикан 176815:4 -> :7 -> :10).
+// Узел 0x33: витки «0x49 селектор, 0x3c куда»; селектор в данных — приращение
+// к предыдущему витку (правило 0x49 с флагом ADD, FUN_08cc7b3c), здесь он уже
+// сложен. Номер селектора — критерий описания места «Имя\t#N»: 1 Name,
+// 2 POI Kategorie, 9 PhoneNumber, 16 Geopos, 18 OriginalName, 20 Oberkategorie
+// (строки 0x093f7f34…, 0x09577e10…; LiPoiAh — 0x085a02a2). Уровень поиска
+// 7…18 — нечётный вид 0x10 (узел), чётный — по селектору: {2,3,4,13,14,15,17,
+// 19,20,22,23,24,25} и 600…799 -> снова узел (вид 0x12), прочие -> список имён
+// (вид 0x11) (FUN_08ccdd2c, FUN_08cd05c0). У завода страна — 9 телефоны,
+// 18 названия, 20 категории (все 46 стран EU), город — 1 названия, 20
+// категории (Валлетта, Ватикан 176815:238). Имя с несколькими точками ведёт в
+// узел 0x33 с селектором 1 -> список 0x31 точек (Ватикан 176815:4 -> :7 -> :10).
 function elAt(get, pos) {
   const g = get(pos[0]);
   const e = g.map.get(pos[1]);
@@ -150,9 +153,10 @@ function selectors(get, pos) {
   const g = get(pos[0]);
   const i = g.els.findIndex((e) => e.key === pos[1]);
   if (i < 0 || g.els[i].type !== 0x33) return null;
-  const out = [{ sel: g.els[i].f['49'], target: g.els[i].f['3c'] }];
+  let sel = g.els[i].f['49'];
+  const out = [{ sel, target: g.els[i].f['3c'] }];
   for (let j = i + 1; j < g.els.length && g.els[j].loop && g.els[j].type === 0x33; j++)
-    out.push({ sel: g.els[j].f['49'], target: g.els[j].f['3c'] });
+    out.push({ sel: (sel += g.els[j].f['49']), target: g.els[j].f['3c'] });
   return out;
 }
 const POI_NODE_SELS = new Set([2, 3, 4, 13, 14, 15, 17, 19, 20, 22, 23, 24, 25]);
@@ -187,7 +191,38 @@ function poiSearch(get, node, sel, nth) {
   return rep;
 }
 
-module.exports = { enumerate, cities, countryByCode, selectors, poiSearch };
+// Поиск по категории (LiPoiAh: «Oberkategorie\t#20» -> «POI Kategorie\t#2»,
+// FUN_0813f45c сверяет предпоследний критерий с «Type\t#2» / «Category\t#20»):
+// узел 0x33 -> 20 -> узел групп -> группа: узел [2 -> узел категорий,
+// sel -> названия точек группы] -> категория: узел [sel -> названия её точек].
+// sel — 18 у страны, 1 у города. Ответ: группы {номер -> {pois, cats}} и
+// категории {номер -> pois} (позиции точек «блок:ключ»).
+function catSearch(get, node, sel) {
+  const rep = { groups: new Map(), cats: new Map(), bad: [] };
+  const pick = (pos, s) => {
+    const x = (selectors(get, pos) || []).find((y) => y.sel === s);
+    if (!x) rep.bad.push('нет селектора ' + s + ' в ' + pos);
+    return x ? x.target : null;
+  };
+  const pois = (list) => {
+    const o = { pois: new Set(), bad: rep.bad };
+    if (list) for (const x of enumerate(get, list, null, 1e6).out) poisOf(get, x.target, o);
+    return o.pois;
+  };
+  const top = pick(node, 20);
+  for (const g of (top && selectors(get, top)) || []) {
+    const sub = pick(g.target, 2);
+    const ent = { pois: pois(pick(g.target, sel)), cats: [] };
+    for (const c of (sub && selectors(get, sub)) || []) {
+      ent.cats.push(c.sel);
+      if (!rep.cats.has(c.sel)) rep.cats.set(c.sel, pois(pick(c.target, sel)));
+    }
+    rep.groups.set(g.sel, ent);
+  }
+  return rep;
+}
+
+module.exports = { enumerate, cities, countryByCode, selectors, poiSearch, catSearch };
 
 if (require.main === module) {
   const [dirs, country] = process.argv.slice(2);

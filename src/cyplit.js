@@ -207,7 +207,7 @@ function buildAddr(pois, o, tpl, cap, slots) {
   for (const P1 of plans) if (P1.plan) for (const lf of P1.plan.leaves) lf.pois.forEach((q, i) => posOf.set(q, [lf.slot.blk, 1 + i]));
   const C = next;
   const wrap = pois.filter((q) => posOf.has(q)).map((q) => ({ name: q.name, cat: q.cat, x: q.x, y: q.y,
-                                                                phone: q.phone, pos: posOf.get(q), src: q }));
+                                                                phone: q.phone, alt: q.alt, pos: posOf.get(q), src: q }));
   const dir = A.directory(o.addr, { countryBlk: C, pois: wrap });
   const dpos = A.layout(dir.blocks);
   const refOf = new Map();
@@ -285,6 +285,8 @@ function buildAddr(pois, o, tpl, cap, slots) {
                                         leaves: l.leaves.map((x) => x.blk) })),
            layerOf,
            poiRefs, dirStats: dir.stats,
+           // для сверки поиска по категории: точки страны и точки каждого города
+           catExpect: { country: wrap, cities: dir.cityPois.map((c) => ({ pos: dpos.get(c.sym), pois: c.pois })) },
            cities: dir.stats.cities, streets: dir.stats.streets, postcodes: dir.stats.postcodes,
            bytes: list.reduce((a, b) => a + b.length, 0),
            parts: { root: list[0].length, tables: fac ? sizeOf(1, EU_TABLE_LAST_BLOCK + 1) : 0,
@@ -369,8 +371,8 @@ function verify(buf, r, pois) {
     if (r.countryBlk !== undefined) {
       rep.addr = A.walk(ks.get);
       // поиск POI по названию — эмулятор пути прошивки (src/litcity.js poiSearch):
-      // страна, вид 0x10 (последняя 0x36) -> узел 0x33 -> второй селектор 9
-      // (названия), первый 9 (телефоны); город, 0x4000 -> селектор 1
+      // страна, вид 0x10 (последняя 0x36) -> узел 0x33 -> селектор 18
+      // (названия), 9 (телефоны); город, 0x4000 -> селектор 1
       const LC = require('./litcity');
       const root0 = ks.get(0).map.get(0);
       const ce = A.entriesFrom(ks.get, root0.f['3c'])[0].target;
@@ -378,12 +380,18 @@ function verify(buf, r, pois) {
       const cr = [cty.f['36']].concat(cty.f['36*'] || []);
       const node = cr[4];
       if (node && node[0] >= 0) {
-        // телефонов нет — селектор 9 один, и это названия
-        const two = LC.selectors(ks.get, node).filter((x) => x.sel === 9).length > 1;
-        const nm = LC.poiSearch(ks.get, node, 9, two ? 1 : 0);
+        const two = LC.selectors(ks.get, node).some((x) => x.sel === 9);
+        const nm = LC.poiSearch(ks.get, node, 18, 0);
         const ph = two ? LC.poiSearch(ks.get, node, 9, 0) : { names: 0, pois: 0, bad: [] };
         rep.poiSearch = { names: nm.names, pois: nm.pois, bad: nm.bad.length + ph.bad.length,
                           phones: ph.names, phonePois: ph.pois, sample: nm.sample, cities: 0, cityPois: 0 };
+        // поиск по категории (litcity.catSearch): страна — селектор 18, город — 1
+        rep.catSearch = { errors: [], cats: 0, groups: 0, pois: 0, cities: 0, cityPois: 0 };
+        const cityExp = new Map((r.catExpect ? r.catExpect.cities : []).map((c) => [c.pos.join(':'), c.pois]));
+        if (r.catExpect) {
+          const cc = catCheck(rep.catSearch, LC.catSearch(ks.get, node, 18), r.catExpect.country, 'страна');
+          rep.catSearch.cats = cc.cats; rep.catSearch.groups = cc.groups; rep.catSearch.pois = cc.pois;
+        }
         // города: 0x4000 — последняя 0x36 записи города
         for (const c of LC.enumerate(ks.get, cr[0], null, 1e6).out) {
           const city = ks.get(c.target[0]).map.get(c.target[1]);
@@ -393,7 +401,10 @@ function verify(buf, r, pois) {
           if (!t || t[0] < 0) continue;
           const cs = LC.poiSearch(ks.get, t, 1, 0);
           rep.poiSearch.cities++; rep.poiSearch.cityPois += cs.pois; rep.poiSearch.bad += cs.bad.length;
+          const exp = cityExp.get(c.target.join(':'));
+          if (exp) { catCheck(rep.catSearch, LC.catSearch(ks.get, t, 1), exp, 'город ' + c.name); rep.catSearch.cities++; cityExp.delete(c.target.join(':')); }
         }
+        rep.catSearch.missing = cityExp.size;
         // 0x66 точки -> виток 0x31 категории её города, а его 0x3c — сама точка
         let ok = 0, n = 0;
         for (const L of lays) for (const b of L.leaves) {
@@ -448,6 +459,9 @@ function verify(buf, r, pois) {
   }
   rep.bad = rep.keysOk !== rep.blocks || rep.parsedOk !== rep.blocks || rep.leavesEnd !== r.leaves ||
             rep.poisBack !== r.pois || rep.hit !== rep.seen || rep.poiPath === false || rep.layerHdr === false ||
+            (rep.catSearch && (rep.catSearch.errors.length > 0 || rep.catSearch.missing > 0 ||
+                               rep.catSearch.pois !== (r.dirStats.poisInCities || 0) ||
+                               rep.catSearch.cityPois !== (r.dirStats.poisInCities || 0))) ||
             (rep.poiSearch && (rep.poiSearch.bad || rep.poiSearch.pois !== (r.dirStats.poisInCities || 0) ||
                                rep.poiSearch.cityPois !== (r.dirStats.poisInCities || 0) ||
                                rep.poiSearch.backOk !== rep.poiSearch.backSeen)) ||
@@ -460,6 +474,42 @@ function verify(buf, r, pois) {
                           rep.addr.cities.length !== r.cities + ((r.dirStats && r.dirStats.districts) || 0) ||
                           rep.addr.streets !== r.streets + ((r.dirStats && r.dirStats.districtStreets) || 0)));
   return rep;
+}
+
+// Сверка дерева категорий с ожидаемым: каждая категория с точками есть в
+// группе 39 и во всех своих заводских группах (A.POI_GROUPS), лишних нет;
+// список категории даёт ровно её точки; список группы — ровно точки её
+// категорий. В город — те же правила по его точкам. Итог копится в acc.
+function catCheck(acc, got, pois, where) {
+  const A = require('./litaddr');
+  const key = (q) => q.pos.join(':');
+  const err = (m) => acc.errors.push(where + ': ' + m);
+  const byCat = new Map();
+  for (const q of pois) { if (!byCat.has(q.cat)) byCat.set(q.cat, new Set()); byCat.get(q.cat).add(key(q)); }
+  for (const e of got.bad) err(e);
+  const want = new Map([[39, [...byCat.keys()].sort((a, b) => a - b)]]);
+  for (const [g, cs] of Object.entries(A.POI_GROUPS)) {
+    const mine = cs.filter((c) => byCat.has(c));
+    if (mine.length) want.set(+g, mine);
+  }
+  const same = (a, b) => a.size === b.size && [...a].every((x) => b.has(x));
+  if (!same(new Set(want.keys()), new Set(got.groups.keys()))) err('группы ' + [...got.groups.keys()] + ' вместо ' + [...want.keys()]);
+  let reached = 0;
+  for (const [g, cs] of want) {
+    const ent = got.groups.get(g);
+    if (!ent) continue;
+    if (ent.cats.join(',') !== cs.join(',')) err('группа ' + g + ': категории ' + ent.cats + ' вместо ' + cs);
+    const all = new Set([].concat(...cs.map((c) => [...byCat.get(c)])));
+    if (!same(ent.pois, all)) err('группа ' + g + ': точек ' + ent.pois.size + ' вместо ' + all.size);
+  }
+  for (const [c, ks] of byCat) {
+    const p = got.cats.get(c);
+    if (!p || !same(p, ks)) err('категория ' + c + ': точек ' + (p ? p.size : 0) + ' вместо ' + ks.size);
+    else reached += ks.size;
+  }
+  if (where === 'страна') return { cats: got.cats.size, groups: got.groups.size, pois: reached };
+  acc.cityPois += reached;
+  return null;
 }
 
 function report(rep, r, log) {
@@ -493,11 +543,18 @@ function report(rep, r, log) {
                      r.dirStats.districtStreets + ')');
   if (rep.poiSearch) {
     const q = rep.poiSearch;
-    log('поиск POI (litcity.poiSearch): страна, селектор 9 «названия» — имён ' + q.names + ' -> точек ' + q.pois +
+    log('поиск POI (litcity.poiSearch): страна, селектор 18 «названия» — имён ' + q.names + ' -> точек ' + q.pois +
         ' (напр. «' + q.sample[0] + '»); 9 «телефоны» — ' + q.phones + ' -> ' + q.phonePois +
         '; города с 0x4000: ' + q.cities + ', селектор 1 -> точек ' + q.cityPois +
         '; 0x66 точки -> виток 0x31 категории города и обратно: ' + q.backOk + ' из ' + q.backSeen +
         (q.bad ? '; ОШИБОК ' + q.bad : ''));
+  }
+  if (rep.catSearch) {
+    const c = rep.catSearch;
+    log('поиск по категории (litcity.catSearch): страна, 20 -> групп ' + c.groups + ', категорий ' + c.cats +
+        ', точек через свою категорию ' + c.pois + '; города: ' + c.cities + ' (без дерева ' + (c.missing || 0) +
+        '), точек через категорию города ' + c.cityPois +
+        (c.errors.length ? '; ОШИБОК ' + c.errors.length + ': ' + c.errors.slice(0, 3).join('; ') : ''));
   }
   log(rep.bad ? 'ЕСТЬ РАСХОЖДЕНИЯ' : 'расхождений нет');
 }

@@ -192,3 +192,35 @@ test('POI: повороты названий, телефоны, двойники
   assert.equal(l31.tokens()[0].u8, 0xe1);
   assert.equal(l31.n, 2);
 });
+
+test('ключи точки: второе имя с поворотами, без повторов', () => {
+  const k = A.poiKeys({ name: 'ALPHAGRAND AUTOSERVICE', alt: 'ALPHA GRAND AUTO SERVICE' });
+  assert.ok(k.includes('ALPHA GRAND AUTO SERVICE'), 'второе имя');
+  assert.ok(k.includes('GRAND AUTO SERVICE%ALPHA '), 'его поворот');
+  assert.equal(A.poiKeys({ name: 'X Y', alt: 'X Y' }).length, 2, 'одинаковое второе имя не дублируется');
+});
+
+test('узел 0x33: селекторы пишутся приращением (9, 18, 20 -> 9, 9, 2, как у завода)', () => {
+  const t = A.select33('n', [{ sel: 9, target: 'a' }, { sel: 18, target: 'b' }, { sel: 20, target: 'c' }]).tokens();
+  assert.deepEqual(t.filter((x) => x.v !== undefined).map((x) => x.v), [9, 9, 2]);
+  assert.throws(() => A.select33('n', [{ sel: 18, target: 'a' }, { sel: 9, target: 'b' }]));
+});
+
+test('дерево категорий: группа 39 — все, заводские группы, список группы — из её категорий', () => {
+  const pois = [{ name: 'BANK A', cat: 8, pos: [9, 1] }, { name: 'POST B', cat: 10, pos: [9, 2] },
+                { name: 'HOTEL C', cat: 29, pos: [9, 3] }, { name: 'SHOP D', cat: 181, pos: [9, 4] }];
+  const r = A.catTree('t', pois, 18, 'all');
+  const bySym = new Map(r.records.map((x) => [x.sym, x]));
+  const sels = (s) => { let a = 0; return bySym.get(s).tokens().filter((x) => x.v !== undefined).map((x) => (a += x.v)); };
+  assert.deepEqual(sels('t'), [39, 42, 47]);            // 181 — вне групп, только в 39
+  assert.deepEqual(sels('t:s39'), [8, 10, 29, 181]);
+  assert.deepEqual(sels('t:s47'), [8, 10]);
+  assert.deepEqual(sels('t:m47'), [2, 18]);
+  assert.deepEqual(sels('t:l8'), [18]);
+  const ref = (s) => bySym.get(s).tokens().filter((x) => x.ref !== undefined).map((x) => x.ref);
+  assert.equal(ref('t:m39')[1], 'all', 'у группы 39 — общий список названий');
+  assert.equal(ref('t:m42')[1], ref('t:l29')[0], 'одна категория — её же список');
+  assert.ok(String(ref('t:m47')[1]).startsWith('t:g47'), 'у группы из двух категорий — свой список');
+  const m = A.catTree('c', pois, 1, 'all').records.find((x) => x.sym === 'c:m47');
+  assert.deepEqual(m.tokens().filter((x) => x.v !== undefined).map((x) => x.v), [1, 1], 'у города: 1 названия, 2 категории');
+});

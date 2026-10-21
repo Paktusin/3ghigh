@@ -120,3 +120,19 @@ test('отбор чередует категории, важные чаще', ()
   assert.equal(by.size, 3, 'в первых тридцати должны быть все три категории');
   assert.ok(by.get(56) > by.get(107), 'заправок должно быть больше, чем зоопарков');
 });
+
+test('точка без названия: по бренду везде, по типу — только где важно место', () => {
+  assert.equal(C.unnamed({ amenity: 'pharmacy' }, 'APOTHEKE'), 'PHARMACY');
+  assert.equal(C.unnamed({ amenity: 'atm', operator: 'Bank of Cyprus' }, 'GELDAUTOMAT'), 'BANK OF CYPRUS');
+  assert.equal(C.unnamed({ amenity: 'parking' }, 'PARKPLATZ'), 'PARKING');
+  assert.equal(C.unnamed({ leisure: 'pitch' }, 'AKTIVER SPORT'), null);
+  assert.equal(C.classify({ amenity: 'parking', access: 'private' }), null);
+  assert.equal(C.unnamed({ shop: 'supermarket', brand: 'Lidl' }, 'LEBENSMITTEL'), 'LIDL');
+});
+
+test('парковки: только большие и не для клиентов', () => {
+  assert.equal(C.classify({ amenity: 'parking', access: 'customers' }), null);
+  assert.ok(C.bigParking({ amenity: 'parking', parking: 'multi-storey' }, 0));
+  assert.ok(C.bigParking({ amenity: 'parking' }, 2500));
+  assert.ok(!C.bigParking({ amenity: 'parking' }, 800));
+});

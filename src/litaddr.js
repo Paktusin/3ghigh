@@ -513,22 +513,27 @@ function names(sym, items, owner, opt) {
 }
 
 // Узел выбора 0x33 (ведущий 0xf0 | n при n <= 3, иначе байт n): витки
-// «0x49 селектор, 0x3c куда». Селектор решает, что дальше (`FUN_08cd05c0`):
-// {2,3,4,13,14,15,17,19,20,22,23,24,25} и 600…799 — снова узел выбора,
-// прочие — список имён. Ватикан 176815:0: 9 -> телефоны, 9 -> названия, 2 ->
-// категории; город Валлетта: 1 -> названия всех POI города, 19 -> ...
+// «0x49 селектор, 0x3c куда». Селектор в витках записан ПРИРАЩЕНИЕМ к
+// предыдущему: правило 0x49 у 0x33 с флагом ADD (0x1000), и FUN_08cc7b3c
+// при этом флаге делает `local_30 += значение`. Поэтому заводские «9, 9, 2»
+// у страны — это 9, 18, 20. Здесь sels — настоящие номера, по возрастанию.
+// Номер — критерий описания места «Имя\t#N» (строки навигации 0x093f7f34…,
+// 0x09577e10…): 1 Name, 2 Type / POI Kategorie, 9 PhoneNumber,
+// 16 Geopos, 18 OriginalName, 20 Category / Oberkategorie. Селектор решает,
+// что дальше (`FUN_08cd05c0`): {2,3,4,13,14,15,17,19,20,22,23,24,25} и
+// 600…799 — снова узел выбора, прочие — список имён.
 function select33(sym, sels) {
+  sels.forEach((s, i) => { if (i && s.sel < sels[i - 1].sel) throw new Error('0x33 ' + sym + ': селекторы не по возрастанию'); });
   return {
     sym, n: sels.length, entries: sels.map((_, i) => sym + '#' + i),
     tokens: () => {
       const n = sels.length;
       const t = n <= 3 ? [{ u8: 0xf0 | n }] : [{ u8: 0xf0 }, { u8: n }];
-      for (const s of sels) t.push({ v: s.sel }, { ref: s.target });
+      sels.forEach((s, i) => t.push({ v: s.sel - (i ? sels[i - 1].sel : 0) }, { ref: s.target }));
       return t;
     },
   };
 }
-
 
 // Повороты названия по словам — так у завода в списках названий POI: «SAN
 // PIETRO%BASILICA DI » (Ватикан 176815:33) — хвост, «%», голова с пробелом.
@@ -542,6 +547,13 @@ function rotations(name) {
     out.push(name.slice(at) + '%' + name.slice(0, at));
   }
   return out;
+}
+
+// Ключи точки в списке названий: имя, второе имя (`alt_name`), если оно
+// другое, и повороты обоих по словам.
+function poiKeys(q) {
+  const names = q.alt && q.alt !== q.name ? [q.name, q.alt] : [q.name];
+  return [...new Set(names.flatMap((n) => [n].concat(rotations(n))))];
 }
 
 // Телефон -> цифры с кодом страны, как у завода («39066388333», Мальта — «356…»).
@@ -577,6 +589,51 @@ function poiNames(sym, pois, keys) {
   }
   const n = names(sym, items, null);
   return { records: n.records.concat(extra), head: n.head, entries: items.length };
+}
+
+// Группы категорий (Oberkategorie, селектор 20) -> категории (POI Kategorie,
+// селектор 2). Снято с завода: у всех 46 стран EU одно и то же (несовпадений
+// 0), группа 39 — все категории страны. Категории вне групп (у завода их точек
+// нет) кладутся только в 39.
+const POI_GROUPS = {
+  40: [84, 87], 41: [38, 39, 40, 44, 56, 73, 192, 242], 42: [29], 43: [46],
+  44: [1, 2, 5, 7, 11, 17, 18, 41, 44, 58, 72, 73, 192, 242], 45: [9, 13, 33, 34, 57, 59, 60],
+  46: [9, 23, 31, 45, 47, 55, 60, 93, 174], 47: [8, 10, 15, 22, 32, 43, 51, 167],
+  48: [12, 16, 21, 27, 30, 37, 50, 52, 53, 54, 62, 63, 68],
+};
+
+// Дерево категорий (селектор 20 узла поиска POI), как у завода (Ватикан
+// 176815:44 — страна, 176815:268 — город): узел групп -> у группы узел
+// [2 -> узел категорий, sel -> названия точек группы] -> у категории узел
+// [sel -> названия её точек]. sel — 18 у страны, 1 у города. all — уже
+// готовый список названий всех точек (для группы 39). Завод повторяет списки
+// под каждой группой; здесь один список категории на все ссылки.
+function catTree(sym, pois, sel, all) {
+  const byCat = new Map();
+  for (const q of pois) { if (!byCat.has(q.cat)) byCat.set(q.cat, []); byCat.get(q.cat).push(q); }
+  const cats = [...byCat.keys()].sort((a, b) => a - b);
+  const recs = [], lists = new Map();
+  for (const c of cats) {
+    const l = poiNames(sym + ':k' + c, byCat.get(c), poiKeys);
+    lists.set(c, l.head);
+    recs.push(select33(sym + ':l' + c, [{ sel, target: l.head }]), ...l.records);
+  }
+  const groups = [[39, cats]].concat(Object.entries(POI_GROUPS).map(([g, cs]) => [+g, cs.filter((c) => byCat.has(c))]))
+    .filter(([, cs]) => cs.length);
+  const tops = [];
+  for (const [g, cs] of groups) {
+    let names = g === 39 && all ? all : cs.length === 1 ? lists.get(cs[0]) : null;
+    if (!names) {
+      const l = poiNames(sym + ':g' + g, [].concat(...cs.map((c) => byCat.get(c))), poiKeys);
+      recs.push(...l.records);
+      names = l.head;
+    }
+    recs.push(select33(sym + ':s' + g, cs.map((c) => ({ sel: c, target: sym + ':l' + c }))),
+              select33(sym + ':m' + g, [{ sel: 2, target: sym + ':s' + g }, { sel, target: names }]
+                .sort((a, b) => a.sel - b.sel)));
+    tops.push({ sel: g, target: sym + ':m' + g });
+  }
+  return { records: [select33(sym, tops)].concat(recs), head: sym, cats: cats.length, groups: groups.length };
 }
 
 // Оценка размера записи (ссылка — до 5 байт), чтобы раскладывать по блокам.
@@ -715,12 +772,15 @@ function directory(model, opt) {
       sts.forEach((x) => t31Entry.set(it.x.qk + '@' + x.si, l.entryOf(x)));
     }
     // поиск POI в городе (0x4000): узел 0x33, селектор 1 -> названия всех точек
-    // города (как Валлетта 245491:1847); категории (цикл 0x2000) -> 0x31 точек
+    // города (как Валлетта 245491:1847), 20 -> дерево категорий (так у всех 86
+    // городов Мальты с точками); категории (цикл 0x2000) -> 0x31 точек
     let poiTree = null, cats = [], poiRecs = [];
     if (p.pois.length) {
-      const pn2 = poiNames('c' + p.i + ':pn', p.pois, (q) => [q.name].concat(rotations(q.name)));
+      const pn2 = poiNames('c' + p.i + ':pn', p.pois, poiKeys);
       poiTree = 'c' + p.i + ':pt';
-      poiRecs.push(select33(poiTree, [{ sel: 1, target: pn2.head }]), ...pn2.records);
+      const ct = catTree('c' + p.i + ':ct', p.pois, 1, pn2.head);
+      poiRecs.push(select33(poiTree, [{ sel: 1, target: pn2.head }, { sel: 20, target: ct.head }]),
+                   ...pn2.records, ...ct.records);
       const byCat = new Map();
       for (const q of p.pois) { if (!byCat.has(q.cat)) byCat.set(q.cat, []); byCat.get(q.cat).push(q); }
       for (const [cat, qs] of [...byCat].sort((a, b) => a[0] - b[0])) {
@@ -786,20 +846,22 @@ function directory(model, opt) {
   // все улицы страны (вид 7): имя -> имя улицы в списке её города
   const allItems = model.streets.map((s, si) => ({ name: s.name, target: streetEntry.get(si) })).filter((x) => x.target);
   const an = allItems.length ? names('cy:streets', allItems, null) : null;
-  // поиск POI в стране (вид 0x10): узел 0x33, селектор 9 -> названия всех точек
-  // (Ватикан 176815:0, Мальта 245455:2)
+  // поиск POI в стране (вид 0x10): узел 0x33 (Ватикан 176815:0, Мальта 245455:0)
   let cpoi = null, cpRecs = [];
   if (pois.length) {
-    // первый селектор 9 — телефоны (у Мальты индекс с приставкой «356»),
-    // второй 9 — названия с поворотами слов
+    // 9 — телефоны (у Мальты индекс с приставкой «356»), 18 — названия с
+    // поворотами слов, 20 — дерево категорий; так у всех 46 стран EU
     const sels = [], recs = [];
     const ph = pois.filter((q) => phoneKey(q.phone));
     if (ph.length) {
       const l = poiNames('cy:ph', ph, (q) => [phoneKey(q.phone)]);
       sels.push({ sel: 9, target: l.head }); recs.push(...l.records);
     }
-    const cp = poiNames('cy:pn', pois, (q) => [q.name].concat(rotations(q.name)));
-    sels.push({ sel: 9, target: cp.head }); recs.push(...cp.records);
+    const cp = poiNames('cy:pn', pois, poiKeys);
+    sels.push({ sel: 18, target: cp.head }); recs.push(...cp.records);
+    const ct = catTree('cy:ct', pois, 18, cp.head);
+    sels.push({ sel: 20, target: ct.head }); recs.push(...ct.records);
+    stats.cats = ct.cats; stats.catGroups = ct.groups;
     cpoi = 'cy:pt';
     cpRecs = [select33(cpoi, sels)].concat(recs);
     stats.poiNames = cp.entries; stats.phones = ph.length;
@@ -818,7 +880,8 @@ function directory(model, opt) {
     blocks.push(...bs);
   }
   stats.blocks = blocks.length;
-  return { blocks, stats, poiEntry };
+  const cityPois = places.filter((p) => p.pois.length).map((p) => ({ sym: 'city' + p.i, pois: p.pois }));
+  return { blocks, stats, poiEntry, cityPois };
 }
 
 // Названия страны по языкам интерфейса. Источник — таблица названий стран в
@@ -1110,6 +1173,6 @@ function walk(get, opt) {
   return res;
 }
 
-module.exports = { layout, rotations, phoneKey, poiNames, select33, pack, estimate, nearestFn, centre, postArea, list31, readAddresses, t18, pos4, countryRecord, spellStats, statNames, STAT_IDS, modelFromRoads, walk, namesUnder, entriesFrom, encode, root, list, index, country, city, street, layer, verbatim,
+module.exports = { layout, rotations, poiKeys, phoneKey, poiNames, select33, catTree, POI_GROUPS, pack, estimate, nearestFn, centre, postArea, list31, readAddresses, t18, pos4, countryRecord, spellStats, statNames, STAT_IDS, modelFromRoads, walk, namesUnder, entriesFrom, encode, root, list, index, country, city, street, layer, verbatim,
                    layout, assemble, transplant, names, directory, anchor, bboxOf, prefix,
                    CY_NAMES, LIST_MAX, DIRECT_MAX };

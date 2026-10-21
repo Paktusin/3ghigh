@@ -214,6 +214,9 @@ const SPECIAL = [
   // `tourism=information` — это и щиты, и указатели, и карты на столбах (854 у
   // нас против единиц у завода); TOURIST INFO — только офисы
   { cat: null, test: (t) => t.tourism === 'information' && t.information !== 'office' },
+  // частные, служебные и «для клиентов» парковки не берём; из прочих — только
+  // большие (bigParking), безымянные под именем «PARKING»
+  { cat: null, test: (t) => t.amenity === 'parking' && /^(private|no|permit|psv|customers)$/.test(t.access || '') },
   { cat: 'AUDI SERVICE', test: (t) => /alpha\s*grand/i.test([t.name, t.alt_name, t['name:en']].join(' ')) },
   { cat: 'AUDI ZENTRUM', test: (t) => t.shop === 'car' && /(^|;)\s*audi\s*(;|$)/i.test(t.brand || '') },
 ];
@@ -240,6 +243,24 @@ function nameOf(tags) {
   return null;
 }
 
+// Точка без названия (у трети аптек Кипра его нет) — по бренду; в категориях,
+// где важно само место, ещё по оператору или значению тега: «PHARMACY», «ATM».
+// Безымянные площадки и парки (тысячи) не берём — загромоздят карту.
+const BY_PLACE = new Set(['PARKPLATZ', 'APOTHEKE', 'GELDAUTOMAT', 'RADARBLITZGERÄT', 'TANKSTELLE', 'BANK', 'POSTAMT',
+  'POLIZEIWACHE', 'FEUERWACHE', 'KRANKENHAUS', 'ÄRZTL. DIENST', 'AUTOWERKSTATT', 'RASTPLATZ',
+  'AUTOBAHNSERVICE', 'CAMPINGPLATZ', 'BUSBAHNHOF', 'FÄHRE/AUTOZUG', 'FLUGH. TERMINAL', 'GRENZÜBERGANG',
+  'GEBIRGSPASS', 'RATHAUS', 'YACHTHAFEN', 'TOURIST INFO']);
+function unnamed(tags, category) {
+  const tag = MAP.find(([k, v]) => tags[k] === v);
+  const more = BY_PLACE.has(category) ? [tags.operator, tag && tag[1].replace(/_/g, ' ')] : [];
+  for (const v of [tags.brand].concat(more)) {
+    if (!v) continue;
+    const s = latinize(v);
+    if (s) return s;
+  }
+  return null;
+}
+
 function fieldsOf(tags) {
   const out = {};
   const put = (key, v) => { if (v) { const s = latinize(v); if (s) out[key] = s; } };
@@ -248,9 +269,25 @@ function fieldsOf(tags) {
   put('house', tags['addr:housenumber']);
   put('post', tags['addr:postcode']);
   put('brand', tags.brand);
+  put('alt', tags.alt_name);                      // второе имя — для поиска («Alpha Grand» при «AlphaGrand»)
   const tel = tags.phone || tags['contact:phone'];
   if (tel) out.phone = String(tel).replace(/[^\d+()\- ]/g, '').trim();
   return out;
+}
+
+// Большая парковка: многоэтажная или подземная, от 50 мест, от 2000 м²
+// (~80 машин) или с названием. Безымянных площадок у магазинов тысячи.
+function bigParking(tags, m2) {
+  return tags.parking === 'multi-storey' || tags.parking === 'underground' ||
+    +tags.capacity >= 50 || m2 >= 2000 || !!nameOf(tags);
+}
+
+// Площадь контура линии OSM, м² (у Кипра градус долготы ≈ 91,6 км).
+function areaM2(idx, refs) {
+  const p = refs.map((id) => osm.coord(idx, id)).filter(Boolean).map(([x, y]) => [x / 1e7 * 91600, y / 1e7 * 111100]);
+  let a = 0;
+  for (let i = 0; i < p.length; i++) { const q = p[i], r = p[(i + 1) % p.length]; a += q[0] * r[1] - r[0] * q[1]; }
+  return Math.abs(a / 2);
 }
 
 // Сбор точек из извлечения. Узлы берутся как есть, линии — серединой.
@@ -263,10 +300,12 @@ function collect(pbf) {
   };
   const idx = osm.read(pbf, { node: want, way: want });
   const out = [];
-  const add = (tags, lon, lat) => {
+  const add = (tags, lon, lat, m2) => {
     const c = classify(tags);
-    const name = nameOf(tags);
-    if (!c || !name) return;                       // без названия точка бесполезна
+    if (!c) return;
+    if (c.category === 'PARKPLATZ' && !bigParking(tags, m2 || 0)) return;
+    const name = nameOf(tags) || unnamed(tags, c.category);
+    if (!name) return;
     out.push(Object.assign({
       rank: c.rank, cat: c.cat, category: c.category, name: name,
       lon: lon / 1e7, lat: lat / 1e7,
@@ -275,7 +314,7 @@ function collect(pbf) {
   for (const p of idx.points) add(p.tags, p.lon, p.lat);
   for (const w of idx.ways) {
     const c = osm.center(idx, w.refs);
-    if (c) add(w.tags, c[0], c[1]);
+    if (c) add(w.tags, c[0], c[1], areaM2(idx, w.refs));
   }
   void keys;
   return out;
@@ -330,7 +369,7 @@ function build(pois, opt) {
   return { model: m, bytes: best.bytes, used: best.n, dropped: list.length - best.n };
 }
 
-module.exports = { MAP, BY_CATEGORY, REMAP, SPECIAL, classify, nameOf, fieldsOf, collect, build, order, catNo, DEG };
+module.exports = { MAP, BY_CATEGORY, REMAP, SPECIAL, classify, nameOf, unnamed, bigParking, fieldsOf, collect, build, order, catNo, DEG };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
