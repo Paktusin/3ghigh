@@ -286,6 +286,7 @@ function buildAddr(pois, o, tpl, cap, slots) {
            layerOf,
            poiRefs, dirStats: dir.stats,
            // для сверки поиска по категории: точки страны и точки каждого города
+           houseExpect: dir.houseExpect.map((h) => ({ pos: dpos.get(h.sym), nums: [...h.nums] })),
            catExpect: { country: wrap, cities: dir.cityPois.map((c) => ({ pos: dpos.get(c.sym), pois: c.pois })) },
            cities: dir.stats.cities, streets: dir.stats.streets, postcodes: dir.stats.postcodes,
            bytes: list.reduce((a, b) => a + b.length, 0),
@@ -418,6 +419,30 @@ function verify(buf, r, pois) {
         }
         rep.poiSearch.backOk = ok; rep.poiSearch.backSeen = n;
       }
+      // дома (litcity.houses — путь прошивки): страна, вид 4 -> город -> его
+      // список улиц -> улица 0x07 -> группы номеров. Каждая улица с домами
+      // достижима, каждый её номер принят (FUN_08ccf41c), лишних номеров нет.
+      if (r.houseExpect) {
+        const reached = new Set();
+        for (const c of LC.enumerate(ks.get, cr[0], null, 1e6).out) {
+          const city = ks.get(c.target[0]).map.get(c.target[1]);
+          if (!city || city.type !== 3 || !(city.b1 & 1)) continue;
+          for (const x of LC.enumerate(ks.get, city.f['36'], city.f['2b'], 1e6).out) reached.add(x.target.join(':'));
+        }
+        const hr = rep.houses = { streets: 0, reached: 0, nums: 0, ok: 0, extra: 0, groups: 0, bad: [], longest: '' };
+        for (const x of r.houseExpect) {
+          hr.streets++;
+          if (reached.has(x.pos.join(':'))) hr.reached++;
+          const h = LC.houses(ks.get(x.pos[0]).map.get(x.pos[1]));
+          if (!h || h.bad) { hr.bad.push(x.pos + ': ' + (h ? h.bad : 'нет домов')); continue; }
+          hr.groups += h.groups.length;
+          if (h.text.length > hr.longest.length) hr.longest = h.text;
+          for (const n of x.nums) { hr.nums++; if (LC.houseOk(h, n)) hr.ok++; }
+          for (const g of h.groups) {
+            for (let v = g.from; v <= g.to; v += g.kind === 1 || g.kind === 2 ? 2 : 1) if (!x.nums.includes(v)) hr.extra++;
+          }
+        }
+      }
       // набор стран: запись 7000 ведёт на запись 0x02 с тем же кодом, у каждой
       // статистики позиция — та же страна; 0x40 корня = записей 0x18 подряд с (1, 0)
       const root = ks.get(0).map.get(0);
@@ -465,6 +490,9 @@ function verify(buf, r, pois) {
             (rep.poiSearch && (rep.poiSearch.bad || rep.poiSearch.pois !== (r.dirStats.poisInCities || 0) ||
                                rep.poiSearch.cityPois !== (r.dirStats.poisInCities || 0) ||
                                rep.poiSearch.backOk !== rep.poiSearch.backSeen)) ||
+            (rep.houses && (rep.houses.bad.length || rep.houses.reached !== rep.houses.streets ||
+                            rep.houses.ok !== rep.houses.nums || rep.houses.extra ||
+                            rep.houses.streets !== r.dirStats.houseStreets)) ||
             (rep.emul && (rep.emul.cities !== r.cities + ((r.dirStats && r.dirStats.districts) || 0) || rep.emul.notCity || rep.emul.byCode !== 'ок')) ||
             (rep.countrySet && (!rep.countrySet.length || rep.countrySet.some((c) => !c.ok) ||
                                 rep.tableCount.root !== rep.tableCount.found)) ||
@@ -556,6 +584,12 @@ function report(rep, r, log) {
         '), точек через категорию города ' + c.cityPois +
         (c.errors.length ? '; ОШИБОК ' + c.errors.length + ': ' + c.errors.slice(0, 3).join('; ') : ''));
   }
+  if (rep.houses) {
+    const h = rep.houses;
+    log('дома (litcity.houses): улиц с домами ' + h.streets + ', достижимы из города ' + h.reached +
+        '; номеров ' + h.nums + ', принято ' + h.ok + ', лишних в группах ' + h.extra + '; групп ' + h.groups +
+        '; самая длинная строка диапазона ' + h.longest.length + ' зн.' + (h.bad.length ? '; ОШИБОК ' + h.bad.length + ': ' + h.bad.slice(0, 3).join('; ') : ''));
+  }
   log(rep.bad ? 'ЕСТЬ РАСХОЖДЕНИЯ' : 'расхождений нет');
 }
 
@@ -579,7 +613,8 @@ if (require.main === module) {
     opt.addr = A.modelFromRoads(JSON.parse(fs.readFileSync(flag('roads', 'out/cyp/roads.geojson'), 'utf8')),
                                 JSON.parse(fs.readFileSync(flag('places', 'out/cyp/places_geo.json'), 'utf8')),
                                 { classes: flag('classes', 'motorway,motorway_link,trunk,trunk_link,primary,primary_link').split(','),
-                                  addrs: require('./litaddr').readAddresses(pbf) });
+                                  addrs: require('./litaddr').readAddresses(pbf),
+                                  houses: require('./mkxac').readHouses(pbf) });
     opt.factory = ['LIT', 'LIT2', 'LIT3', 'LIT4'].map((d) => path.join(flag('maps', 'maps'), 'pkgdb', d));
   }
   const r = build(pois, opt);

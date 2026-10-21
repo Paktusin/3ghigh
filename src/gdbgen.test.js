@@ -603,3 +603,25 @@ test('дороги: куски одной улицы, сходящиеся ко�
   // развилка: в точке сходятся три — не склеиваем через неё
   assert.equal(G.mergeLines(lines.concat([{ name: 'MAKARIOU', cls: 'primary', pts: [c, [33.302, 35.17]] }]), 0).length, 3);
 });
+
+test('таблицы ссылок: каталог на каждый блок XAC, таблицы — заводская пустая «01 00 00 00»', () => {
+  const v = V([{ cls: 'primary', pts: [[33.3, 35.16], [33.32, 35.17]] }], { xacBlocks: 3 });
+  const n = v.gdb.readUInt32BE(577), off = v.gdb.readUInt32BE(581), size = v.gdb.readUInt32BE(585);
+  assert.equal(n, 3);
+  assert.equal(size, 24);
+  for (let i = 0; i < n; i++) {
+    const o = v.gdb.readUInt32BE(off + i * 8), s = v.gdb.readUInt32BE(off + i * 8 + 4);
+    assert.equal(v.gdb.subarray(o, o + s).toString('hex'), '01000000');
+  }
+  assert.equal(V([{ cls: 'primary', pts: [[33.3, 35.16], [33.32, 35.17]] }]).gdb.readUInt32BE(577), 0);
+});
+
+test('точки разреза XAC встают в линию GDB между концами ребра', () => {
+  const U = gm.UNITS_PER_LON, W = gm.UNITS_PER_LAT;
+  const pts = [[33.30, 35.16], [33.31, 35.165], [33.32, 35.17]];
+  const w = ([lon, lat]) => ({ x: Math.round(lon * U), y: Math.round(lat * W) });
+  const mid = { x: Math.round(33.315 * U), y: Math.round(35.1675 * W) };
+  const r = G.insertCuts([{ cls: 'primary', pts }], [{ a: w(pts[0]), b: w(pts[2]), mids: [mid] }]);
+  assert.equal(r.done, 1);
+  assert.deepEqual(r.lines[0].pts.map(w), [w(pts[0]), w(pts[1]), mid, w(pts[2])]);
+});

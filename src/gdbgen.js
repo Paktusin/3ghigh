@@ -476,6 +476,30 @@ function clusterBlob(tiles) {
   return b;
 }
 
+// ── таблицы ссылок XAC → GDB (линия маршрута) ──────────────────────────────
+//
+// Линию маршрута рисует не отдельная ломаная: CGdbConvRoute::convertVectors
+// (0x08cc148c) переводит каждый вектор XAC в ссылку на линию GDB через
+// таблицу ссылок его блока (CGdbRefTableMainDirectory::getRefTable, номер
+// блока — twid >> 16). Нет каталога — поиск даёт код 1 (& 0x67), и перевод
+// маршрута обрывается с −1: маршрут считается, а линии нет.
+// Шапка +577 число, +581 смещение, +585 размер каталога: на блок XAC запись
+// {u32 смещение, u32 размер} таблицы. Пустая таблица завода «01 00 00 00»
+// (522 штуки в EJ211): уровней 0, ключ не найден — и на L0 срабатывает
+// поиск по координатам (FUN_08cb6578): линия GDB, где ТОЧНО лежат оба конца
+// вектора. Так у завода переводится ~97 % векторов L0 (docs/formats/gdb.md,
+// «Таблицы ссылок»).
+const EMPTY_REF_TABLE = Buffer.from('01000000', 'hex');
+function refDirectory(blocks, put) {
+  if (!blocks) return { count: 0, offset: 0, size: 0 };
+  const dir = Buffer.alloc(blocks * 8);
+  for (let i = 0; i < blocks; i++) {
+    dir.writeUInt32BE(put(EMPTY_REF_TABLE), i * 8);
+    dir.writeUInt32BE(EMPTY_REF_TABLE.length, i * 8 + 4);
+  }
+  return { count: blocks, offset: put(dir), size: dir.length };
+}
+
 // ── том целиком ────────────────────────────────────────────────────────────
 
 // spec = {
@@ -614,9 +638,10 @@ function build(spec) {
   // за 14 символами метки — два нулевых байта, имя с +319 (Европа и Австралия)
   head.write(String(spec.name || 'EJ211').slice(0, 8), 319, 'latin1');
   TAIL_576.copy(head, 576);
-  head.writeUInt32BE(0, 577);          // каталога блобов у собранного тома нет
-  head.writeUInt32BE(0, 581);
-  head.writeUInt32BE(0, 585);
+  const refs = refDirectory(spec.xacBlocks || 0, put);
+  head.writeUInt32BE(refs.count, 577);
+  head.writeUInt32BE(refs.offset, 581);
+  head.writeUInt32BE(refs.size, 585);
   head.writeUInt32BE(regionEnd, 589);  // начало данных
 
   // 4. уровни
@@ -852,7 +877,13 @@ function roadsToLevel(lines, opts = {}) {
   let skipped = 0;
   for (const ln of mergeLines(lines, lvNr)) {
     if (ln.pts.length < 2) { skipped++; continue; }
-    const cells = ln.pts.map(([lon, lat]) => [cellXL(lon, L), cellYL(lat, L)]);
+    // точка сперва округляется до мировой единицы ТАК ЖЕ, как узел XAC
+    // (xacroads: Math.round(lon·72000)): линия маршрута на L0 ищется по точному
+    // совпадению концов вектора с точками линии GDB (FUN_08cb6578), и прежнее
+    // округление через дробные ячейки расходилось на единицу у ~0,7 % узлов
+    const cells = ln.pts.map(([lon, lat]) => [
+      (Math.round(lon * gm.UNITS_PER_LON) - FRAME[0]) / L.cellX,
+      (Math.round(lat * gm.UNITS_PER_LAT) - FRAME[1]) / L.cellY]);
     for (const run of splitGrid(cells, CW, CH)) {
       const k = run.gx + ',' + run.gy;
       if (!perCluster.has(k)) perCluster.set(k, { cx: run.gx, cy: run.gy, pieces: [] });
@@ -1027,7 +1058,53 @@ const DEFAULT_AREAS = 'out/cyp/areas.json', DEFAULT_BANDS = 'out/cyp/bands.json'
 
 const readJson = (f, k) => { try { return JSON.parse(fs.readFileSync(f, 'utf8'))[k]; } catch (e) { return null; } };
 
+// Точки разреза тайлов XAC (src/xacsplit.js) — узлы, которых в OSM нет: ребро
+// a→b разрезано в mids. Поиск линии маршрута на L0 (FUN_08cb6578) требует, чтобы
+// ОБА конца вектора были точками одной линии GDB, поэтому точки разреза
+// вставляются в линию, где лежат a и b, — на ближайший отрезок между ними.
+// cuts: [{ a: {x, y}, b: {x, y}, mids: [{x, y}] }] в мировых единицах.
+function insertCuts(lines, cuts) {
+  const U = gm.UNITS_PER_LON, V = gm.UNITS_PER_LAT;
+  const key = ([lon, lat]) => Math.round(lon * U) + ',' + Math.round(lat * V);
+  const at = new Map();
+  lines.forEach((ln, li) => (ln.pts || []).forEach((p, k) => {
+    const s = key(p);
+    if (!at.has(s)) at.set(s, []);
+    at.get(s).push([li, k]);
+  }));
+  const out = lines.map(ln => Object.assign({}, ln));
+  const extra = new Map();                       // линия -> [{k, d, p}] вставки после точки k
+  let done = 0;
+  for (const c of cuts) {
+    const la = at.get(c.a.x + ',' + c.a.y) || [], lb = at.get(c.b.x + ',' + c.b.y) || [];
+    let hit = null;
+    for (const [li, i] of la) for (const [lj, j] of lb) if (li === lj && !hit) hit = [li, Math.min(i, j), Math.max(i, j)];
+    if (!hit) continue;
+    const [li, i, j] = hit, pts = lines[li].pts;
+    for (const m of c.mids) {
+      let best = i, bd = Infinity;
+      for (let k = i; k < j; k++) {
+        const ax = pts[k][0] * U, ay = pts[k][1] * V, bx = pts[k + 1][0] * U, by = pts[k + 1][1] * V;
+        const dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy;
+        const t = L2 ? Math.max(0, Math.min(1, ((m.x - ax) * dx + (m.y - ay) * dy) / L2)) : 0;
+        const d = (ax + t * dx - m.x) ** 2 + (ay + t * dy - m.y) ** 2;
+        if (d < bd) { bd = d; best = k + Math.min(t, 0.999999); }
+      }
+      if (!extra.has(li)) extra.set(li, []);
+      extra.get(li).push({ k: best, p: [m.x / U, m.y / V] });
+    }
+    done++;
+  }
+  for (const [li, ins] of extra) {
+    const pts = lines[li].pts, list = [];
+    pts.forEach((p, k) => list.push({ k, p }));
+    out[li].pts = list.concat(ins).sort((a, b) => a.k - b.k).map(q => q.p);
+  }
+  return { lines: out, done };
+}
+
 function volumeFromRoads(lines, opts = {}) {
+  if (opts.cuts && opts.cuts.length) lines = insertCuts(lines, opts.cuts).lines;
   if (opts.land === undefined) opts = Object.assign({}, opts, { land: defaultLand() });
   if (opts.areas === undefined) opts = Object.assign({}, opts, { areas: readJson(DEFAULT_AREAS, 'features') });
   if (opts.bands === undefined) opts = Object.assign({}, opts, { bands: readJson(DEFAULT_BANDS, 'bands') });
@@ -1078,7 +1155,7 @@ function component(outDir, v, opt) {
 module.exports = {
   landArea, regionTris, clipRing, simplifyRing, landForLevel, layersForLevel, OVERLAY, LAND, SEA,
   PROLOGUE, SIG, VERSION, FRAME, MAGIC, MAX_BLOB, FRAME_ELEMENT, EUROPE_LEVELS, CLUSTER_REC,
-  tileBlob, emptyTile, readTileRoads, tileFormat, classFor, splitGrid, mergeLines, mortonIndex, clusterBlob, build,
+  insertCuts, refDirectory, tileBlob, emptyTile, readTileRoads, tileFormat, classFor, splitGrid, mergeLines, mortonIndex, clusterBlob, build,
   degToTile, degToTileL, cellX, cellY, cellXL, cellYL, roadsToLevel, volumeFromRoads,
   linesForLevel, labelsFor, LEVEL_CLASSES, TILE_CELLS, TILE_SIZES, tileSizes, component,
 };

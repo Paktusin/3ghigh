@@ -51,3 +51,18 @@ test('завод EU: поиск по категории у Ватикана — 
   }
   o.L.vols.forEach((v) => fs.closeSync(v.fd));
 });
+
+// Дома улицы: группы 0x203 по FUN_08ccefac сверены с HAUSNUMMERN тайла MJ00
+// (те же номера у одноимённой улицы XAC, 1050 концов групп из 1050).
+test('завод EU: дома мальтийских улиц и Ватикана', { skip: !has(EU) }, () => {
+  const KS = require('./litkeys');
+  const o = KS.open(EU);
+  const at = (b, k) => LC.houses(o.get(b).map.get(k));
+  assert.equal(at(93230, 3584).text, 'o1-3,86');                 // TRIQ RAYMOND CARUANA
+  assert.equal(at(93227, 4973).text, '1,e8-18');                 // TRIQ DESAIN
+  assert.equal(at(93230, 1782).text, '4-5,48');                  // TRIQ IL-KONSERVATORJU
+  assert.equal(at(43061, 255).text, '1');                        // VIA DEL PELLEGRINO
+  const h = at(93227, 4973);
+  assert.deepEqual([1, 8, 9, 18, 20].map((n) => LC.houseOk(h, n)), [true, true, false, true, false]);
+  o.L.vols.forEach((v) => fs.closeSync(v.fd));
+});

@@ -235,16 +235,43 @@ function list31(sym, items, o) {
   };
 }
 
+// Улица 0x07. Бит 4 ведущего — дома: вызов 0x1002 (правила 367…386) сразу за
+// рамкой. Там байт флагов (младший ниббл — число значений, 0 — дальше varint;
+// бит 6 не ставим — короткая форма) и значения 0x203 (houseValues).
 function street(sym, o) {
+  const hv = o.houses && o.houses.size ? houseValues(o.houses) : null;
   return {
     sym, n: 0,
     tokens: () => {
-      const t = [{ u8: o.min ? 0x03 : 0x00 }, { pair: o.center }];
+      const t = [{ u8: (o.min ? 0x03 : 0x00) | (hv ? 0x10 : 0) }, { pair: o.center }];
       if (o.min) t.push({ pair: o.min }, { pair: o.max });
+      if (hv) {
+        t.push({ u8: hv.length <= 15 ? hv.length : 0 });
+        if (hv.length > 15) t.push({ v: hv.length });
+        for (const v of hv) t.push({ v });
+      }
       t.push({ v: 0 });                                 // перекрёстков нет
       return t;
     },
   };
+}
+
+// Номера домов -> значения 0x203, обратное к FUN_08ccefac: v & 3 — вид (0 —
+// один номер v >> 2; 1/2 — чётные/нечётные от 2·(v >> 2) [+1] до него же плюс
+// 2·d; 3 — все подряд от v >> 2 до плюс d), d — следующее значение. Пишем только
+// сами номера: подряд идущие — видом 3, через один (от трёх) — видом 1/2,
+// прочие — по одному. Порядок — по возрастанию, как у завода (Мальта).
+function houseValues(nums) {
+  const a = [...nums].sort((x, y) => x - y), out = [];
+  for (let i = 0; i < a.length;) {
+    let j = i, k = i;
+    while (a[j + 1] === a[j] + 1) j++;
+    while (a[k + 1] === a[k] + 2) k++;
+    if (j > i) { out.push((a[i] << 2) | 3, a[j] - a[i]); i = j + 1; }
+    else if (k - i >= 2) { out.push(((a[i] >> 1) << 2) | (a[i] & 1 ? 2 : 1), (a[k] - a[i]) >> 1); i = k + 1; }
+    else out.push(a[i++] << 2);
+  }
+  return out;
 }
 
 function layer(sym, o) {
@@ -739,7 +766,8 @@ function directory(model, opt) {
   const t31Entry = new Map();             // `${индекс}@${улица}` -> ключ витка 0x31
   const poiEntry = new Map();             // точка -> ключ её витка в списке категории города
   const stats = { cities: places.length, districts: districts.length, streets: 0, postcodes: pcs.length,
-                  centres: 0, poisInCities: 0, districtStreets: 0 };
+                  centres: 0, poisInCities: 0, districtStreets: 0, houses: 0 };
+  const houseExpect = [];                 // улицы с домами: {sym улицы, номера}
   const groups = [];                      // [{records, origin}] — города, по порядку
   const withRecs = places;
   places.forEach((p, k) => {
@@ -811,7 +839,9 @@ function directory(model, opt) {
     stats.centres++;
     items.forEach((it) => {
       const sb = bboxOf(it.s.pts);
-      recs.push(street(it.target, { center: r(anchor(it.s.pts)), min: r([sb.x0, sb.y0]), max: r([sb.x1, sb.y1]) }));
+      recs.push(street(it.target, { center: r(anchor(it.s.pts)), min: r([sb.x0, sb.y0]), max: r([sb.x1, sb.y1]),
+                                    houses: it.s.houses }));
+      if (it.s.houses) { houseExpect.push({ sym: it.target, nums: it.s.houses }); stats.houses += it.s.houses.size; }
     });
     stats.streets += items.length;
     // районы: запись 0x03, улицы — 0x31 со ссылками на имена улиц города
@@ -881,7 +911,8 @@ function directory(model, opt) {
   }
   stats.blocks = blocks.length;
   const cityPois = places.filter((p) => p.pois.length).map((p) => ({ sym: 'city' + p.i, pois: p.pois }));
-  return { blocks, stats, poiEntry, cityPois };
+  stats.houseStreets = houseExpect.length;
+  return { blocks, stats, poiEntry, cityPois, houseExpect };
 }
 
 // Названия страны по языкам интерфейса. Источник — таблица названий стран в
@@ -959,7 +990,8 @@ function modelFromRoads(fc, places, opt) {
   }
   const km5 = Math.pow(5000 / 0.9, 2);           // ~5 км в единицах карты (грубо)
   let byVote = 0;
-  for (const e of graph.edges) {
+  const edgeSt = [];                             // ребро -> ключ улицы «имя@город»
+  for (const [ei, e] of graph.edges.entries()) {
     if (e.name < 0) continue;
     const a = graph.nodes[e.a], b = graph.nodes[e.b];
     const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
@@ -972,6 +1004,7 @@ function modelFromRoads(fc, places, opt) {
       if (ci !== place && (q.x - mx) * (q.x - mx) + (q.y - my) * (q.y - my) < km5) { place = ci; byVote++; }
     }
     const k = e.name + '@' + place;
+    edgeSt[ei] = k;
     let st = by.get(k);
     if (!st) by.set(k, st = { name: graph.names[e.name], place, pts: [] });
     st.pts.push([a.x, a.y], [b.x, b.y]);
@@ -979,6 +1012,35 @@ function modelFromRoads(fc, places, opt) {
   const streets = [...by.values()];
   const streetOf = new Map();
   by.forEach((st, k) => streetOf.set(k, streets.indexOf(st)));
+
+  // Дома — тот же набор и те же правила, что у HAUSNUMMERN в XAC
+  // (xacroads.zenModel): `addr:street` -> сырое имя дороги -> ближайший отрезок
+  // этой дороги -> его улица. Номер — xacroads.houseNumber («5A» -> 5); у
+  // диапазона «5-7» берутся только концы: XAC хранит его парой «от, до», а
+  // какие номера внутри он принимает, не разобрано.
+  let houses = 0;
+  if (o.houses && o.houses.length) {
+    const ofRaw = new Map();
+    graph.edges.forEach((e, ei) => {
+      if (e.raw >= 0 && edgeSt[ei]) { if (!ofRaw.has(e.raw)) ofRaw.set(e.raw, []); ofRaw.get(e.raw).push(ei); }
+    });
+    for (const h of o.houses) {
+      const cand = ofRaw.get(graph.byRaw.get(R.latinize(h.street || '')));
+      const nums = cand && R.houseNumber(h.number);
+      if (!nums) continue;
+      const px = Math.round(h.lon * 72000), py = Math.round(h.lat * (40000000 / 360));
+      let best = -1, bd = Infinity;
+      for (const ei of cand) {
+        const e = graph.edges[ei], a = graph.nodes[e.a], b = graph.nodes[e.b];
+        const d = R.segDist2(px, py, a.x, a.y, b.x, b.y);
+        if (d < bd) { bd = d; best = ei; }
+      }
+      const st = streets[streetOf.get(edgeSt[best])];
+      st.houses = st.houses || new Set();
+      for (const n of new Set(nums)) if (n > 0 && n < 0x4000) st.houses.add(n);
+      houses++;
+    }
+  }
 
   // Почтовые индексы: объекты OSM с addr:postcode. Индекс — в городах, где у
   // него есть хотя бы 2 адреса (иначе — в ближайшем); улица индекса — наша
@@ -1027,7 +1089,7 @@ function modelFromRoads(fc, places, opt) {
     if (best >= 0) st.district = best;
   }
   return { code: o.code || 113, iso2: o.iso2 || 'CY', iso3: o.iso3 || 'CYP',
-           places: pl, streets, postcodes, districts, byVote, nearest };
+           places: pl, streets, postcodes, districts, byVote, nearest, houses };
 }
 
 // Адреса с почтовым индексом из OSM: [{x, y, pc, street}].
@@ -1173,6 +1235,6 @@ function walk(get, opt) {
   return res;
 }
 
-module.exports = { layout, rotations, poiKeys, phoneKey, poiNames, select33, catTree, POI_GROUPS, pack, estimate, nearestFn, centre, postArea, list31, readAddresses, t18, pos4, countryRecord, spellStats, statNames, STAT_IDS, modelFromRoads, walk, namesUnder, entriesFrom, encode, root, list, index, country, city, street, layer, verbatim,
+module.exports = { layout, rotations, poiKeys, phoneKey, poiNames, select33, catTree, POI_GROUPS, pack, estimate, nearestFn, centre, postArea, list31, readAddresses, t18, pos4, countryRecord, spellStats, houseValues, statNames, STAT_IDS, modelFromRoads, walk, namesUnder, entriesFrom, encode, root, list, index, country, city, street, layer, verbatim,
                    layout, assemble, transplant, names, directory, anchor, bboxOf, prefix,
                    CY_NAMES, LIST_MAX, DIRECT_MAX };

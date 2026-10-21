@@ -222,7 +222,48 @@ function catSearch(get, node, sel) {
   return rep;
 }
 
-module.exports = { enumerate, cities, countryByCode, selectors, poiSearch, catSearch };
+// Дома улицы (запись 0x07, бит 4 ведущего -> вызов 0x1002). Прочитано в коде:
+//
+//   FUN_08cd7490, вид 7   у выбранной улицы узел-ребёнок вида 10 (дома) — только
+//                         если FUN_08ccb09c: запись типа 5/6/7/0x10 и счётчик
+//                         домов (+0x4f8+0xf0) не ноль; в узел +0xb4/+0xb8 — мин. и
+//                         макс. номер (FUN_08ccb0d4/FUN_08ccb10c -> FUN_08ccf230)
+//   FUN_08ccefac          очередная группа: поля 0x32 вид, 0x31 от, 0x30 до; или
+//                         короткая форма 0x203: вид = v & 3, от = v >> 2; вид 0 —
+//                         до = от, иначе до = от + следующее значение 0x203; вид
+//                         1 — оба ×2, вид 2 — ×2 + 1 (чётные/нечётные)
+//   FUN_08ccb340          строка диапазона: «%ld», «e%ld-%ld», «o%ld-%ld»,
+//                         «%ld-%ld» через запятую (то, что уходит в HMI как
+//                         LI_SP_HouseNumberRange)
+//   FUN_08ccacb8 /
+//   FUN_08ccf41c          номер принят, если попал хоть в одну группу: вид 0 —
+//                         равен, 1 — в рамке и чётный, 2 — нечётный, 3 — в рамке
+// Длинная форма (бит 6 флагов: поля 0x31/0x30/0x32, текст 0x8a, точка 0x22)
+// здесь не читается — мы её не пишем.
+function houses(e) {
+  if (!e || e.type !== 7 || !(e.lead & 0x10)) return null;
+  const v = [e.f['203']].concat(e.f['203*'] || []).filter((x) => x !== undefined);
+  const out = [];
+  for (let i = 0; i < v.length; i++) {
+    const kind = v[i] & 3;
+    let from = v[i] >> 2, to = from;
+    if (kind) {
+      if (i + 1 >= v.length) return { groups: out, bad: 'нет второго значения у вида ' + kind };
+      to = from + v[++i];
+      if (kind < 3) { from = from * 2 + kind - 1; to = to * 2 + kind - 1; }
+    }
+    out.push({ kind, from, to });
+  }
+  const text = out.map((g) => (g.kind === 0 ? '' + g.from : (g.kind === 1 ? 'e' : g.kind === 2 ? 'o' : '') +
+                                                     g.from + '-' + g.to)).join(',');
+  return { groups: out, text, min: Math.min(...out.map((g) => g.from)), max: Math.max(...out.map((g) => g.to)) };
+}
+function houseOk(h, n) {
+  return h.groups.some((g) => (g.kind === 0 ? n === g.from : n >= g.from && n <= g.to &&
+                                (g.kind === 3 || (n & 1) === (g.kind === 2 ? 1 : 0))));
+}
+
+module.exports = { enumerate, cities, countryByCode, selectors, poiSearch, catSearch, houses, houseOk };
 
 if (require.main === module) {
   const [dirs, country] = process.argv.slice(2);

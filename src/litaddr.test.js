@@ -70,6 +70,10 @@ function model() {
     streets.push({ name: String.fromCharCode(65 + (j % 9)) + ' STREET ' + j, place: 0, pts: [[x, y], [x + 50, y + 30]] });
   }
   for (let j = 0; j < 3; j++) streets.push({ name: 'ROAD ' + j, place: 5, pts: [[2344500, 3863500], [2344600, 3863600]] });
+  // дома: как TRIQ DESAIN у Мальты (1, чётные 8…18) и улица с 40 номерами
+  // через три (больше 15 значений — счёт отдельным числом)
+  streets[0].houses = new Set([1, 8, 10, 12, 14, 16, 18]);
+  streets[120].houses = new Set(Array.from({ length: 40 }, (_, i) => 1 + i * 3).concat([500, 501, 502]));
   // индексы: 1010 — два города (0 и 5), три улицы; 2020 — одна улица города 0;
   // 3030 — без наших улиц, в справочник не идёт
   const postcodes = [
@@ -99,7 +103,16 @@ test('справочник читается обратно: страна -> 60 �
   assert.equal(rep.addr.centres, 60, 'у каждого города точка-центр');
   assert.equal(rep.addr.allStreets, 123, 'все улицы страны ведут на имя в городе');
   assert.equal(rep.hit, rep.seen, 'дерево POI с заголовком слоя находится от ключа 1');
+  assert.deepEqual([rep.houses.streets, rep.houses.reached, rep.houses.nums, rep.houses.ok, rep.houses.extra],
+                   [2, 2, 50, 50, 0], 'дома: улицы достижимы, номера приняты, лишних нет');
   assert.ok(!rep.bad);
+});
+
+// Значения 0x203 — как у завода: TRIQ DESAIN (Мальта 93227:4973) — 4 17 5.
+test('дома: короткая форма 0x203 как у завода', () => {
+  assert.deepEqual(A.houseValues(new Set([1, 8, 10, 12, 14, 16, 18])), [4, 17, 5]);
+  assert.deepEqual(A.houseValues(new Set([4, 5, 48])), [19, 1, 192]);       // TRIQ IL-KONSERVATORJU
+  assert.deepEqual(A.houseValues(new Set([15, 91, 93, 95])), [60, 182, 2]); // вид 2: нечётные
 });
 
 test('с заводскими частями: таблицы, заголовок POI и языки корня', { skip: !haveMaps }, () => {

@@ -106,7 +106,18 @@ function mkcyprus(outDir, opt) {
     // имя улицы и номер дороги раздельно: подписи GDB (имя на L0–L2, номер на L0–L4)
     return { name: roads.roadName(p), ref: p.ref || null, cls: p.highway || null, pts: f.geometry.coordinates };
   });
-  const v = gdbgen.volumeFromRoads(lines, { name: 'EJ211',
+  // xacBlocks — каталог таблиц ссылок на каждый блок XAC: без него линия
+  // маршрута не рисуется (src/gdbgen.js, refDirectory)
+  // точки разреза тайлов XAC — в линии GDB, чтобы концы векторов у стыков
+  // тоже лежали на линии (поиск линии маршрута по координатам)
+  const cuts = [];
+  x.sp.halves.forEach((hs, ei) => {
+    if (hs.length < 2) return;
+    const e = x.graph.edges[ei];
+    cuts.push({ a: x.graph.nodes[e.a], b: x.graph.nodes[e.b],
+                mids: hs.slice(0, -1).map((h) => { const tl = x.sp.tiles[h.tile]; return tl.nodes[tl.edges[h.edge].b]; }) });
+  });
+  const v = gdbgen.volumeFromRoads(lines, { name: 'EJ211', xacBlocks: x.blocks, cuts,
                                             levels: gdbgen.EUROPE_LEVELS.map((_, i) => i) });
   const gdbSrc = fs.readdirSync(path.join(root, 'pkgdb', 'GDB')).find((f) => /\.gdb$/i.test(f));
   out.components.push(component(outDir, 'GDB', gdbSrc, v.gdb, root, log));
@@ -123,7 +134,7 @@ function mkcyprus(outDir, opt) {
   // адресный справочник: те же города и улицы, что в XAC (тот же граф, те же классы)
   const addr = litaddr.modelFromRoads(JSON.parse(fs.readFileSync(roadsFile, 'utf8')),
                                       places,
-                                      { classes, districts,
+                                      { classes, districts, houses: o.houses,
                                         addrs: litaddr.readAddresses(o.pbf || 'out/cyp/cyprus-latest.osm.pbf') });
   const factory = ['LIT', 'LIT2', 'LIT3', 'LIT4'].map((d) => path.join(root, 'pkgdb', d));
   const l = cyplit.build(pois, { from: litPath, addr, factory });
