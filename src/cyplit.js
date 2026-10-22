@@ -369,6 +369,11 @@ function verify(buf, r, pois) {
       const box = { x0: q.x - 72, y0: q.y - 111, x1: q.x + 72, y1: q.y + 111 };
       if (L && T.collect(get, L.nodeBlk, rootKey, box, new Set(), 0).size) rep.hit++;
     }
+    // поиск рядом (POI_EnterBySurrounding) путём прошивки — src/litnear.js:
+    // от точек каждого типа, радиус 100 км, найти ровно перебор
+    // и проба: кинотеатры (KINO, 30) в 20 км от центра Лимасола (на машине 21.10 — «не найдено в 100 км»)
+    if (r.layers) rep.near = require('./litnear').check(require('./litnear').open(ks), [].concat(...lays.map((L) => L.leaves)),
+      { probes: [{ name: 'KINO у Лимасола', type: 30, lon: 33.0413, lat: 34.6786, radius: 20000 }] });
     if (r.countryBlk !== undefined) {
       rep.addr = A.walk(ks.get);
       // поиск POI по названию — эмулятор пути прошивки (src/litcity.js poiSearch):
@@ -388,7 +393,8 @@ function verify(buf, r, pois) {
                           phones: ph.names, phonePois: ph.pois, sample: nm.sample, cities: 0, cityPois: 0 };
         // поиск по категории (litcity.catSearch): страна — селектор 18, город — 1
         rep.catSearch = { errors: [], cats: 0, groups: 0, pois: 0, cities: 0, cityPois: 0 };
-        const cityExp = new Map((r.catExpect ? r.catExpect.cities : []).map((c) => [c.pos.join(':'), c.pois]));
+        const cityExp = new Map((r.catExpect ? r.catExpect.cities : [])
+          .filter((c) => c.pois.some((q) => require('./litaddr').inTree(q.cat))).map((c) => [c.pos.join(':'), c.pois]));
         if (r.catExpect) {
           const cc = catCheck(rep.catSearch, LC.catSearch(ks.get, node, 18), r.catExpect.country, 'страна');
           rep.catSearch.cats = cc.cats; rep.catSearch.groups = cc.groups; rep.catSearch.pois = cc.pois;
@@ -484,9 +490,10 @@ function verify(buf, r, pois) {
   }
   rep.bad = rep.keysOk !== rep.blocks || rep.parsedOk !== rep.blocks || rep.leavesEnd !== r.leaves ||
             rep.poisBack !== r.pois || rep.hit !== rep.seen || rep.poiPath === false || rep.layerHdr === false ||
+            (rep.near && rep.near.ok !== rep.near.searches) ||
             (rep.catSearch && (rep.catSearch.errors.length > 0 || rep.catSearch.missing > 0 ||
-                               rep.catSearch.pois !== (r.dirStats.poisInCities || 0) ||
-                               rep.catSearch.cityPois !== (r.dirStats.poisInCities || 0))) ||
+                               rep.catSearch.pois !== (r.dirStats.poisInTree || 0) ||
+                               rep.catSearch.cityPois !== (r.dirStats.poisInTree || 0))) ||
             (rep.poiSearch && (rep.poiSearch.bad || rep.poiSearch.pois !== (r.dirStats.poisInCities || 0) ||
                                rep.poiSearch.cityPois !== (r.dirStats.poisInCities || 0) ||
                                rep.poiSearch.backOk !== rep.poiSearch.backSeen)) ||
@@ -513,7 +520,7 @@ function catCheck(acc, got, pois, where) {
   const key = (q) => q.pos.join(':');
   const err = (m) => acc.errors.push(where + ': ' + m);
   const byCat = new Map();
-  for (const q of pois) { if (!byCat.has(q.cat)) byCat.set(q.cat, new Set()); byCat.get(q.cat).add(key(q)); }
+  for (const q of pois.filter((x) => A.inTree(x.cat))) { if (!byCat.has(q.cat)) byCat.set(q.cat, new Set()); byCat.get(q.cat).add(key(q)); }
   for (const e of got.bad) err(e);
   const want = new Map([[39, [...byCat.keys()].sort((a, b) => a - b)]]);
   for (const [g, cs] of Object.entries(A.POI_GROUPS)) {
@@ -589,6 +596,13 @@ function report(rep, r, log) {
     log('дома (litcity.houses): улиц с домами ' + h.streets + ', достижимы из города ' + h.reached +
         '; номеров ' + h.nums + ', принято ' + h.ok + ', лишних в группах ' + h.extra + '; групп ' + h.groups +
         '; самая длинная строка диапазона ' + h.longest.length + ' зн.' + (h.bad.length ? '; ОШИБОК ' + h.bad.length + ': ' + h.bad.slice(0, 3).join('; ') : ''));
+  }
+  if (rep.near) {
+    const n = rep.near;
+    log('поиск рядом (litnear, путь CLwtSimpleSurroundingSearch): типов ' + n.types + ', поисков ' + n.searches +
+        ', совпало с перебором ' + n.ok + ', точек найдено ' + n.found +
+        n.probes.map((q) => '; ' + q.name + ': ' + q.found).join('') +
+        (n.bad.length ? '; ОШИБКИ: ' + n.bad.join('; ') : ''));
   }
   log(rep.bad ? 'ЕСТЬ РАСХОЖДЕНИЯ' : 'расхождений нет');
 }

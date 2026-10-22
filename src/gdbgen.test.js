@@ -625,3 +625,87 @@ test('точки разреза XAC встают в линию GDB между к
   assert.equal(r.done, 1);
   assert.deepEqual(r.lines[0].pts.map(w), [w(pts[0]), w(pts[1]), mid, w(pts[2])]);
 });
+
+test('таблица ссылок: запись и чтение (gm.readRefTable) сходятся, пустые уровни — смещение 0', () => {
+  const levels = [];
+  levels[1] = [
+    { key: 2, refs: [{ tile: 0x00409380, el: 208, a: 1, z: 2, d: 0 }] },
+    { key: 10, refs: [{ tile: 0x00409380, el: 208, a: 6, z: 7, d: 1 }, { tile: 0x00409382, el: 3, a: 0, z: 300, d: 1 }] },
+    { key: 5000, refs: Array.from({ length: 9 }, (_, i) => ({ tile: 0x80102000 + 2 * i, el: 1000 - i, a: i, z: i + 20, d: i & 1 })) },
+  ];
+  levels[3] = [{ key: 70000, refs: [{ tile: 0x83b02620, el: 70000 & 0xffff, a: 40000, z: 40500, d: 1 }] }];
+  const t = G.refTable(levels);
+  assert.equal(t[0], 1);
+  assert.equal(t[1], 4);
+  assert.equal(t.readUInt16BE(2), 0, 'L0 пуст');
+  const back = gm.readRefTable(t);
+  assert.equal(back[0], null);
+  assert.equal(back[2], null);
+  assert.deepEqual(back[1], levels[1]);
+  assert.deepEqual(back[3], levels[3]);
+  assert.equal(G.refTable([[], []]).toString('hex'), '01000000');
+});
+
+test('таблицы ссылок: вектор XAC ложится на свою линию на каждом уровне', () => {
+  const U = gm.UNITS_PER_LON, W = gm.UNITS_PER_LAT;
+  const pts = [];
+  for (let i = 0; i <= 40; i++) pts.push([33.30 + i * 0.001, 35.16 + 0.002 * Math.sin(i / 3)]);
+  const w = ([lon, lat]) => ({ x: Math.round(lon * U), y: Math.round(lat * W) });
+  // векторы: туда по чётным, обратно по нечётным отрезкам; один — через точку
+  const vectors = [];
+  for (let i = 0; i < 40; i++) vectors.push(i % 2 ? { block: 1, rec: i + 1, a: w(pts[i + 1]), z: w(pts[i]) }
+                                                    : { block: 1, rec: i + 1, a: w(pts[i]), z: w(pts[i + 1]) });
+  vectors.push({ block: 0, rec: 7, a: w(pts[3]), z: w(pts[5]) });
+  vectors.push({ block: 0, rec: 9, a: { x: 1, y: 2 }, z: w(pts[5]) });   // нет на линии — нет записи
+  const v = V([{ cls: 'primary', pts }], { xacBlocks: 2, vectors, levels: [0, 1, 2] });
+  const n = v.gdb.readUInt32BE(577), off = v.gdb.readUInt32BE(581);
+  assert.equal(n, 2);
+  const g = gm.openBuffer(v.gdb), h = gm.header(g);
+  const tab = b => gm.readRefTable(v.gdb.subarray(v.gdb.readUInt32BE(off + b * 8),
+    v.gdb.readUInt32BE(off + b * 8) + v.gdb.readUInt32BE(off + b * 8 + 4)));
+  const t0 = tab(0), t1 = tab(1);
+  assert.deepEqual(t0[0].map(e => e.key), [14], 'вектор вне линии не записан');
+  for (const L of [0, 1, 2]) {
+    const gr = gm.levelGrid(g, h, h.levels[L]), o = gm.keyOrigin(L), sh = gr.head.shift || 0;
+    const tol = L ? 3 << sh : 0;
+    assert.equal(t1[L].length, L ? t1[L].length : 40);
+    for (const e of t1[L].concat(t0[L])) {
+      const vec = vectors.find(q => q.rec * 2 === e.key && (e === t0[L][0]) === (q.block === 0));
+      const poly = [];
+      for (const r of e.refs) {
+        const x = r.tile & 0xffff, y = r.tile >>> 16;
+        const en = gr.entries[gm.slotFor(gr, gr.head, x, y)];
+        const tl = gm.cluster(g, h, en.off, en.sz).tiles.find(q => ((q.y << 16 | q.x) >>> 0) === r.tile);
+        const els = gm.readElements(gm.read(g, tl.off, tl.size), { points: true, W: tl.attr, simple: tl.b10 === 1 }).els;
+        const X0 = h.frame[0] + (x - o.x0) * gr.head.cellX, Y0 = h.frame[1] + (y - o.y0) * gr.head.cellY;
+        let seg = els[r.el].pts.slice(r.a, r.z + 1).map(q => [X0 + (q[0] << sh), Y0 + (q[1] << sh)]);
+        if (!r.d) seg = seg.reverse();
+        poly.push(...seg);
+      }
+      const near = (p, q) => Math.abs(p[0] - q.x) <= tol && Math.abs(p[1] - q.y) <= tol;
+      if (!L) {                                   // на L0 концы — ровно точки линии
+        assert.ok(near(poly[0], vec.a) && near(poly[poly.length - 1], vec.z), 'L0 ключ ' + e.key);
+      } else {                                    // выше — вектор внутри накрытого куска
+        const xs = poly.map(p => p[0]);
+        const lo = Math.min(...xs) - tol, hi = Math.max(...xs) + tol;
+        assert.ok(vec.a.x >= lo && vec.a.x <= hi && vec.z.x >= lo && vec.z.x <= hi, 'L' + L + ' ключ ' + e.key);
+        assert.ok((poly[poly.length - 1][0] - poly[0][0]) * (vec.z.x - vec.a.x) >= 0, 'направление L' + L);
+      }
+    }
+  }
+});
+
+test('таблицы ссылок: вектор через стык двух линий — две ссылки, до общей точки и от неё', () => {
+  const U = gm.UNITS_PER_LON, W = gm.UNITS_PER_LAT;
+  const w = ([lon, lat]) => ({ x: Math.round(lon * U), y: Math.round(lat * W) });
+  const a = [33.300, 35.160], j = [33.301, 35.1605], z = [33.302, 35.1603];
+  const lines = [{ cls: 'primary', name: 'A', pts: [[33.299, 35.159], a, j] }, { cls: 'secondary', name: 'B', pts: [j, z, [33.303, 35.161]] }];
+  const v = V(lines, { xacBlocks: 1, vectors: [{ block: 0, rec: 3, a: w(a), z: w(z) }], levels: [0] });
+  const off = v.gdb.readUInt32BE(581), o = v.gdb.readUInt32BE(off), s = v.gdb.readUInt32BE(off + 4);
+  const [L0] = gm.readRefTable(v.gdb.subarray(o, o + s));
+  assert.equal(L0.length, 1);
+  const r = L0[0].refs;
+  assert.equal(r.length, 2);
+  assert.notEqual(r[0].el, r[1].el);
+  assert.deepEqual(r.map(q => [q.a, q.z, q.d]), [[1, 2, 1], [0, 1, 1]]);
+});

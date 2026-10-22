@@ -895,8 +895,64 @@ function encodeNames(named) {
   return { s1: Buffer.from(s1), s2: Buffer.from(out) };
 }
 
+// Таблица ссылок XAC → GDB (CGdbRefTable, читатель FUN_08cb5cf0, версия тома
+// > 0x22; docs/formats/gdb.md, «Таблицы ссылок»). Возвращает уровни: null —
+// уровня нет, иначе [{ key, refs: [{ tile, el, a, z, d }] }]; z = −1 — до конца
+// линии. Состояние тайла, элемента и ключа — сквозное по уровню, как в коде.
+function readRefTable(t) {
+  const s8 = b => (b > 127 ? b - 256 : b);
+  const nl = t[1], levels = [];
+  for (let L = 0; L < nl; L++) {
+    let p = t.readUInt16BE(2 + 2 * L);
+    if (!p) { levels.push(null); continue; }
+    const cnt = t.readUInt16BE(p); p += 2;
+    let key = 0x80000000, tile = 0xffffffff, el = 0x80000000, run = 0, hdr = 0, prev = null;
+    const out = [];
+    for (let k = 0; k < cnt; k++) {
+      const fresh = run === 0;
+      if (run > 0) run--; else hdr = t[p++];
+      if (hdr & 0x80) key += t[p++]; else { key = t.readUIntBE(p, 3); p += 3; }
+      if (hdr & 0x40) { if (fresh) run = (hdr & 7) - 1; out.push({ key, refs: prev }); continue; }
+      let n = hdr & 7;
+      if (n === 7) { n = t[p++]; if (n === 0xff) { n = t.readUInt16BE(p); p += 2; } }
+      let bm = null;
+      if (n > 3) { const kk = (n + 4) >> 3; bm = t.subarray(p, p + kk); p += kk; }
+      const refs = [];
+      for (let i = 0; i < n; i++) {
+        const b = t[p++], c = b & 0xc0;
+        if (c === 0x80) tile = ((tile & 0xffff0000) + s8(t[p++]) * 0x20000 | (tile & 0xffff)) >>> 0;
+        else if (c === 0x40) tile = ((tile & 0xffff0000) | ((s8(t[p++]) * 2 + tile) & 0xffff)) >>> 0;
+        else if (c === 0xc0) { tile = t.readUInt32BE(p); p += 4; }
+        const e = b & 0x38;
+        if (e === 0x20) { el = t.readUInt16BE(p); p += 2; }
+        else if (e === 0x28) el += s8(t[p++]);
+        else if (e === 0x30) el -= 2;
+        else if (e === 0x38) el -= 1;
+        else el += (b >> 3) & 3;
+        let a, z;
+        switch (b & 7) {
+          case 0: a = 0; z = -1; break;
+          case 1: a = 0; z = t[p++]; break;
+          case 2: a = t[p++]; z = -1; break;
+          case 3: a = t[p] & 15; z = t[p] >> 4; p++; break;
+          case 4: a = t[p]; z = t[p + 1]; p += 2; break;
+          case 5: a = t.readUInt16BE(p); z = t.readUInt16BE(p + 2); p += 4; if (z === 0) z = -1; break;
+          case 6: a = t[p++]; z = a + 1; break;
+          default: a = t.readUInt16BE(p); z = a + 1; p += 2;
+        }
+        const d = i < 3 ? (hdr >> (i + 3)) & 1 : (bm[(i - 3) >> 3] >> ((i - 3) & 7)) & 1;
+        refs.push({ tile, el: el & 0xffff, a, z, d });
+      }
+      prev = refs;
+      out.push({ key, refs });
+    }
+    levels.push(out);
+  }
+  return levels;
+}
+
 module.exports = {
-  readElements, readBits, rawPoint, encodeLine, encodeLinePoints, encodeFrame, writeRaw,
+  readElements, readRefTable, readBits, rawPoint, encodeLine, encodeLinePoints, encodeFrame, writeRaw,
   polyTriangles, encodePolygon, listFlags, FACE, readNames, encodeNames,
   openGdb, openBuffer, read, header, levelHead, locateTable, levelGrid, slotFor, cluster,
   tileHeader, tilePoints, encodePoints, roundTrip, lonOfCell, latOfCell,

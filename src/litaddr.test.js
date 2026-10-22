@@ -225,13 +225,15 @@ test('дерево категорий: группа 39 — все, заводс�
   const r = A.catTree('t', pois, 18, 'all');
   const bySym = new Map(r.records.map((x) => [x.sym, x]));
   const sels = (s) => { let a = 0; return bySym.get(s).tokens().filter((x) => x.v !== undefined).map((x) => (a += x.v)); };
-  assert.deepEqual(sels('t'), [39, 42, 47]);            // 181 — вне групп, только в 39
-  assert.deepEqual(sels('t:s39'), [8, 10, 29, 181]);
+  assert.deepEqual(sels('t'), [39, 42, 47]);            // 181 — вне групп и от 150: в дереве нет
+  assert.deepEqual(sels('t:s39'), [8, 10, 29]);
   assert.deepEqual(sels('t:s47'), [8, 10]);
   assert.deepEqual(sels('t:m47'), [2, 18]);
   assert.deepEqual(sels('t:l8'), [18]);
   const ref = (s) => bySym.get(s).tokens().filter((x) => x.ref !== undefined).map((x) => x.ref);
-  assert.equal(ref('t:m39')[1], 'all', 'у группы 39 — общий список названий');
+  assert.ok(String(ref('t:m39')[1]).startsWith('t:g39'), 'точка вне дерева есть — у группы 39 свой список');
+  const u = A.catTree('u', pois.slice(0, 3), 18, 'all').records.find((x) => x.sym === 'u:m39');
+  assert.equal(u.tokens().filter((x) => x.ref !== undefined)[1].ref, 'all', 'все в дереве — общий список');
   assert.equal(ref('t:m42')[1], ref('t:l29')[0], 'одна категория — её же список');
   assert.ok(String(ref('t:m47')[1]).startsWith('t:g47'), 'у группы из двух категорий — свой список');
   const m = A.catTree('c', pois, 1, 'all').records.find((x) => x.sym === 'c:m47');

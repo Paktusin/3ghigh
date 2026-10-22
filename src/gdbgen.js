@@ -148,6 +148,7 @@ function tileBlob(roads = [], fmt = L0_FORMAT, area = null) {
     const a = attrOf(r);
     const pts = r.pts || r.points.map(p => [p.x, p.y]);
     for (const lb of r.labels || []) named.push([elems.length, lb, r.e9]);
+    roads[r.i].el = elems.length;                 // номер элемента — для таблиц ссылок
     elems.push(Buffer.concat([Buffer.from(pre), gm.encodeLine(pts, a === attr ? null : a, f)]));
     attr = a;
   });
@@ -319,10 +320,13 @@ function simplifyLine(pts, tol) {
   while (stack.length) {
     const [i0, i1] = stack.pop();
     const [ax, ay] = pts[i0], [bx, by] = pts[i1];
-    const L = Math.hypot(bx - ax, by - ay) || 1;
+    const L = Math.hypot(bx - ax, by - ay);
     let mi = -1, md = tol;
     for (let i = i0 + 1; i < i1; i++) {
-      const d = Math.abs((bx - ax) * (ay - pts[i][1]) - (ax - pts[i][0]) * (by - ay)) / L;
+      // замкнутая линия (кольцо развязки): концы совпали — меряем от точки, иначе
+      // кольцо схлопывалось в две одинаковые точки (330 линий L1 рисовались точкой)
+      const d = L ? Math.abs((bx - ax) * (ay - pts[i][1]) - (ax - pts[i][0]) * (by - ay)) / L
+        : Math.hypot(pts[i][0] - ax, pts[i][1] - ay);
       if (d > md) { md = d; mi = i; }
     }
     if (mi >= 0) { keep[mi] = 1; stack.push([i0, mi], [mi, i1]); }
@@ -490,14 +494,185 @@ function clusterBlob(tiles) {
 // вектора. Так у завода переводится ~97 % векторов L0 (docs/formats/gdb.md,
 // «Таблицы ссылок»).
 const EMPTY_REF_TABLE = Buffer.from('01000000', 'hex');
-function refDirectory(blocks, put) {
+// tables — необязательный массив готовых таблиц по номеру блока (refTable)
+function refDirectory(blocks, put, tables) {
   if (!blocks) return { count: 0, offset: 0, size: 0 };
   const dir = Buffer.alloc(blocks * 8);
   for (let i = 0; i < blocks; i++) {
-    dir.writeUInt32BE(put(EMPTY_REF_TABLE), i * 8);
-    dir.writeUInt32BE(EMPTY_REF_TABLE.length, i * 8 + 4);
+    const t = (tables && tables[i]) || EMPTY_REF_TABLE;
+    dir.writeUInt32BE(put(t), i * 8);
+    dir.writeUInt32BE(t.length, i * 8 + 4);
   }
   return { count: blocks, offset: put(dir), size: dir.length };
+}
+
+// Таблица ссылок блока XAC (читатель — FUN_08cb5cf0, версия тома > 0x22):
+// u8 1, u8 уровней, уровни × u16 смещение данных (0 — уровень пуст), затем на
+// уровень u16 число записей и записи по возрастанию ключа (2·номер записи XAC).
+// Запись: заголовок (0x80 — ключ += u8, иначе u24; биты 3…5 — направление
+// ссылок 0…2; младшие три — число ссылок, 7 → u8), при n > 3 битовая карта
+// направлений ссылок 3…, затем ссылки: байт (тайл: 0 тот же, 0x40 x += 2·s8,
+// 0x80 y += 2·s8, 0xc0 u32; элемент: 0…3 += k, 0x38 −1, 0x30 −2, 0x28 += s8,
+// 0x20 u16; точки: 3 полубайты, 6 u8,+1, 7 u16,+1, 4 u8,u8, 5 u16,u16) и его
+// поля в том же порядке. Состояние тайла и элемента — сквозное по уровню.
+// levels[L] = [{ key, refs: [{ tile, el, a, z, d }] }], d = 1 — линия идёт от
+// узла записи к цели (у завода так 4125 из 5189 ссылок L1 MJ00, обратные — d 0).
+function refLevel(entries) {
+  const out = [];
+  const u16 = v => out.push(v >> 8 & 0xff, v & 0xff);
+  u16(entries.length);
+  let key = -1, tile = 0xffffffff, el = 0x80000000;
+  for (const e of entries) {
+    const n = e.refs.length;
+    let h = n < 7 ? n : 7;
+    e.refs.slice(0, 3).forEach((r, i) => { h |= r.d << (i + 3); });
+    const dk = e.key - key;
+    if (key >= 0 && dk > 0 && dk < 256) out.push(h | 0x80, dk);
+    else out.push(h, e.key >> 16 & 0xff, e.key >> 8 & 0xff, e.key & 0xff);
+    key = e.key;
+    if (n >= 7) { if (n < 255) out.push(n); else { out.push(0xff); u16(n); } }
+    if (n > 3) {
+      const bm = new Array((n + 4) >> 3).fill(0);
+      e.refs.slice(3).forEach((r, i) => { bm[i >> 3] |= r.d << (i & 7); });
+      out.push(...bm);
+    }
+    for (const r of e.refs) {
+      const f = [];
+      let b = 0;
+      const dx = ((r.tile & 0xffff) - (tile & 0xffff)) / 2, dy = ((r.tile >>> 16) - (tile >>> 16)) / 2;
+      if (r.tile === tile) b = 0;
+      else if (r.tile >>> 16 === tile >>> 16 && Number.isInteger(dx) && Math.abs(dx) < 128) { b = 0x40; f.push(dx & 0xff); }
+      else if ((r.tile & 0xffff) === (tile & 0xffff) && Number.isInteger(dy) && Math.abs(dy) < 128) { b = 0x80; f.push(dy & 0xff); }
+      else { b = 0xc0; f.push(r.tile >>> 24, r.tile >> 16 & 0xff, r.tile >> 8 & 0xff, r.tile & 0xff); }
+      tile = r.tile;
+      const de = r.el - el;
+      if (de >= 0 && de <= 3) b |= de << 3;
+      else if (de === -1) b |= 0x38;
+      else if (de === -2) b |= 0x30;
+      else if (de >= -128 && de < 128) { b |= 0x28; f.push(de & 0xff); }
+      else { b |= 0x20; f.push(r.el >> 8, r.el & 0xff); }
+      el = r.el;
+      const { a, z } = r;
+      if (a < 16 && z < 16) { b |= 3; f.push(z << 4 | a); }
+      else if (z === a + 1 && a < 256) { b |= 6; f.push(a); }
+      else if (z === a + 1) { b |= 7; f.push(a >> 8, a & 0xff); }
+      else if (z < 256) { b |= 4; f.push(a, z); }
+      else { b |= 5; f.push(a >> 8, a & 0xff, z >> 8, z & 0xff); }
+      out.push(b, ...f);
+    }
+  }
+  return Buffer.from(out);
+}
+
+function refTable(levels) {
+  let nl = levels.length;
+  while (nl && !(levels[nl - 1] && levels[nl - 1].length)) nl--;
+  if (!nl) return EMPTY_REF_TABLE;
+  const head = Buffer.alloc(2 + nl * 2);
+  head[0] = 1; head[1] = nl;
+  const parts = [head];
+  let at = head.length;
+  for (let L = 0; L < nl; L++) {
+    if (!levels[L] || !levels[L].length) continue;
+    const b = refLevel(levels[L]);
+    if (at > 0xffff) throw new Error('таблица ссылок: смещение уровня ' + L + ' за u16');
+    head.writeUInt16BE(at, 2 + L * 2);
+    parts.push(b);
+    at += b.length;
+  }
+  return Buffer.concat(parts);
+}
+
+// Векторы XAC -> записи уровня. Вектор a→z ищется на линии уровня, где есть обе
+// его точки (узлы XAC и точки GDB округлены одинаково, см. roadsToLevel), и
+// переводится в куски этой линии по тайлам: «тайл, элемент, точки от…до». На
+// грубых уровнях точки линии прорежены — кусок берётся с ближайших оставшихся
+// точек снаружи, так что вектор накрыт всегда; схлопнутый в точку не пишется.
+// vectors — [{ block, rec, a: {x, y}, z: {x, y} }]; возвращает Map блок -> записи.
+// Концы вектора бывают и на разных линиях: XAC выбрасывает узел, где сходятся
+// две линии GDB, не склеенные из-за разных классов или имён (у нас 376 векторов
+// на L1). Тогда вектор идёт по первой линии до общей точки и по второй от неё —
+// как два элемента в поиске по координатам у завода (FUN_08cb6578).
+const JOIN_REACH = 64;                           // на сколько точек искать общую
+function refsForLevel(st, vectors) {
+  const bySrc = new Map();
+  for (const p of st.pieces) {
+    if (!bySrc.has(p.src)) bySrc.set(p.src, []);
+    bySrc.get(p.src).push(p);
+  }
+  for (const l of bySrc.values()) l.sort((p, q) => p.ts[0] - q.ts[0]);
+  // куски линии src между её точками i и j (по ходу от i к j)
+  const cover = (src, i, j) => {
+    const lo = Math.min(i, j), hi = Math.max(i, j), fwd = i < j, refs = [];
+    for (const p of bySrc.get(src) || []) {
+      const ts = p.ts, n = ts.length;
+      if (ts[0] >= hi || ts[n - 1] <= lo) continue;
+      let a = 0, z = n - 1;
+      while (a + 1 < n && ts[a + 1] <= lo) a++;
+      while (z - 1 >= 0 && ts[z - 1] >= hi) z--;
+      if (a < z) refs.push({ tile: p.tile, el: p.el, a, z, d: fwd ? 1 : 0 });
+    }
+    return fwd ? refs : refs.reverse();
+  };
+  const out = new Map();
+  for (const v of vectors) {
+    const la = st.vertex.get(v.a.x + ',' + v.a.y), lz = st.vertex.get(v.z.x + ',' + v.z.y);
+    if (!la || !lz) continue;
+    let best = null;
+    for (let i = 0; i < la.length; i += 2) {
+      for (let j = 0; j < lz.length; j += 2) {
+        if (la[i] !== lz[j] || la[i + 1] === lz[j + 1]) continue;
+        const span = Math.abs(la[i + 1] - lz[j + 1]);
+        if (!best || span < best.span) best = { src: la[i], ia: la[i + 1], iz: lz[j + 1], span };
+      }
+    }
+    let refs;
+    if (best) refs = cover(best.src, best.ia, best.iz);
+    else {
+      let join = null;
+      for (let i = 0; i < la.length; i += 2) {
+        const ka = st.keys[la[i]];
+        for (let j = 0; j < lz.length; j += 2) {
+          if (la[i] === lz[j]) continue;
+          const kz = new Map();
+          st.keys[lz[j]].forEach((w, k) => { if (Math.abs(k - lz[j + 1]) <= JOIN_REACH && !kz.has(w)) kz.set(w, k); });
+          for (let k = Math.max(0, la[i + 1] - JOIN_REACH); k <= Math.min(ka.length - 1, la[i + 1] + JOIN_REACH); k++) {
+            if (!kz.has(ka[k])) continue;
+            const span = Math.abs(k - la[i + 1]) + Math.abs(kz.get(ka[k]) - lz[j + 1]);
+            if (!join || span < join.span) join = { a: la[i], ia: la[i + 1], ja: k, z: lz[j], jz: kz.get(ka[k]), iz: lz[j + 1], span };
+          }
+        }
+      }
+      if (join) refs = cover(join.a, join.ia, join.ja).concat(cover(join.z, join.jz, join.iz));
+    }
+    if (!refs || !refs.length) continue;
+    if (!out.has(v.block)) out.set(v.block, []);
+    out.get(v.block).push({ key: v.rec * 2, refs });
+  }
+  for (const l of out.values()) l.sort((p, q) => p.key - q.key);
+  return out;
+}
+
+// Таблицы всех блоков: уровни из stats (номер -> итог roadsToLevel). Таблица
+// длиннее заводского максимума (65 000 б) теряет L0 — там линию находит поиск
+// по координатам, как у завода у большинства векторов L0.
+const REF_TABLE_MAX = 65000;
+function refTables(stats, vectors, blocks) {
+  const per = new Map();                           // уровень -> Map блок -> записи
+  for (const [L, st] of stats) per.set(L, refsForLevel(st, vectors));
+  const tables = [];
+  let refs = 0, noL0 = 0;
+  for (let b = 0; b < blocks; b++) {
+    const levels = [];
+    for (const [L, m] of per) levels[L] = m.get(b) || [];
+    let t = refTable(levels);
+    if (t.length > REF_TABLE_MAX) { levels[0] = []; t = refTable(levels); noL0++; }
+    if (t.length > REF_TABLE_MAX) throw new Error('таблица ссылок блока ' + b + ': ' + t.length + ' б');
+    tables[b] = t;
+  }
+  for (const m of per.values()) for (const l of m.values()) refs += l.length;
+  return { tables, refs, noL0, max: Math.max(0, ...tables.map(t => t.length)),
+           total: tables.reduce((a, t) => a + t.length, 0) };
 }
 
 // ── том целиком ────────────────────────────────────────────────────────────
@@ -638,7 +813,7 @@ function build(spec) {
   // за 14 символами метки — два нулевых байта, имя с +319 (Европа и Австралия)
   head.write(String(spec.name || 'EJ211').slice(0, 8), 319, 'latin1');
   TAIL_576.copy(head, 576);
-  const refs = refDirectory(spec.xacBlocks || 0, put);
+  const refs = refDirectory(spec.xacBlocks || 0, put, spec.refTables);
   head.writeUInt32BE(refs.count, 577);
   head.writeUInt32BE(refs.offset, 581);
   head.writeUInt32BE(refs.size, 585);
@@ -798,7 +973,9 @@ function splitGrid(pts, sx, sy) {
     for (let j = 1; j < ts.length; j++) {
       const t0 = ts[j - 1], t1 = ts[j];
       if (t1 - t0 < 1e-12) continue;
-      const pa = [x1 + (x2 - x1) * t0, y1 + (y2 - y1) * t0], pb = [x1 + (x2 - x1) * t1, y1 + (y2 - y1) * t1];
+      // третья координата (номер точки исходной линии, см. roadsToLevel) — тоже по t
+      const at = t => pts[i - 1].map((v, d) => v + (pts[i][d] - v) * t);
+      const pa = at(t0), pb = at(t1);
       const tm = (t0 + t1) / 2;
       const gx = Math.floor((x1 + (x2 - x1) * tm) / sx), gy = Math.floor((y1 + (y2 - y1) * tm) / sy);
       if (!cur || cur.gx !== gx || cur.gy !== gy) { cur = { gx, gy, pts: [pa] }; runs.push(cur); }
@@ -875,8 +1052,18 @@ function roadsToLevel(lines, opts = {}) {
   // 1. дороги по кластерам — в ячейках уровня (дробных)
   const perCluster = new Map();
   let skipped = 0;
-  for (const ln of mergeLines(lines, lvNr)) {
-    if (ln.pts.length < 2) { skipped++; continue; }
+  // для таблиц ссылок XAC → GDB: точка линии (мировые единицы) -> [линия, номер
+  // точки]; у каждой точки тайла третья координата — её место на линии
+  const vertex = new Map(), pieces = [], keys = [];
+  const merged = mergeLines(lines, lvNr);
+  merged.forEach((ln, mi) => {
+    if (ln.pts.length < 2) { skipped++; return; }
+    keys[mi] = ln.pts.map(([lon, lat], k) => {
+      const w = Math.round(lon * gm.UNITS_PER_LON) + ',' + Math.round(lat * gm.UNITS_PER_LAT);
+      if (!vertex.has(w)) vertex.set(w, []);
+      vertex.get(w).push(mi, k);
+      return w;
+    });
     // точка сперва округляется до мировой единицы ТАК ЖЕ, как узел XAC
     // (xacroads: Math.round(lon·72000)): линия маршрута на L0 ищется по точному
     // совпадению концов вектора с точками линии GDB (FUN_08cb6578), и прежнее
@@ -884,12 +1071,13 @@ function roadsToLevel(lines, opts = {}) {
     const cells = ln.pts.map(([lon, lat]) => [
       (Math.round(lon * gm.UNITS_PER_LON) - FRAME[0]) / L.cellX,
       (Math.round(lat * gm.UNITS_PER_LAT) - FRAME[1]) / L.cellY]);
+    cells.forEach((q, k) => q.push(k));
     for (const run of splitGrid(cells, CW, CH)) {
       const k = run.gx + ',' + run.gy;
       if (!perCluster.has(k)) perCluster.set(k, { cx: run.gx, cy: run.gy, pieces: [] });
-      perCluster.get(k).pieces.push({ cells: run.pts, cls: ln.c.cls, e9: ln.c.e9, labels: ln.labels });
+      perCluster.get(k).pieces.push({ cells: run.pts, cls: ln.c.cls, e9: ln.c.e9, labels: ln.labels, src: mi });
     }
-  }
+  });
 
   // 1б. суша: кольца уровня и кластеры, которых они касаются (в том числе
   //     без единой дороги — суша нужна и там)
@@ -942,9 +1130,9 @@ function roadsToLevel(lines, opts = {}) {
           for (const run of splitGrid(pc.cells, step[0], step[1])) {
             const tx = run.gx * step[0], ty = run.gy * step[1];
             const raw = [];
-            for (const [x, y] of run.pts) {
+            for (const [x, y, t] of run.pts) {
               const q = [Math.min(f.X, Math.max(0, Math.round((x - tx) * L.cellX / u))),
-                         Math.min(f.Y, Math.max(0, Math.round((y - ty) * L.cellY / u)))];
+                         Math.min(f.Y, Math.max(0, Math.round((y - ty) * L.cellY / u))), t];
               const last = raw[raw.length - 1];
               if (!last || last[0] !== q[0] || last[1] !== q[1]) raw.push(q);
             }
@@ -953,10 +1141,13 @@ function roadsToLevel(lines, opts = {}) {
             // выше L0 линии упрощаются, как площади: у завода детальность
             // уровня — его единица, точки OSM как есть раздувают тайлы L1–L4
             const line = lvNr > 0 ? simplifyLine(raw, LINE_TOL) : raw;
+            if (line.length === 2 && line[0][0] === line[1][0] && line[0][1] === line[1][1]) { out++; continue; }
             for (let s = 0; s < line.length - 1; s += 0xfffe) {
               const k = tx + ',' + ty;
               if (!byTile.has(k)) byTile.set(k, { tx, ty, roads: [] });
-              byTile.get(k).roads.push({ pts: line.slice(s, s + 0xffff), cls: pc.cls, e9: pc.e9, labels: pc.labels });
+              const part = line.slice(s, s + 0xffff);
+              byTile.get(k).roads.push({ pts: part.map(q => [q[0], q[1]]), ts: part.map(q => q[2]),
+                                         src: pc.src, cls: pc.cls, e9: pc.e9, labels: pc.labels });
             }
           }
         }
@@ -997,6 +1188,7 @@ function roadsToLevel(lines, opts = {}) {
           try { blob = tileBlob(t.roads, f, area); } catch (e) { fits = false; break; }
           if (blob.length > cap) { fits = false; break; }
           tiles.push({
+            roads: t.roads, tx: t.tx, ty: t.ty,
             ix: (t.tx - c.cx * CW) >> lw, iy: (t.ty - c.cy * CH) >> lh,
             lw, lh, blob, attr: f.W, b10: f.simple ? 1 : 0, lines: t.roads.length, land: area ? (area.full ? 'full' : 'coast') : null,
           });
@@ -1005,6 +1197,14 @@ function roadsToLevel(lines, opts = {}) {
       }
     }
     if (!chosen) { skipped += c.pieces.length; continue; }
+    // куски линий в тайлах: ключ тайла, номер элемента (его дал tileBlob) и
+    // места точек на исходной линии
+    const k0 = gm.keyOrigin(lvNr);
+    for (const t of chosen.tiles) {
+      const tile = (((k0.y0 + t.ty) << 16) | (k0.x0 + t.tx)) >>> 0;
+      for (const r of t.roads) if (r.src !== undefined) pieces.push({ src: r.src, tile, el: r.el, ts: r.ts });
+      delete t.roads;
+    }
     dropped += chosen.out;
     landTiles += chosen.tiles.filter(t => t.land).length;
     if (!chosen.tiles.length) continue;
@@ -1016,7 +1216,8 @@ function roadsToLevel(lines, opts = {}) {
   const elements = clusters.reduce((a, c) => a + c.tiles.reduce((b, t) => b + t.lines, 0), 0);
   const sizes = {};
   for (const c of clusters) sizes['2^' + c.lw + 'x2^' + c.lh] = (sizes['2^' + c.lw + 'x2^' + c.lh] || 0) + 1;
-  return { level: L, tiles, clusters: clusters.length, skipped, dropped, elements, sizes, landTiles, unlabeled };
+  return { level: L, tiles, clusters: clusters.length, skipped, dropped, elements, sizes, landTiles, unlabeled,
+           vertex, pieces, keys };
 }
 
 // Классы дорог по уровням — та же пирамида, что у завода: чем мельче масштаб,
@@ -1122,8 +1323,10 @@ function volumeFromRoads(lines, opts = {}) {
     ? stats.get(i).level
     : Object.assign({}, L, { clusters: [] })));
   const r = stats.get(want[0]);
-  return Object.assign({}, build(Object.assign({}, opts, { levels })), {
-    stat: r, stats: [...stats.values()],
+  const rt = opts.vectors && opts.xacBlocks ? refTables(stats, opts.vectors, opts.xacBlocks) : null;
+  for (const st of stats.values()) { delete st.vertex; delete st.pieces; delete st.keys; }
+  return Object.assign({}, build(Object.assign({}, opts, { levels, refTables: rt && rt.tables })), {
+    stat: r, stats: [...stats.values()], refs: rt,
   });
 }
 
@@ -1155,7 +1358,7 @@ function component(outDir, v, opt) {
 module.exports = {
   landArea, regionTris, clipRing, simplifyRing, landForLevel, layersForLevel, OVERLAY, LAND, SEA,
   PROLOGUE, SIG, VERSION, FRAME, MAGIC, MAX_BLOB, FRAME_ELEMENT, EUROPE_LEVELS, CLUSTER_REC,
-  insertCuts, refDirectory, tileBlob, emptyTile, readTileRoads, tileFormat, classFor, splitGrid, mergeLines, mortonIndex, clusterBlob, build,
+  insertCuts, refDirectory, refTable, refLevel, refsForLevel, tileBlob, emptyTile, readTileRoads, tileFormat, classFor, splitGrid, mergeLines, mortonIndex, clusterBlob, build,
   degToTile, degToTileL, cellX, cellY, cellXL, cellYL, roadsToLevel, volumeFromRoads,
   linesForLevel, labelsFor, LEVEL_CLASSES, TILE_CELLS, TILE_SIZES, tileSizes, component,
 };

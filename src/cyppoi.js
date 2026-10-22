@@ -230,7 +230,14 @@ function classify(tags) {
   for (const [k, v, name, rank] of MAP)
     if (tags[k] === v && (!best || rank < best.rank))
       best = { rank: rank, cat: catNo(name), category: name };
+  // здание с названием («Estia Court», «Hyper Tower»): на Кипре адрес часто
+  // называют именем дома — кладём в WOHNANLAGE, чтобы искалось по имени
+  if (!best && namedBuilding(tags)) best = { rank: 99, cat: catNo('WOHNANLAGE'), category: 'WOHNANLAGE' };
   return best;
+}
+
+function namedBuilding(tags) {
+  return !!(tags['addr:housename'] || (tags.building && tags.building !== 'no' && nameOf(tags)));
 }
 
 // Название: латиница предпочтительнее греческого, как и в дорожных именах.
@@ -296,7 +303,7 @@ function collect(pbf) {
   const want = (tags) => {
     if (SPECIAL.some((s) => s.cat && s.test(tags))) return true;
     for (const [k, v] of MAP) if (tags[k] === v) return true;
-    return false;
+    return namedBuilding(tags);
   };
   const idx = osm.read(pbf, { node: want, way: want });
   const out = [];
@@ -304,7 +311,7 @@ function collect(pbf) {
     const c = classify(tags);
     if (!c) return;
     if (c.category === 'PARKPLATZ' && !bigParking(tags, m2 || 0)) return;
-    const name = nameOf(tags) || unnamed(tags, c.category);
+    const name = nameOf(tags) || latinize(tags['addr:housename'] || '') || unnamed(tags, c.category);
     if (!name) return;
     out.push(Object.assign({
       rank: c.rank, cat: c.cat, category: c.category, name: name,

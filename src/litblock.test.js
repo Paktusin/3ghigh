@@ -136,3 +136,10 @@ test('парковки: только большие и не для клиент�
   assert.ok(C.bigParking({ amenity: 'parking' }, 2500));
   assert.ok(!C.bigParking({ amenity: 'parking' }, 800));
 });
+
+test('здание с названием — точка WOHNANLAGE, имя из addr:housename', () => {
+  const c = C.classify({ building: 'apartments', 'addr:housename': 'Estia Court' });
+  assert.equal(c && c.category, 'WOHNANLAGE');
+  assert.equal(C.classify({ building: 'yes' }), null, 'без названия — нет');
+  assert.equal(C.classify({ building: 'yes', name: 'Hyper Tower', amenity: 'restaurant' }).category, 'RESTAURANT', 'своя категория важнее');
+});

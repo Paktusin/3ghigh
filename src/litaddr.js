@@ -635,7 +635,16 @@ const POI_GROUPS = {
 // [sel -> названия её точек]. sel — 18 у страны, 1 у города. all — уже
 // готовый список названий всех точек (для группы 39). Завод повторяет списки
 // под каждой группой; здесь один список категории на все ссылки.
+// Категория в дереве: из заводской группы или с номером до 150. У номеров от
+// 150 вне групп (химчистки 156, турагентства 163, одежда 181…) у HMI нет
+// названия — в списке видна цифра (машина, 21.10). Их точки ищутся по имени.
+const GROUPED = new Set(Object.values(POI_GROUPS).flat());
+const inTree = (cat) => GROUPED.has(cat) || cat < 150;
+
 function catTree(sym, pois, sel, all) {
+  const shown = pois.filter((q) => inTree(q.cat));
+  if (shown.length !== pois.length) all = null;    // общий список названий шире дерева
+  pois = shown;
   const byCat = new Map();
   for (const q of pois) { if (!byCat.has(q.cat)) byCat.set(q.cat, []); byCat.get(q.cat).push(q); }
   const cats = [...byCat.keys()].sort((a, b) => a - b);
@@ -766,7 +775,7 @@ function directory(model, opt) {
   const t31Entry = new Map();             // `${индекс}@${улица}` -> ключ витка 0x31
   const poiEntry = new Map();             // точка -> ключ её витка в списке категории города
   const stats = { cities: places.length, districts: districts.length, streets: 0, postcodes: pcs.length,
-                  centres: 0, poisInCities: 0, districtStreets: 0, houses: 0 };
+                  centres: 0, poisInCities: 0, poisInTree: 0, districtStreets: 0, houses: 0 };
   const houseExpect = [];                 // улицы с домами: {sym улицы, номера}
   const groups = [];                      // [{records, origin}] — города, по порядку
   const withRecs = places;
@@ -806,9 +815,11 @@ function directory(model, opt) {
     if (p.pois.length) {
       const pn2 = poiNames('c' + p.i + ':pn', p.pois, poiKeys);
       poiTree = 'c' + p.i + ':pt';
+      // у города, где все точки вне дерева категорий, селектора 20 нет
       const ct = catTree('c' + p.i + ':ct', p.pois, 1, pn2.head);
-      poiRecs.push(select33(poiTree, [{ sel: 1, target: pn2.head }, { sel: 20, target: ct.head }]),
-                   ...pn2.records, ...ct.records);
+      const tree = ct.groups ? [{ sel: 20, target: ct.head }] : [];
+      poiRecs.push(select33(poiTree, [{ sel: 1, target: pn2.head }].concat(tree)),
+                   ...pn2.records, ...(ct.groups ? ct.records : []));
       const byCat = new Map();
       for (const q of p.pois) { if (!byCat.has(q.cat)) byCat.set(q.cat, []); byCat.get(q.cat).push(q); }
       for (const [cat, qs] of [...byCat].sort((a, b) => a[0] - b[0])) {
@@ -819,6 +830,7 @@ function directory(model, opt) {
         its.forEach((it) => poiEntry.set(it.q, cl.entryOf(it)));
       }
       stats.poisInCities += p.pois.length;
+      stats.poisInTree += p.pois.filter((q) => inTree(q.cat)).length;
     }
     const dl = p.districts;
     recs.push(city(cs, {
@@ -1235,6 +1247,6 @@ function walk(get, opt) {
   return res;
 }
 
-module.exports = { layout, rotations, poiKeys, phoneKey, poiNames, select33, catTree, POI_GROUPS, pack, estimate, nearestFn, centre, postArea, list31, readAddresses, t18, pos4, countryRecord, spellStats, houseValues, statNames, STAT_IDS, modelFromRoads, walk, namesUnder, entriesFrom, encode, root, list, index, country, city, street, layer, verbatim,
+module.exports = { layout, rotations, poiKeys, phoneKey, poiNames, select33, catTree, POI_GROUPS, inTree, pack, estimate, nearestFn, centre, postArea, list31, readAddresses, t18, pos4, countryRecord, spellStats, houseValues, statNames, STAT_IDS, modelFromRoads, walk, namesUnder, entriesFrom, encode, root, list, index, country, city, street, layer, verbatim,
                    layout, assemble, transplant, names, directory, anchor, bboxOf, prefix,
                    CY_NAMES, LIST_MAX, DIRECT_MAX };

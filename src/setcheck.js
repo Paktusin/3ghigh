@@ -328,7 +328,7 @@ function checkOwnLit(file) {
   }
 
   let pois = 0, inside = 0, stops = 0, leaves = 0;
-  const bad = [];
+  const bad = [], leafBlks = [];
   for (let i = 0; i < m.blocks.length; i++) {
     const r = litvm.run(schema, m.blocks[i], 0, { blk: i, limit: 4000000 });
     if (r.why === 'данные кончились' && r.pos === m.blocks[i].length) stops++;
@@ -336,6 +336,7 @@ function checkOwnLit(file) {
     // лист POI начинается записью-тайлом 0x23; точки-центры городов (0x24 в
     // блоках городов) — часть адресного справочника, а не дерева POI
     const isLeaf = (keyed(i).els[0] || {}).type === 0x23;
+    if (isLeaf) leafBlks.push(i);
     const list = isLeaf ? litpoi.poisOf(schema, m.blocks[i], i) : [];
     if (list.length) leaves++;
     for (const x of list) {
@@ -356,8 +357,12 @@ function checkOwnLit(file) {
       if (got.has(i)) hit++;
     }
   }
+  // поиск рядом путём прошивки (src/litnear.js) против перебора, и проба
+  // «KINO у Лимасола» — на машине 21.10 этот поиск отвечал «не найдено в 100 км»
+  const near = poiPath ? require('./litnear').check(require('./litnear').open([path.dirname(file)]), leafBlks,
+    { per: 2, probes: [{ name: 'KINO у Лимасола', type: 30, lon: 33.0413, lat: 34.6786, radius: 20000 }] }) : null;
   return { own: true, blocks: m.blocks.length, leaves, stops, pois, inside, seen, hit, bad,
-           start, starts, poiPath, addr };
+           start, starts, poiPath, addr, near };
 }
 
 function checkLit(root) {
@@ -506,6 +511,9 @@ if (require.main === module) {
                   a.iso.join('/') + ' -> городов ' + a.cities.length + ' -> улиц ' + a.streets +
                   (a.errors.length ? ', ОШИБОК ' + a.errors.length + ': ' + a.errors.slice(0, 3).join('; ') : ''));
     }
+    if (poi.near) console.log('поиск рядом (litnear): поисков ' + poi.near.searches + ', совпало с перебором ' + poi.near.ok +
+                              poi.near.probes.map((q) => '; ' + q.name + ': ' + q.found).join('') +
+                              (poi.near.bad.length ? '; ОШИБКИ: ' + poi.near.bad.join('; ') : ''));
     for (const b of poi.bad.slice(0, 5)) console.log('  СБОЙ ' + b);
   } else if (poi) {
     console.log('POI (' + poi.vols.join(', ') + '): спуск от корня по рамке Кипра дал листьев ' +
@@ -519,7 +527,8 @@ if (require.main === module) {
   const bad = (gdb && gdb.bad) ||
               (poi && (poi.bad.length || !poi.leaves || !poi.inside ||
                        (poi.own && (poi.stops !== poi.blocks || poi.hit !== poi.seen ||
-                                    poi.poiPath === false || (poi.addr && poi.addr.errors.length))))) ||
+                                    poi.poiPath === false || (poi.addr && poi.addr.errors.length) ||
+                                    (poi.near && poi.near.ok !== poi.near.searches))))) ||
               (links && links.bad) ||
               rs.some((r) => r.regBad || r.numErr || r.lost || r.fldb.anomalies ||
               (r.names && (!r.names.streamExact || !r.names.refsExact || r.names.err)) ||

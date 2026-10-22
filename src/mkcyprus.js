@@ -29,6 +29,7 @@ const { mkxac, readHouses, buildContainer } = require('./mkxac');
 const fldb = require('./fldb');
 const gdbgen = require('./gdbgen');
 const roads = require('./xacroads');
+const xacgraph = require('./xacgraph');
 const atlascut = require('./atlascut');
 const placesMod = require('./places');
 const cyplit = require('./cyplit');
@@ -107,7 +108,7 @@ function mkcyprus(outDir, opt) {
     return { name: roads.roadName(p), ref: p.ref || null, cls: p.highway || null, pts: f.geometry.coordinates };
   });
   // xacBlocks — каталог таблиц ссылок на каждый блок XAC: без него линия
-  // маршрута не рисуется (src/gdbgen.js, refDirectory)
+  // маршрута не рисуется (src/gdbgen.js, refDirectory, refTables)
   // точки разреза тайлов XAC — в линии GDB, чтобы концы векторов у стыков
   // тоже лежали на линии (поиск линии маршрута по координатам)
   const cuts = [];
@@ -117,8 +118,14 @@ function mkcyprus(outDir, opt) {
     cuts.push({ a: x.graph.nodes[e.a], b: x.graph.nodes[e.b],
                 mids: hs.slice(0, -1).map((h) => { const tl = x.sp.tiles[h.tile]; return tl.nodes[tl.edges[h.edge].b]; }) });
   });
-  const v = gdbgen.volumeFromRoads(lines, { name: 'EJ211', xacBlocks: x.blocks, cuts,
+  // векторы маршрута XAC — для таблиц ссылок: по ним линия маршрута ложится на
+  // линии GDB каждого уровня (без них на L1+ линии маршрута нет)
+  const vectors = xacgraph.routeVectors(x.files.filter((f) => /_1\.xac$/i.test(f.name)).map((f) => f.data));
+  const v = gdbgen.volumeFromRoads(lines, { name: 'EJ211', xacBlocks: x.blocks, cuts, vectors,
                                             levels: gdbgen.EUROPE_LEVELS.map((_, i) => i) });
+  const rt = v.refs;
+  log('таблицы ссылок XAC → GDB: векторов ' + vectors.length + ', записей ' + rt.refs + ', ' +
+      (rt.total / 1024).toFixed(0) + ' КБ, самая большая ' + rt.max + ' б' + (rt.noL0 ? ', без L0: ' + rt.noL0 : ''));
   const gdbSrc = fs.readdirSync(path.join(root, 'pkgdb', 'GDB')).find((f) => /\.gdb$/i.test(f));
   out.components.push(component(outDir, 'GDB', gdbSrc, v.gdb, root, log));
   out.gdb = { lines: lines.length };

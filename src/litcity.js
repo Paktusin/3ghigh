@@ -200,7 +200,7 @@ function poiSearch(get, node, sel, nth) {
 function catSearch(get, node, sel) {
   const rep = { groups: new Map(), cats: new Map(), bad: [] };
   const pick = (pos, s) => {
-    const x = (selectors(get, pos) || []).find((y) => y.sel === s);
+    const x = ((pos && selectors(get, pos)) || []).find((y) => y.sel === s);
     if (!x) rep.bad.push('нет селектора ' + s + ' в ' + pos);
     return x ? x.target : null;
   };

@@ -214,6 +214,37 @@ function tileEdges(blocks) {
   return { edges: out, lost };
 }
 
+// Векторы маршрута всех тайлов: то, что прошивка переводит в линии GDB
+// (CGdbConvRoute::convertVectors, docs/formats/gdb.md, «Таблицы ссылок»).
+// twid вектора = сквозной номер блока (+0x34) << 16 | 2·номер записи; a — узел
+// записи, z — цель. Межблочные цели ищутся по всем тайлам: нумерация сквозная.
+function routeVectors(tileBufs) {
+  const blocks = [];
+  for (const buf of tileBufs) for (const v of xac.vectorBlocks(buf)) blocks.push(buf.subarray(v.offset, v.offset + v.size));
+  const byId = new Map(blocks.map((b) => [b.readUInt16BE(0x34), b]));
+  const cache = new Map();
+  const info = (b) => { if (!cache.has(b)) cache.set(b, entryCoords(b)); return cache.get(b); };
+  const out = [];
+  for (const b of blocks) {
+    const me = info(b), base = b.readUInt16BE(0x36), block = b.readUInt16BE(0x34);
+    for (let i = 1; i < me.cnt; i++) {
+      const p = b.readUInt16BE(me.tab + i * 2) * 2;
+      if (p <= 0 || p + 4 > b.length) continue;
+      const w0 = b.readUInt16BE(p);
+      if ((w0 & 0xc000) !== 0xc000 || !me.coords[i]) continue;
+      let t = b;
+      if (((b[p + 2] >> 6) & 1) !== 0) {
+        if (p + 6 > b.length) continue;
+        t = byId.get(base + (b.readUInt16BE(p + 4) & 0x7fff));
+        if (!t) continue;
+      }
+      const z = info(t).coords[w0 & 0x3fff];
+      if (z) out.push({ block, rec: i, a: me.coords[i], z });
+    }
+  }
+  return out;
+}
+
 // Пересобрать все блоки v5 файла тайла, сохранив длину каждого раздела и
 // длину всего файла. Блоки v3/v4 и все прочие разделы переносятся как есть.
 //
@@ -358,7 +389,7 @@ function nodeTurns(s, off) {
   return out;
 }
 
-module.exports = { graphOf, regenBlock, regenTile, tileEdges, entryCoords, firstEntries, nodeTurns };
+module.exports = { graphOf, regenBlock, regenTile, tileEdges, entryCoords, firstEntries, nodeTurns, routeVectors };
 
 // Таблица ATTRIBUTE из общего индекса набора — нужна для нульвекторов.
 function attrOfSet() {

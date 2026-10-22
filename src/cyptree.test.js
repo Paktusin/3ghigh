@@ -101,3 +101,28 @@ test('цепочка останавливается, когда точка не 
   };
   assert.equal(T.chain((i) => blocks[i], { block: 1, key: 0 }, 500, 500).length, 0);
 });
+
+// Поиск рядом (FUN_08f2a838) растит обследованную рамку до края найденного
+// тайла: ячейки обязаны делить родителя без зазора, пополам (как у завода),
+// а точки — лежать в своей ячейке полуоткрыто.
+test('ячейки делят родителя пополам без зазора', () => {
+  const pts = Array.from({ length: 400 }, (_, i) => pt((i * 7919) % 1000, (i * 104729) % 300));
+  const donors = Array.from({ length: 64 }, (_, i) => ({ blk: 10 + i, size: 900 }));
+  const { root } = T.plan(pts, donors, {});
+  let nodes = 0;
+  (function go(n) {
+    if (n.pois) {
+      for (const p of n.pois) assert.ok(p.x >= n.cell.x0 && p.x < n.cell.x1 && p.y >= n.cell.y0 && p.y < n.cell.y1);
+      return;
+    }
+    nodes++;
+    const c = n.cell, a = n.a.cell, b = n.b.cell;
+    const byX = a.x1 === b.x0;
+    assert.ok(byX ? a.y0 === c.y0 && b.y1 === c.y1 && a.x0 === c.x0 && b.x1 === c.x1
+                  : a.y1 === b.y0 && a.x0 === c.x0 && b.x1 === c.x1 && a.y0 === c.y0 && b.y1 === c.y1);
+    const m = byX ? a.x1 : a.y1, lo = byX ? c.x0 : c.y0, hi = byX ? c.x1 : c.y1;
+    assert.equal(m, lo + Math.floor((hi - lo) / 2), 'разрез — середина ячейки');
+    go(n.a); go(n.b);
+  })(root);
+  assert.ok(nodes > 1);
+});

@@ -41,18 +41,44 @@ function bbox(pois) {
   return { x0, y0, x1, y1 };
 }
 
-// Деление длинной стороны по медиане — так делит и завод (у 327 узлов из 327
-// рамки потомков смыкаются ровно по одной оси).
-function split(pois) {
+// Деление ячейки пополам по длинной стороне — так делит и завод (EU 93401:1:
+// A = 0…7 583 744, B = 7 583 744…15 167 488, следующий узел — 3 791 872).
+// Разрез — середина ЯЧЕЙКИ, а не медиана точек: тогда отрезки любых двух
+// ячеек по оси либо вложены, либо не пересекаются, и поиск рядом
+// (FUN_08f2a838) не теряет тайлов — край обследованной рамки встаёт на край
+// найденного тайла, и при медианных разрезах между ними оставались
+// непрочитанные полосы (сверка litnear: 49 поисков из 137). В A точки строго
+// меньше m, в B — не меньше: рамки полуоткрытые (FUN_08cd1464). Ответ несёт
+// `cut` {byX, m}; половина может выйти пустой — у завода пустые тайлы тоже
+// есть (EU 93473: блок из одного тайла 0x23 с нулём точек, 28 из 1092).
+function split(pois, cell) {
+  const c = cell || cellOf(pois);
+  const byX = c.x1 - c.x0 >= c.y1 - c.y0;
+  const lo = byX ? c.x0 : c.y0, hi = byX ? c.x1 : c.y1;
+  if (hi - lo < 2) throw new Error('ячейка шириной в единицу — делить нечем');
+  const m = lo + Math.floor((hi - lo) / 2);
+  const out = [pois.filter((p) => (byX ? p.x : p.y) < m), pois.filter((p) => (byX ? p.x : p.y) >= m)];
+  out.cut = { byX, m };
+  return out;
+}
+
+// Половины рамки по разрезу: A = [x0, m), B = [m, x1) (или по y).
+function cells(box, cut) {
+  return cut.byX ? [Object.assign({}, box, { x1: cut.m }), Object.assign({}, box, { x0: cut.m })]
+                 : [Object.assign({}, box, { y1: cut.m }), Object.assign({}, box, { y0: cut.m })];
+}
+
+// Полуоткрытая рамка, в которой лежат все точки: [min, max + 1).
+function cellOf(pois) {
   const b = bbox(pois);
-  const byX = b.x1 - b.x0 >= b.y1 - b.y0;
-  const sorted = pois.slice().sort((p, q) => (byX ? p.x - q.x : p.y - q.y));
-  const half = sorted.length >> 1;
-  return [sorted.slice(0, half), sorted.slice(half)];
+  return { x0: b.x0, y0: b.y0, x1: b.x1 + 1, y1: b.y1 + 1 };
 }
 
 // Точки группы -> байты листа. Размер считается один раз и запоминается.
 function leafBytes(group, blk, ref, idBase) {
+  if (!group.length)                             // пустой тайл, как EU 93473
+    return B.writeBlock({ origin: { x: 0, y: 0 }, width: 24, byte2: 0, count: 1, dict: new Map(),
+                          tile: { count: 0 }, pois: [] }, blk);
   const items = group.map((p, i) => Object.assign({}, p, {
     id: idBase + i, ref: typeof ref === 'function' ? ref(p) : ref,
   }));
@@ -74,7 +100,14 @@ function plan(pois, donors, opt) {
     cache.set(leaf, v);
     return v;
   };
-  let root = { pois: pois };
+  // У каждого узла и листа — ячейка `cell`: половины родителя смыкаются без
+  // зазора, как у завода. Поиск «рядом» (FUN_08f2a838) опрашивает полосу за
+  // краем обследованного; в зазоре между рамками спуск не находит тайла, и
+  // следующая точка опроса берётся из нулевой рамки — зацикливание.
+  let root = { pois: pois, cell: cellOf(pois) };
+  // слой из одного листа всё равно делится: у узла с одним листом вторая
+  // половина пустая, и спуск «к ближнему центру» мог уйти в неё
+  if (o.split !== false && pois.length > 1) try { divide(root); } catch (e) { /* все в одной точке */ }
   const leaves = () => {
     const out = [];
     const go = (n) => { if (n.pois) out.push(n); else { go(n.a); go(n.b); } };
@@ -96,11 +129,12 @@ function plan(pois, donors, opt) {
 
   function divide(leaf) {
     if (leaf.pois.length < 2) throw new Error('одна точка не влезает в слот');
-    const [a, b] = split(leaf.pois);
+    const s = split(leaf.pois, leaf.cell);
+    const [ca, cb] = cells(leaf.cell, s.cut);
     cache.delete(leaf);
     delete leaf.pois;
-    leaf.a = { pois: a };
-    leaf.b = { pois: b };
+    leaf.a = { pois: s[0], cell: ca };
+    leaf.b = { pois: s[1], cell: cb };
   }
 }
 
@@ -124,7 +158,8 @@ function nodes(root, origin, leafLink, nodeBlk, keyBase) {
   })(root);
   const rel = (b) => ({ min: [b.x0 - origin.x, b.y0 - origin.y],
                         max: [b.x1 - origin.x, b.y1 - origin.y] });
-  const boxOf = (n) => n.pois ? bbox(n.pois) : n.box;
+  // ячейка деления (план из plan), иначе — рамка точек (старая заплата)
+  const boxOf = (n) => n.cell || (n.pois ? bbox(n.pois) : n.box);
   (function boxes(n) {                           // рамки снизу вверх
     if (n.pois) return bbox(n.pois);
     const a = boxes(n.a), b = boxes(n.b);
@@ -168,15 +203,16 @@ function build(pois, donors, opt) {
   // корень дерева получает ключ 1, как у завода (101099, 1).
   const kb = o.layer ? 1 : 0;
   const ns = nodes(pl.root, { x: origin.x0, y: origin.y0 }, leafLink, nodeBlk, kb);
-  // всё влезло в один лист: корня-узла нет, а спуск начинается с узла — даём
-  // один узел, у которого половина A — этот лист, B — пусто
+  // всё в одном листе (точки в одном месте): корня-узла нет, а спуск
+  // начинается с узла — даём один узел, обе половины которого — этот лист с
+  // одной рамкой: «ближний центр» (FUN_08f2a524) приведёт в него же
   if (!ns.length && pl.root.pois) {
-    const b = bbox(pl.root.pois);
-    ns.push({ aMin: [b.x0 - origin.x0, b.y0 - origin.y0], aMax: [b.x1 - origin.x0, b.y1 - origin.y0],
-              a: leafLink(pl.root), bMin: [0, 0], bMax: [0, 0], b: null,
+    const b = cellOf(pl.root.pois);
+    const mn = [b.x0 - origin.x0, b.y0 - origin.y0], mx = [b.x1 - origin.x0, b.y1 - origin.y0];
+    ns.push({ aMin: mn, aMax: mx, a: leafLink(pl.root), bMin: mn, bMax: mx, b: leafLink(pl.root),
               x79: null, n42: 0, x7a: null, n7b: 0 });
   }
-  const span = Math.max(origin.x1 - origin.x0, origin.y1 - origin.y0);
+  const span = Math.max(origin.x1 - origin.x0, origin.y1 - origin.y0) + 1;
   const width = [8, 12, 16, 24].find((w) => span < Math.pow(2, w));
   if (!width) throw new Error('рамка Кипра не влезает в 24 бита');
   const model = { origin: { x: origin.x0, y: origin.y0 }, width: width, byte2: 0,
@@ -267,7 +303,7 @@ function collect(get, blk, key, q, out, depth) {
   return out;
 }
 
-module.exports = { plan, build, nodes, split, bbox, collect, chain, lift,
+module.exports = { plan, build, nodes, split, cells, cellOf, bbox, collect, chain, lift,
                    ROOT, PARENT, TREE, DEG };
 
 if (require.main === module) {
