@@ -2123,3 +2123,17 @@ GDB в заводских рамках: магнитола грузится бе
 5. Перед установкой образа, меняющего то, что читается на старте, — иметь путь
    отката, не требующий загруженной навигации (см. «Скрипт при загрузке» —
    разбирается).
+
+### Скрипт при загрузке: пути нет (разобрано 23.10)
+
+* `proc_scriptlauncher` (ifs-root, приоритет 64) запускает `copie_scr.sh` только
+  по событию `ATTACH` от `/dev/medialauncher` (`vdev-medialaunch`, приоритет 10;
+  драйверы `devb-sdc-hbfpga` — тоже 10). Строка `/HBpersistence/copie_scr.sh` —
+  не крючок загрузки, а файл, куда `script_decoder` (`0x08041100`: fopen карты,
+  XOR, fopen `/HBpersistence/copie_scr.sh` "w", chmod) кладёт расшифрованный
+  скрипт перед `spawnl("/bin/ksh", …)`. Своего скрипта, исполняемого при старте,
+  нет; при занятом процессоре событие вставки карты не обрабатывается.
+* `delNavHDD.sh` (efs-system `/scripts`, 488 б): `slay -9 MMI3GApplication`,
+  `umount -f /mnt/nav/SDS`, `/SDS`, `/mnt/nav`, затем `mkqnx6fs -q /dev/hd0t77`.
+  То есть «удаление раздела» — это новая файловая система QNX6 на `hd0t77`.
+* `cleanup_navi.sh`: при `/tmp/clear_nobss` удаляет `/nobss/*.swap`.
