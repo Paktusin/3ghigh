@@ -153,7 +153,8 @@ test('том: шапка и таблица уровней читаются шт�
   assert.equal(v.gdb.readUInt32BE(0x0e), 0x14, 'начало пролога');
   assert.equal(v.gdb.readUInt16BE(0x12), G.PROLOGUE - 0x14, 'длина пролога');
   assert.equal(h.regionEnd, v.regionEnd);
-  assert.equal(v.gdb.readUInt32BE(589), v.regionEnd, 'поле «начало данных» в шапке');
+  // +589…+604 — каталог блобов (FUN_08cb1fd8), не «начало данных»: блобов нет
+  assert.ok(v.gdb.subarray(589, 605).every(x => x === 0), 'каталог блобов пуст');
 });
 
 test('том: заголовки уровней те же, что у EJ211 (ячейка и пороги масштаба)', () => {
@@ -350,27 +351,37 @@ test('дороги: плотному кластеру достаётся тай�
   }
   const r = RL(lines);
   assert.equal(r.skipped, 0, 'ни одна дорога не потеряна');
-  const sizes = Object.keys(r.sizes);
-  assert.equal(sizes.length, 1, 'кластер один');
-  assert.notEqual(sizes[0], '2^5x2^5', 'размер тайла уменьшен под плотность');
+  assert.equal(r.clusters, 1, 'кластер один');
+  assert.ok(Object.keys(r.sizes).some(k => k !== '2^5x2^5'), 'размер тайла уменьшен под плотность');
   assert.ok(r.tiles > 1, 'кластер разбит на несколько тайлов');
 });
 
-test('дороги: размер тайла внутри кластера один — как у завода', () => {
+test('кластер — kd-дерево, как у завода: листья разного размера покрывают кластер, порядок Мортона', () => {
+  // плотное пятно в углу кластера и редкие дороги по всему кластеру
   const lines = [];
-  for (let i = 0; i < 400; i++) {
-    const lon = 33.30 + (i % 20) * 0.001, lat = 35.16 + Math.floor(i / 20) * 0.001;
-    lines.push({ name: 'R' + i, pts: [[lon, lat], [lon + 0.0005, lat + 0.0005]] });
+  for (let i = 0; i < 1200; i++) {
+    const lon = 33.302 + (i % 25) * 0.00064, lat = 35.146 + Math.floor(i / 25) * 0.00022;
+    const pts = [];
+    for (let k = 0; k < 40; k++) pts.push([lon + k * 0.00002, lat + (k % 2) * 0.00002]);
+    lines.push({ name: 'R' + i, pts });
   }
+  for (let i = 0; i < 20; i++) lines.push({ name: 'S' + i, pts: [[33.0 + i * 0.05, 35.0], [33.0 + i * 0.05, 35.3]] });
   const v = V(lines);
   const g = gm.openBuffer(v.gdb, v.gd2);
   const h = gm.header(g);
   const gr = gm.levelGrid(g, h, h.levels[0]);
+  let mixed = 0;
   for (const e of gr.entries) {
     if (!e.sz || e.off < h.regionEnd) continue;
-    const set = new Set(gm.cluster(g, h, e.off, e.sz).tiles.map(t => t.lw + 'x' + t.lh));
-    assert.equal(set.size, 1, 'в кластере один размер тайла');
+    const t = gm.cluster(g, h, e.off, e.sz).tiles;
+    const x0 = Math.min(...t.map(q => q.x)), y0 = Math.min(...t.map(q => q.y));
+    assert.equal(t.reduce((s, q) => s + (1 << (q.lw + q.lh)), 0), 1 << 14, 'листья покрывают кластер 2^7×2^7');
+    assert.ok(t.every(q => q.lw === q.lh || q.lw === q.lh + 1), 'форма kd: lw = lh или lh + 1');
+    const m = t.map(q => G.mortonIndex(q.x - x0, q.y - y0));
+    assert.ok(m.every((x, i) => !i || x > m[i - 1]), 'порядок Мортона');
+    if (new Set(t.map(q => q.lw + 'x' + q.lh)).size > 1) mixed++;
   }
+  assert.ok(mixed > 0, 'есть кластер со смешанным размером тайла');
 });
 
 // ── грубые уровни ──────────────────────────────────────────────────────────
@@ -436,10 +447,13 @@ test('грубые уровни: классы дорог отсеиваются 
     { name: 'A1', cls: 'motorway', pts: [[33.0, 35.0], [33.1, 35.05]] },
     { name: 'B9', cls: 'primary', pts: [[33.0, 35.0], [33.1, 35.05]] },
     { name: 'ул.', cls: 'residential', pts: [[33.0, 35.0], [33.1, 35.05]] },
+    { name: 'E1', cls: 'secondary', pts: [[33.0, 35.0], [33.1, 35.05]] },
   ];
-  assert.equal(G.linesForLevel(lines, 0).length, 3, 'на L0 всё');
-  assert.equal(G.linesForLevel(lines, 1).length, 2, 'на L1 без жилых улиц');
-  assert.equal(G.linesForLevel(lines, 4).length, 2, 'на L4 магистрали и primary');
+  assert.equal(G.linesForLevel(lines, 0).length, 4, 'на L0 всё');
+  assert.equal(G.linesForLevel(lines, 1).length, 3, 'на L1 без жилых улиц');
+  // правило завода: L3 — классы 0…2, L4+ — 0…1
+  assert.deepEqual(G.linesForLevel(lines, 3).map(l => G.classFor(3, l.cls).cls), [1, 2], 'на L3 без класса 3');
+  assert.deepEqual(G.linesForLevel(lines, 4).map(l => G.classFor(4, l.cls).cls), [1], 'на L4 только класс 1');
   assert.equal(G.linesForLevel(lines, 11).length, 1, 'на L11 только автобаны');
 });
 
@@ -450,13 +464,13 @@ const triArea = t => Math.abs((t[1][0] - t[0][0]) * (t[2][1] - t[0][1]) - (t[2][
 
 test('суша: квадратный остров в тайле — суша и море делят тайл точно', () => {
   const a = G.landArea([{ pts: [[100, 100], [300, 100], [300, 300], [100, 300]], bbox: [100, 100, 300, 300] }], 400, 400);
-  assert.equal(a.land.reduce((s, t) => s + triArea(t), 0), 200 * 200);
-  assert.equal(a.sea.reduce((s, t) => s + triArea(t), 0), 400 * 400 - 200 * 200);
+  assert.equal(a.land.flat().reduce((s, t) => s + triArea(t), 0), 200 * 200);
+  assert.equal(a.sea.flat().reduce((s, t) => s + triArea(t), 0), 400 * 400 - 200 * 200);
   assert.deepEqual(G.landArea([{ pts: [[-1, -1], [500, -1], [500, 500], [-1, 500]], bbox: [-1, -1, 500, 500] }], 400, 400), { full: true });
   assert.deepEqual(G.landArea([{ pts: [[900, 900], [990, 900], [990, 990]], bbox: [900, 900, 990, 990] }], 400, 400), { empty: true });
   // суша касается тайла только по вертикальным краям — полоса во всю ширину
   const b = G.landArea([{ pts: [[-100, -100], [500, -100], [500, 200], [-100, 200]], bbox: [-100, -100, 500, 200] }], 400, 400);
-  assert.equal(b.land.reduce((s, t) => s + triArea(t), 0), 400 * 200);
+  assert.equal(b.land.flat().reduce((s, t) => s + triArea(t), 0), 400 * 200);
 });
 
 test('суша: тайл целиком на суше — один многоугольник 0x5F по границе, рамки моря нет', () => {
@@ -513,6 +527,42 @@ test('суша: остров на всех уровнях — треугольн
   }
 });
 
+
+test('площади: столбцы режутся без новых точек, элемент — связный кусок, веера и полосы', () => {
+  // буква U и отдельный квадрат: два куска; точки — вершины колец, кроме углов
+  // столбцов у развилки (там столбец кончается на ребре — точка на ребре)
+  const U = [[0, 0], [300, 0], [300, 300], [200, 300], [200, 100], [100, 100], [100, 300], [0, 300]];
+  const sq = [[350, 350], [390, 350], [390, 390], [350, 390]];
+  const ring = pts => ({ pts, bbox: [Math.min(...pts.map(p => p[0])), Math.min(...pts.map(p => p[1])), Math.max(...pts.map(p => p[0])), Math.max(...pts.map(p => p[1]))] });
+  const r = G.regionParts([ring(U), ring(sq)], 400, 400);
+  assert.equal(r.inside.length, 2, 'два связных куска');
+  const own = new Set(U.concat(sq).map(p => p.join(',')));
+  const onEdge = p => [U, sq].some(rg => rg.some((a, i) => { const b = rg[(i + 1) % rg.length];
+    return (b[0] - a[0]) * (p[1] - a[1]) === (b[1] - a[1]) * (p[0] - a[0]) && p[0] >= Math.min(a[0], b[0]) && p[0] <= Math.max(a[0], b[0]) && p[1] >= Math.min(a[1], b[1]) && p[1] <= Math.max(a[1], b[1]); }));
+  const extra = new Set();
+  for (const part of r.inside) for (const t of part) for (const p of t) { assert.ok(onEdge(p), 'точка ' + p + ' на кольце'); if (!own.has(p.join(','))) extra.add(p.join(',')); }
+  assert.ok(extra.size <= 2, 'лишних точек ' + extra.size);
+  assert.equal(r.inside.flat().reduce((s, t) => s + triArea(t), 0), 300 * 300 - 100 * 200 + 40 * 40);
+  assert.equal(r.outside.flat().reduce((s, t) => s + triArea(t), 0), 400 * 400 - (300 * 300 - 100 * 200 + 40 * 40));
+  // кусок U: 6 треугольников — веерами/полосами меньше точек, чем списком (18)
+  const els = G.polyElements(r.inside.find(p => p.length > 2), false);
+  assert.equal(els.length, 1);
+  assert.ok(els[0].pts.length < 18, 'точек ' + els[0].pts.length);
+  const q = gm.polyTriangles(els[0].pts, els[0].flags);
+  assert.equal(q.illegal, 0);
+  assert.equal(q.tris.reduce((s, t) => s + triArea(t), 0), 300 * 300 - 100 * 200);
+});
+
+test('площади: кусок больше 1500 точек делится на элементы по границам примитивов', () => {
+  // гребёнка: 1200 одиночных треугольников — один список, 3600 точек
+  const tris = [];
+  for (let i = 0; i < 1200; i++) tris.push([[i * 10, 0], [i * 10 + 5, 0], [i * 10, 7]]);
+  const els = G.polyElements(tris, false);
+  assert.ok(els.length >= 3 && els.every(e => e.pts.length <= 1500));
+  let area = 0;
+  for (const e of els) { const q = gm.polyTriangles(e.pts, e.flags); assert.equal(q.illegal, 0); area += q.tris.reduce((s, t) => s + triArea(t), 0); }
+  assert.equal(area, 1200 * 17.5);
+});
 
 // ── слои поверх суши: рельеф, лес, вода … ─────────────────────────────────
 
@@ -600,8 +650,13 @@ test('дороги: куски одной улицы, сходящиеся ко�
   const m = G.mergeLines(lines, 0);
   assert.equal(m.length, 1, 'одна линия');
   assert.deepEqual(m[0].pts, [a, b, c, d]);
-  // развилка: в точке сходятся три — не склеиваем через неё
-  assert.equal(G.mergeLines(lines.concat([{ name: 'MAKARIOU', cls: 'primary', pts: [c, [33.302, 35.17]] }]), 0).length, 3);
+  // развилка: на L0 через неё не склеиваем; выше L0 — по самому прямому
+  // продолжению (b→c→d, отвод на юг — отдельной линией)
+  const fork = lines.concat([{ name: 'MAKARIOU', cls: 'primary', pts: [c, [33.302, 35.15]] }]);
+  assert.equal(G.mergeLines(fork, 0).length, 3);
+  const m1 = G.mergeLines(fork, 1);
+  assert.equal(m1.length, 2);
+  assert.deepEqual(m1.find(l => l.pts.length === 4).pts, [a, b, c, d]);
 });
 
 test('таблицы ссылок: каталог на каждый блок XAC, таблицы — заводская пустая «01 00 00 00»', () => {
@@ -664,11 +719,16 @@ test('таблицы ссылок: вектор XAC ложится на свою
   const tab = b => gm.readRefTable(v.gdb.subarray(v.gdb.readUInt32BE(off + b * 8),
     v.gdb.readUInt32BE(off + b * 8) + v.gdb.readUInt32BE(off + b * 8 + 4)));
   const t0 = tab(0), t1 = tab(1);
-  assert.deepEqual(t0[0].map(e => e.key), [14], 'вектор вне линии не записан');
-  for (const L of [0, 1, 2]) {
+  // L0: оба конца каждого вектора — точки одной линии внутри одного тайла,
+  // их найдёт поиск по координатам (FUN_08cb6578) — записи не нужны, как у
+  // завода у ~95 % векторов; вектор вне линии не записан нигде
+  assert.equal(t0[0], null, 'L0 блока 0 пуст');
+  assert.equal(t1[0], null, 'L0 блока 1 пуст');
+  assert.equal(v.refs.byCoord, 41);
+  assert.deepEqual(t0[1].map(e => e.key), [14], 'вектор вне линии не записан');
+  for (const L of [1, 2]) {
     const gr = gm.levelGrid(g, h, h.levels[L]), o = gm.keyOrigin(L), sh = gr.head.shift || 0;
     const tol = L ? 3 << sh : 0;
-    assert.equal(t1[L].length, L ? t1[L].length : 40);
     for (const e of t1[L].concat(t0[L])) {
       const vec = vectors.find(q => q.rec * 2 === e.key && (e === t0[L][0]) === (q.block === 0));
       const poly = [];
@@ -693,6 +753,18 @@ test('таблицы ссылок: вектор XAC ложится на свою
       }
     }
   }
+});
+
+test('таблицы ссылок: L0 пишется, если обе точки несут две линии (поиск неоднозначен)', () => {
+  const U = gm.UNITS_PER_LON, W = gm.UNITS_PER_LAT;
+  const w = ([lon, lat]) => ({ x: Math.round(lon * U), y: Math.round(lat * W) });
+  const pts = [[33.300, 35.160], [33.301, 35.1605], [33.302, 35.1603]];
+  const lines = [{ cls: 'primary', name: 'A', pts }, { cls: 'secondary', name: 'B', pts }];
+  const v = V(lines, { xacBlocks: 1, vectors: [{ block: 0, rec: 1, a: w(pts[0]), z: w(pts[1]) }], levels: [0] });
+  const off = v.gdb.readUInt32BE(581), o = v.gdb.readUInt32BE(off), s = v.gdb.readUInt32BE(off + 4);
+  const [L0] = gm.readRefTable(v.gdb.subarray(o, o + s));
+  assert.equal(L0.length, 1);
+  assert.equal(v.refs.byCoord, 0);
 });
 
 test('таблицы ссылок: вектор через стык двух линий — две ссылки, до общей точки и от неё', () => {

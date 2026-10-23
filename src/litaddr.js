@@ -60,6 +60,8 @@ function encode(tokens, ctx, st) {
       if (x < 0 || y < 0 || x >= lim || y >= lim)
         throw new Error('пара ' + t.pair + ' вне ширины ' + ctx.width + ' (блок ' + ctx.blk + ')');
       out.push(E.encPair(x, y, ctx.width));
+    } else if (t.apair !== undefined) {                // точка в абсолютных: пара от опоры блока
+      out.push(encode([{ pair: [t.apair[0] - ctx.origin.x, t.apair[1] - ctx.origin.y] }], ctx, st));
     } else if ('ref' in t) {
       const p = t.ref === null ? null : ctx.resolve(t.ref);
       if (!p) { out.push(Buffer.from([0xff])); st.x = -1; st.y = -1; st.first = false; continue; }
@@ -136,15 +138,17 @@ function index(sym, o) {
     sym, n: o.branches.length, entries: o.branches.map((_, i) => sym + '#' + i),
     tokens: () => {
       // корневой индекс — 0xd9; ветвь второго уровня — 0xda (бит 1: есть
-      // приставка 0x51, бит 0 сброшен), как у NZ 3383:1202 и 1227
+      // приставка 0x51, бит 0 сброшен), как у NZ 3383:1202 и 1227; корень, у
+      // всех имён которого общее начало, — 0xdb с приставкой (EU 75660:1696
+      // «ULICA », 22213:3859 «6100»)
       const t = o.prefix
-        ? [{ u8: 0xda }, { ref: o.owner || null }, { v: o.total },
+        ? [{ u8: o.root ? 0xdb : 0xda }, { ref: o.owner || null }, { v: o.total },
            { u8: Buffer.byteLength(o.prefix) }, { raw: Buffer.from(o.prefix, 'utf8') }, { ref: o.first },
            { v: o.branches.length }]
         : [{ u8: 0xd9 }, { ref: o.owner || null }, { v: o.total }, { ref: o.first },
            { v: o.branches.length }];
       for (const b of o.branches) {
-        const c = Buffer.from(b.key, 'utf8');
+        const c = Buffer.from(b.key, 'utf8');          // '' — имя кончилось: байт 0x80 (EU 22213:3859)
         if (c.length === 1 && c[0] < 0x80) t.push({ u8: c[0] });
         else t.push({ u8: 0x80 | c.length }, { raw: c });
         t.push({ ref: b.target });
@@ -232,6 +236,22 @@ function list31(sym, items, o) {
       for (const it of items) t.push({ ref: it.target });
       return t;
     },
+  };
+}
+
+// Улица с одним именем в нескольких городах (0x10, ведущий 0xb8 | флаги):
+// правила 256…263 — 0x36 вида 4 — следующая запись (без данных: города ->
+// улица в городе), бит 1 — 0x36 вида 9 (перекрёстки), бит 0 — вида 3
+// (индексы), бит 2 — вида 19; затем вызов 0x1002 (дома). Так у Мальты
+// 93276:903: 0xbb, 0x31 городов вплотную за ней (0xe1, без владельца), 0x31
+// перекрёстков, 0x31 индексов; домов нет (флаги 0, число 0 — у 1211 из 1432
+// записей 0x10 Мальты). Перекрёстков мы не пишем — бита 1 нет (у Мальты
+// 0xb9 — 4 записи).
+function multiStreet(sym, o) {
+  return {
+    sym, n: 0, multi: true,
+    tokens: () => [{ u8: 0xb8 | (o.postcodes ? 1 : 0) }].concat(o.postcodes ? [{ ref: o.postcodes }] : [],
+                                                                [{ u8: 0 }, { v: 0 }]),
   };
 }
 
@@ -417,7 +437,7 @@ function assemble(blocks, extern) {
     let ended = false;
     for (const r of b.records) {
       if (r.bytes) { parts.push(r.bytes); ended = r.ended || false; continue; }
-      parts.push(encode(r.tokens(), { blk: b.blk, width: b.width, resolve }, st));
+      parts.push(encode(r.tokens(), { blk: b.blk, width: b.width, origin: b.origin, resolve }, st));
     }
     if (!ended) parts.push(Buffer.from([0x80]));
     out.set(b.blk, Buffer.concat(parts));
@@ -428,6 +448,8 @@ function assemble(blocks, extern) {
 // ---------------------------------------------------------------------------
 // Перенос записи из заводского блока: байты копируются, а ссылки 0x41
 // перекодируются заново (база дельта-кодека — номер блока, и он у нас другой).
+// opt.pair(t, ref) — новая упакованная пара 0x40 вместо заводской (или
+// undefined — оставить); ref — последняя ссылка перед ней, уже наша.
 
 function transplant(schema, block, srcBlk, opt) {
   const V = require('./litvm');
@@ -435,7 +457,7 @@ function transplant(schema, block, srcBlk, opt) {
   const from = o.from || 0, to = o.to === undefined ? block.length : o.to;
   const map = o.map || ((p) => p);
   const parts = [];
-  let cur = from;
+  let cur = from, ref = null;
   const st = { x: o.blk, y: 0, first: true };
   V.run(schema, block, 0, { blk: srcBlk, limit: 4000000, tap: (t) => {
     if (t.at < from || t.at >= to) return;
@@ -448,7 +470,11 @@ function transplant(schema, block, srcBlk, opt) {
         if (!d) throw new Error('перенос: ссылка не кодируется ' + p);
         parts.push(d.buf); st.x = p[0]; st.y = p[1]; st.first = false;
       }
-    } else parts.push(block.subarray(t.at, t.end));
+      ref = p;
+    } else {
+      const np = t.op === 0x40 && o.pair ? o.pair(t, ref) : undefined;
+      parts.push(np ? E.encPair(np[0], np[1], block[3]) : block.subarray(t.at, t.end));
+    }
     cur = t.end;
   } });
   if (cur < to) parts.push(block.subarray(cur, to));
@@ -464,10 +490,13 @@ function transplant(schema, block, srcBlk, opt) {
 function letter(name) { return [...name][0] || ' '; }
 
 // Имена -> списки не длиннее LIST_MAX и, если имён больше DIRECT_MAX, индекс
-// над ними, многоуровневый: ветвь — символ на глубине d; ветвь длиннее
-// LIST_MAX — свой индекс со строкой-приставкой (ведущий 0xda, как NZ
-// 3383:1227) и ветвями по следующему символу. Каждый список начинается с
-// ветви, поэтому все имена достижимы и из индекса, и перечислением подряд.
+// над ними, многоуровневый, как у завода: ветвь — символ сразу за приставкой
+// ('' — имя кончилось); ветвь длиннее LIST_MAX — свой индекс (ведущий 0xda),
+// чья приставка 0x51 — общее начало всех имён ветви, поэтому ветвей у него
+// не меньше двух. Записи идут в порядке обхода: индекс, затем его ветви.
+// Каждый список начинается с ветви, поэтому все имена достижимы и из
+// индекса, и перечислением подряд. Одинаковые имена (больше LIST_MAX) не
+// делятся — у завода их нет вовсе (для них у него 0x34, см. docs).
 //
 // opt.t31 — списки 0x31 (имя каждого элемента — ссылка it.ref на уже
 // существующее имя или запись, сортировка — по it.name).
@@ -477,8 +506,8 @@ function names(sym, items, owner, opt) {
   const mk = (ls, g, direct, own) => (o.t31
     ? list31(ls, g.map((it) => ({ name: it.ref, target: it.target })), { owner: own, direct })
     : list(ls, g, { direct, owner: own }));
-  const records = [], listRecs = [], subs = [];
-  const at = new Map();                          // элемент -> имя ключа его имени
+  const records = [];
+  let subs = 0;
   const where = new Map();                       // элемент -> [номер списка, место]
   const groupsOut = [];
   const addList = (g) => { groupsOut.push(g); g.forEach((it, i) => where.set(it, [groupsOut.length - 1, i])); };
@@ -487,55 +516,73 @@ function names(sym, items, owner, opt) {
   const entryOf = (it) => { const [gi, i] = where.get(it); return lsym(gi) + '#' + i; };
   const direct = sorted.length <= DIRECT_MAX;
   const idx = sym + ':idx';
-  let top = null;
+  const seq = [];                                // записи по порядку: индекс, за ним его ветви
   if (direct) addList(sorted);
   else {
-    const build = (its, depth, isym, prefix) => {
+    const chars = (it) => [...it.name];
+    // Общая приставка группы в символах (как у завода: «S» -> «SQAQ »,
+    // «TR» -> «TRIQ », Мальта 93249:3597, 3893).
+    const lcp = (its) => {
+      const a = chars(its[0]), z = chars(its[its.length - 1]);
+      let i = 0;
+      while (i < a.length && i < z.length && a[i] === z[i]) i++;
+      return i;
+    };
+    const splits = (its, d) => new Set(its.map((x) => chars(x)[d] || '')).size > 1;
+    const build = (its, depth, isym) => {
+      const node = { isym, depth, prefix: chars(its[0]).slice(0, depth).join(''), branches: [],
+                     total: its.length, firstItem: its[0] };
+      seq.push({ node });
       const groups = [];
       for (const it of its) {
-        const c = [...it.name][depth] || ' ';
+        const c = chars(it)[depth] || '';
         if (!groups.length || groups[groups.length - 1].key !== c) groups.push({ key: c, items: [] });
         groups[groups.length - 1].items.push(it);
       }
-      const branches = [];
       let cur = null;
-      const flush = () => { if (cur && cur.length) addList(cur); cur = null; };
+      const flush = () => { if (cur && cur.length) { addList(cur); seq.push({ list: groupsOut.length - 1 }); } cur = null; };
       for (const g of groups) {
-        if (g.items.length > LIST_MAX && depth < 8 && g.items.some((x) => [...x.name].length > depth + 1)) {
+        // ветвь длиннее LIST_MAX — свой индекс с приставкой до места, где имена
+        // расходятся: так у него не меньше двух ветвей (у завода индексов с
+        // одной ветвью 0 из 40 196)
+        const d = g.items.length > LIST_MAX ? lcp(g.items) : 0;
+        if (d > depth && splits(g.items, d)) {
           flush();
-          const ss = sym + ':i' + subs.length;
-          subs.push(null);
-          const slot = subs.length - 1;
-          subs[slot] = build(g.items, depth + 1, ss, prefix + g.key);
-          branches.push({ key: g.key, target: ss });
+          const ss = sym + ':i' + (++subs);
+          node.branches.push({ key: g.key, target: ss });
+          build(g.items, d, ss);
           continue;
         }
         if (g.items.length > LIST_MAX) {           // одинаковые имена: просто подряд по LIST_MAX
           flush();
-          for (let i = 0; i < g.items.length; i += LIST_MAX) addList(g.items.slice(i, i + LIST_MAX));
-          branches.push({ key: g.key, first: g.items[0] });
+          for (let i = 0; i < g.items.length; i += LIST_MAX) {
+            addList(g.items.slice(i, i + LIST_MAX));
+            seq.push({ list: groupsOut.length - 1 });
+          }
+          node.branches.push({ key: g.key, first: g.items[0] });
           continue;
         }
         if (cur && cur.length + g.items.length > LIST_MAX) flush();
         if (!cur) cur = [];
         cur.push(...g.items);
-        branches.push({ key: g.key, first: g.items[0] });
+        node.branches.push({ key: g.key, first: g.items[0] });
       }
       flush();
-      return { isym, depth, prefix, branches, total: its.length, firstItem: its[0] };
     };
-    top = build(sorted, 0, idx, '');
+    const d0 = lcp(sorted);
+    build(sorted, d0 && splits(sorted, d0) ? d0 : 0, idx);
   }
-  groupsOut.forEach((g, gi) => listRecs.push(mk(lsym(gi), g, direct, direct ? owner : idx)));
   const mkIndex = (n, own) => index(n.isym, {
-    owner: own, total: n.total, first: entryOf(n.firstItem), prefix: n.depth ? n.prefix : undefined,
+    owner: own, total: n.total, first: entryOf(n.firstItem), prefix: n.depth ? n.prefix : undefined, root: n.isym === idx,
     branches: n.branches.map((b) => ({ key: b.key, target: b.target || posOf(b.first) })),
   });
-  if (top) {
-    records.push(mkIndex(top, owner));
-    for (const n of subs) records.push(mkIndex(n, idx));
+  // порядок как у завода (Мальта 93249:3597…3699): индекс, затем его ветви
+  // по порядку — списки и вложенные индексы вперемешку
+  if (direct) records.push(mk(lsym(0), groupsOut[0], true, owner));
+  for (const s of seq) {
+    if (s.node) records.push(mkIndex(s.node, s.node.isym === idx ? owner : idx));
+    else records.push(mk(lsym(s.list), groupsOut[s.list], false, idx));
   }
-  records.push(...listRecs);
   return { records, head: direct ? lsym(0) : idx, last: entryOf(sorted[sorted.length - 1]), entryOf };
 }
 
@@ -560,6 +607,70 @@ function select33(sym, sels) {
       return t;
     },
   };
+}
+
+// Точки одного имени — записи 0x34 (ведущий 0x97), как у завода под узлом
+// 0x33 [16 -> 0x34] (Мальта — все 402 имени с несколькими точками; EU,
+// выборка каждого 7-го блока: «16:34» — 561 436 узлов). Грамматика —
+// правила 144…162: байт флагов, бит 1 — узел дерева (рамки 0x61/0x60 левого
+// ребёнка, 0x5f -> он, 0x64/0x63 правого, 0x62 -> он), бит 7 — голова (0x65 —
+// точек всего; он же поле 0x38 -> +0x610), бит 6 — последняя запись (поле
+// 0x2b -> +0x614), бит 0 — категория 0x4f у каждого витка, иначе одна на
+// запись; число витков, виток — пара 0x22 (точка от опоры блока), [0x4f],
+// 0x3c -> точка. Читает CLwtLitAccess::goToPoiGeoIndex (FUN_08f098ac ->
+// FUN_08ccd298, критерий 0x10 -> FUN_08cdae88): узел кладёт детей в очередь,
+// лист читается запись за записью, пока следующая — 0x34, не дальше начала
+// правого брата (0x62 родителя) и до записи с +0x614 != 0.
+// У завода: не больше 100 витков в записи (больше — 0), до 500 точек —
+// плоская цепочка (max 499 из 623 345), больше — дерево (min 502 из 431):
+// делится пополам по длинной стороне рамки, пока в листе больше 250; витки
+// записи — по возрастанию x (EU 125835:1738, 129958:2054).
+const P34_REC = 100, P34_FLAT = 500, P34_LEAF = 250;
+function poi34(sym, pts) {
+  const recs = [];
+  const mixed = new Set(pts.map((q) => q.cat)).size > 1;
+  let id = 0;
+  const box = (ps) => {
+    const b = bboxOf(ps.map((q) => [q.x, q.y]));
+    return [[b.x0, b.y0], [b.x1, b.y1]];
+  };
+  const leaf = (s, ps) => {
+    ps = ps.slice().sort((a, b) => a.x - b.x || a.y - b.y);
+    for (let i = 0; i < ps.length; i += P34_REC) {
+      const part = ps.slice(i, i + P34_REC), rs = i ? sym + ':r' + (id++) : s;
+      recs.push({ sym: rs, n: part.length, part, entries: part.map((_, k) => rs + '#' + k) });
+    }
+  };
+  const tree = (s, ps) => {
+    if (ps.length <= P34_LEAF) return leaf(s, ps);
+    const [a, z] = box(ps), ax = z[0] - a[0] >= z[1] - a[1] ? 'x' : 'y';
+    const srt = ps.slice().sort((p, q) => p[ax] - q[ax] || p.x - q.x || p.y - q.y);
+    const h = srt.length >> 1, L = srt.slice(0, h), R = srt.slice(h);
+    const ls = sym + ':t' + (id++), rs = sym + ':t' + (id++);
+    recs.push({ sym: s, n: 0, entries: [], node: { lbox: box(L), rbox: box(R), left: ls, right: rs } });
+    tree(ls, L);
+    tree(rs, R);
+  };
+  if (pts.length <= P34_FLAT) leaf(sym, pts);
+  else tree(sym, pts);
+  recs.forEach((r, i) => {
+    const fl = (i === 0 ? 0x80 : 0) | (i === recs.length - 1 ? 0x40 : 0) | (r.node ? 0x03 : mixed ? 0x01 : 0);
+    r.tokens = () => {
+      const t = [{ u8: 0x97 }, { u8: fl }];
+      if (r.node) t.push({ apair: r.node.lbox[0] }, { apair: r.node.lbox[1] }, { ref: r.node.left },
+                         { apair: r.node.rbox[0] }, { apair: r.node.rbox[1] }, { ref: r.node.right });
+      if (fl & 0x80) t.push({ v: pts.length });
+      if (!(fl & 1)) t.push({ v: r.part[0].cat });
+      t.push({ v: r.node ? 0 : r.part.length });
+      for (const q of r.part || []) {
+        t.push({ apair: [q.x, q.y] });
+        if (fl & 1) t.push({ v: q.cat });
+        t.push({ ref: q.pos });
+      }
+      return t;
+    };
+  });
+  return recs;
 }
 
 // Повороты названия по словам — так у завода в списках названий POI: «SAN
@@ -594,8 +705,9 @@ function phoneKey(ph) {
 }
 
 // Список названий точек: ключ -> точка. У ключа с несколькими точками —
-// узел 0x33 с селектором 1 -> список 0x31 этих точек (как у завода телефон
-// с двумя точками: Ватикан 176815:4 -> 176815:7 -> 0x31 176815:10).
+// узел 0x33 [16 -> 0x34 этих точек] (poi34), как у Мальты (402 из 402).
+// Прежний вариант Ватикана [1 -> 0x31] при сотнях точек давал список 0x31 из
+// одинаковых имён и индекс 0x32 с одной ветвью над ним (76 таких).
 function poiNames(sym, pois, keys) {
   const by = new Map();
   for (const q of pois) {
@@ -610,18 +722,18 @@ function poiNames(sym, pois, keys) {
   for (const [k, qs] of by) {
     if (qs.length === 1) { items.push({ name: k, target: qs[0].pos }); continue; }
     const gs = sym + ':g' + (g++);
-    const l = names(gs + 'l', qs.map((q) => ({ name: q.name, ref: q.pos, target: q.pos })), null, { t31: true });
-    extra.push(select33(gs, [{ sel: 1, target: l.head }]), ...l.records);
+    extra.push(select33(gs, [{ sel: 16, target: gs + 'z' }]), ...poi34(gs + 'z', qs));
     items.push({ name: k, target: gs });
   }
   const n = names(sym, items, null);
-  return { records: n.records.concat(extra), head: n.head, entries: items.length };
+  const byKey = new Map(items.map((it) => [it.name, it]));
+  return { records: n.records.concat(extra), head: n.head, entries: items.length, multi: g,
+           entryOf: (q) => n.entryOf(byKey.get(q.name)) };
 }
 
 // Группы категорий (Oberkategorie, селектор 20) -> категории (POI Kategorie,
 // селектор 2). Снято с завода: у всех 46 стран EU одно и то же (несовпадений
-// 0), группа 39 — все категории страны. Категории вне групп (у завода их точек
-// нет) кладутся только в 39.
+// 0), группа 39 — все категории групп 40…48 (57).
 const POI_GROUPS = {
   40: [84, 87], 41: [38, 39, 40, 44, 56, 73, 192, 242], 42: [29], 43: [46],
   44: [1, 2, 5, 7, 11, 17, 18, 41, 44, 58, 72, 73, 192, 242], 45: [9, 13, 33, 34, 57, 59, 60],
@@ -629,44 +741,42 @@ const POI_GROUPS = {
   48: [12, 16, 21, 27, 30, 37, 50, 52, 53, 54, 62, 63, 68],
 };
 
-// Дерево категорий (селектор 20 узла поиска POI), как у завода (Ватикан
-// 176815:44 — страна, 176815:268 — город): узел групп -> у группы узел
+// Дерево категорий (селектор 20 узла поиска POI), как у завода (Мальта
+// 245455:0 — страна, Ватикан 176815:268 — город): узел групп -> у группы узел
 // [2 -> узел категорий, sel -> названия точек группы] -> у категории узел
-// [sel -> названия её точек]. sel — 18 у страны, 1 у города. all — уже
-// готовый список названий всех точек (для группы 39). Завод повторяет списки
-// под каждой группой; здесь один список категории на все ссылки.
-// Категория в дереве: из заводской группы или с номером до 150. У номеров от
-// 150 вне групп (химчистки 156, турагентства 163, одежда 181…) у HMI нет
-// названия — в списке видна цифра (машина, 21.10). Их точки ищутся по имени.
+// [sel -> названия её точек]. sel — 18 у страны, 1 у города. У каждой группы
+// всё своё: узлы категорий и списки — копии (Мальта: категория 46 под группой
+// 39 — 245460:767 -> :769, под 43 — 245466:1483 -> :1485; общих узлов и
+// списков 0, у нас прежде — 52 повторных захода).
+// В дереве — только категории заводских групп: у завода группа 39 — не больше
+// 57 витков, ровно столько категорий в группах 40…48; категория 14 у него
+// есть в городах (цикл 0x2000), но в дереве нет. Прочие наши категории (6, 20,
+// 25, 48…, и от 150 — у HMI для них нет названия) ищутся по имени и рядом.
+// Осознанный отход от завода (по просьбе пользователя, 23.10): автосервис (6) и
+// кемпинг (88) — только в группе 39, витков в ней остаётся не больше заводских 57.
+const ONLY_ALL = [6, 88];
 const GROUPED = new Set(Object.values(POI_GROUPS).flat());
-const inTree = (cat) => GROUPED.has(cat) || cat < 150;
+const inTree = (cat) => GROUPED.has(cat) || ONLY_ALL.includes(cat);
 
-function catTree(sym, pois, sel, all) {
-  const shown = pois.filter((q) => inTree(q.cat));
-  if (shown.length !== pois.length) all = null;    // общий список названий шире дерева
-  pois = shown;
+function catTree(sym, pois, sel) {
+  pois = pois.filter((q) => inTree(q.cat));
   const byCat = new Map();
   for (const q of pois) { if (!byCat.has(q.cat)) byCat.set(q.cat, []); byCat.get(q.cat).push(q); }
   const cats = [...byCat.keys()].sort((a, b) => a - b);
-  const recs = [], lists = new Map();
-  for (const c of cats) {
-    const l = poiNames(sym + ':k' + c, byCat.get(c), poiKeys);
-    lists.set(c, l.head);
-    recs.push(select33(sym + ':l' + c, [{ sel, target: l.head }]), ...l.records);
-  }
   const groups = [[39, cats]].concat(Object.entries(POI_GROUPS).map(([g, cs]) => [+g, cs.filter((c) => byCat.has(c))]))
     .filter(([, cs]) => cs.length);
-  const tops = [];
+  const recs = [], tops = [];
   for (const [g, cs] of groups) {
-    let names = g === 39 && all ? all : cs.length === 1 ? lists.get(cs[0]) : null;
-    if (!names) {
-      const l = poiNames(sym + ':g' + g, [].concat(...cs.map((c) => byCat.get(c))), poiKeys);
-      recs.push(...l.records);
-      names = l.head;
+    const gs = sym + ':' + g;
+    const names = poiNames(gs + 'n', [].concat(...cs.map((c) => byCat.get(c))), poiKeys);
+    recs.push(select33(sym + ':m' + g, [{ sel: 2, target: sym + ':s' + g }, { sel, target: names.head }]
+                .sort((a, b) => a.sel - b.sel)),
+              select33(sym + ':s' + g, cs.map((c) => ({ sel: c, target: gs + ':l' + c }))));
+    for (const c of cs) {
+      const l = poiNames(gs + ':k' + c, byCat.get(c), poiKeys);
+      recs.push(select33(gs + ':l' + c, [{ sel, target: l.head }]), ...l.records);
     }
-    recs.push(select33(sym + ':s' + g, cs.map((c) => ({ sel: c, target: sym + ':l' + c }))),
-              select33(sym + ':m' + g, [{ sel: 2, target: sym + ':s' + g }, { sel, target: names }]
-                .sort((a, b) => a.sel - b.sel)));
+    recs.push(...names.records);
     tops.push({ sel: g, target: sym + ':m' + g });
   }
   return { records: [select33(sym, tops)].concat(recs), head: sym, cats: cats.length, groups: groups.length };
@@ -682,7 +792,7 @@ function estimate(r) {
     else if (t.u32 !== undefined) n += 4;
     else if (t.v !== undefined) n += t.v < 252 ? 1 : t.v <= 0xffff ? 3 : t.v <= 0xffffff ? 4 : 5;
     else if (t.raw !== undefined) n += t.raw.length;
-    else if (t.pair !== undefined) n += 6;
+    else if (t.pair !== undefined || t.apair !== undefined) n += 6;
     else n += 5;
   }
   return n;
@@ -693,19 +803,23 @@ const keysOf = (r) => (r.keys !== undefined ? r.keys : r.n > 0 ? r.n + 1 : 1);
 // в блоке; опора и ширина — общие у группы. Записи не рвутся; следующая
 // запись (список) продолжает предыдущую уже в следующем блоке — так у завода
 // списки городов NZ идут через 3383…3385.
+// Записей 0x10 в блоке — не больше MULTI_MAX: у завода (выборка каждого 5-го
+// блока EU) их в блоке до 484…642, у нас без предела было до 1126.
 const BLOCK_BUDGET = 40000;
+const MULTI_MAX = 480;
 function pack(records, blk, origin, budget) {
   const out = [];
-  let cur = null, bytes = 0, keys = 0;
+  let cur = null, bytes = 0, keys = 0, multi = 0;
   for (const r of records) {
     const s = estimate(r), k = keysOf(r);
-    if (!cur || (cur.records.length && (bytes + s > (budget || BLOCK_BUDGET) || keys + k > 60000))) {
+    if (!cur || (cur.records.length && (bytes + s > (budget || BLOCK_BUDGET) || keys + k > 60000 ||
+                                        (r.multi && multi >= MULTI_MAX)))) {
       cur = { blk: blk + out.length, origin, width: 24, records: [] };
       out.push(cur);
-      bytes = 13; keys = 0;
+      bytes = 13; keys = 0; multi = 0;
     }
     cur.records.push(r);
-    bytes += s; keys += k;
+    bytes += s; keys += k; if (r.multi) multi++;
   }
   return out;
 }
@@ -730,6 +844,19 @@ function anchor(pts) {
     if (d < bd) { bd = d; best = p; }
   }
   return best;
+}
+
+// Категории в цикле 0x2000 города: [категория, точки] по возрастанию номера.
+// У завода витков в городе не больше 53 (EU, все 594 459 городов), и все они —
+// типы шапки POI 0x20 (57 категорий групп и 14). Если наших категорий больше,
+// в цикл идут все заводские и сколько влезет прочих — сначала самые большие.
+const CITY_CATS_MAX = 53;
+const FACTORY_CATS = new Set([...GROUPED, 14]);
+function cityCats(byCat) {
+  const all = [...byCat];
+  const keep = all.filter(([c]) => FACTORY_CATS.has(c));
+  const rest = all.filter(([c]) => !FACTORY_CATS.has(c)).sort((a, b) => b[1].length - a[1].length || a[0] - b[0]);
+  return keep.concat(rest.slice(0, Math.max(0, CITY_CATS_MAX - keep.length))).sort((a, b) => a[0] - b[0]);
 }
 
 // Блоки справочника: страна в блоке countryBlk, каждый город — в своём блоке
@@ -758,6 +885,7 @@ function directory(model, opt) {
   }
   for (const d of districts) all.push([d.x, d.y]);
   for (const q of pcs) for (const pt of q.pts) all.push(pt);
+  for (const q of pois) all.push([q.x, q.y]);    // пары 0x22 записей 0x34 — от опоры блока страны
   const box = bboxOf(all);
   const corigin = { x: box.x0, y: box.y0 };
   const rel = (org) => (p) => [p[0] - org.x, p[1] - org.y];
@@ -773,9 +901,10 @@ function directory(model, opt) {
 
   const streetEntry = new Map();          // номер улицы модели -> ключ имени в списке города
   const t31Entry = new Map();             // `${индекс}@${улица}` -> ключ витка 0x31
+  const pcName = new Map();               // `${индекс}@${город}` -> имя индекса в списке города
   const poiEntry = new Map();             // точка -> ключ её витка в списке категории города
   const stats = { cities: places.length, districts: districts.length, streets: 0, postcodes: pcs.length,
-                  centres: 0, poisInCities: 0, poisInTree: 0, districtStreets: 0, houses: 0 };
+                  centres: 0, poisInCities: 0, poisInTree: 0, districtStreets: 0, houses: 0, offLoop: [] };
   const houseExpect = [];                 // улицы с домами: {sym улицы, номера}
   const groups = [];                      // [{records, origin}] — города, по порядку
   const withRecs = places;
@@ -802,6 +931,7 @@ function directory(model, opt) {
     const pp = ppItems.length ? names('c' + p.i + ':pcn', ppItems, cs) : null;
     const pcRecs = [];
     for (const it of ppItems) {
+      pcName.set(it.x.qk + '@' + p.i, pp.entryOf(it));
       const sts = it.x.st.map((si) => ({ si, name: model.streets[si].name, ref: streetEntry.get(si), target: stSym.get(si) }));
       const l = names(it.target, sts, pp.entryOf(it), { t31: true });
       pcRecs.push(...l.records);
@@ -816,19 +946,22 @@ function directory(model, opt) {
       const pn2 = poiNames('c' + p.i + ':pn', p.pois, poiKeys);
       poiTree = 'c' + p.i + ':pt';
       // у города, где все точки вне дерева категорий, селектора 20 нет
-      const ct = catTree('c' + p.i + ':ct', p.pois, 1, pn2.head);
+      const ct = catTree('c' + p.i + ':ct', p.pois, 1);
       const tree = ct.groups ? [{ sel: 20, target: ct.head }] : [];
       poiRecs.push(select33(poiTree, [{ sel: 1, target: pn2.head }].concat(tree)),
                    ...pn2.records, ...(ct.groups ? ct.records : []));
       const byCat = new Map();
       for (const q of p.pois) { if (!byCat.has(q.cat)) byCat.set(q.cat, []); byCat.get(q.cat).push(q); }
-      for (const [cat, qs] of [...byCat].sort((a, b) => a[0] - b[0])) {
+      for (const [cat, qs] of cityCats(byCat)) {
         const its = qs.map((q) => ({ name: q.name, ref: q.pos, target: q.pos, q }));
         const cl = names('c' + p.i + ':k' + cat, its, cs, { t31: true });
         cats.push({ cat, target: cl.head });
         poiRecs.push(...cl.records);
         its.forEach((it) => poiEntry.set(it.q, cl.entryOf(it)));
       }
+      // точки категорий, не вошедших в цикл: 0x66 — на их имя в списке
+      // названий города (у завода 0x66 ведёт и в списки 0x30: EU 93494:3)
+      for (const q of p.pois) if (!poiEntry.has(q)) { poiEntry.set(q, pn2.entryOf(q)); stats.offLoop.push(q.cat); }
       stats.poisInCities += p.pois.length;
       stats.poisInTree += p.pois.filter((q) => inTree(q.cat)).length;
     }
@@ -865,7 +998,9 @@ function directory(model, opt) {
       recs.push(city(ds, {
         name: cn.entryOf(distItems[d.i]), list: l && l.head, last: l && l.last,
         center: r([d.x, d.y]), min: r([d.x, d.y]), max: r([d.x, d.y]), id: idBase + 0x200000 + d.i,
-        next: 'dist' + dl[(j + 1) % dl.length].i, link: cs, centre: 'ctr' + p.i,
+        // кольцо районов — от двух; единственный район — 0x208 «нет», как у
+        // завода (Мальта: 19 таких, ссылки на себя 0 из 581 490)
+        next: dl.length > 1 ? 'dist' + dl[(j + 1) % dl.length].i : null, link: cs, centre: 'ctr' + p.i,
       }));
       if (l) recs.push(...l.records);
       stats.districtStreets += sts.length;
@@ -885,8 +1020,36 @@ function directory(model, opt) {
                                      min: crel([pb.x0, pb.y0]), max: crel([pb.x1, pb.y1]) }), cl, ...sl.records);
   });
 
-  // все улицы страны (вид 7): имя -> имя улицы в списке её города
-  const allItems = model.streets.map((s, si) => ({ name: s.name, target: streetEntry.get(si) })).filter((x) => x.target);
+  // все улицы страны (вид 7): имя -> имя улицы в списке её города. Имя
+  // нескольких улиц (одно название в разных городах) — одно, и ведёт в 0x10
+  // (multiStreet), как у Мальты (93269:1971 -> 93276:903): у завода во «всех
+  // улицах» одинаковых имён подряд нет.
+  const byName = new Map();
+  model.streets.forEach((s, si) => {
+    if (!streetEntry.has(si)) return;
+    if (!byName.has(s.name)) byName.set(s.name, []);
+    byName.get(s.name).push(si);
+  });
+  const allItems = [], msRecs = [];
+  for (const [name, sis] of byName) {
+    if (sis.length === 1) { allItems.push({ name, target: streetEntry.get(sis[0]) }); continue; }
+    const ms = 'cy:ms' + msRecs.length;
+    // вид 4: город (имя в списке городов страны) -> имя улицы в этом городе
+    const cl = names(ms + 'c', sis.map((si) => {
+      const c = model.streets[si].place;
+      return { name: places[c].name, ref: cn.entryOf(cityItems[c]), target: streetEntry.get(si) };
+    }), null, { t31: true });
+    // вид 3: индекс (имя в списке индексов города) -> виток улицы в 0x31 индекса
+    const pi = [];
+    pcs.forEach((q, qk) => sis.forEach((si) => {
+      const t = t31Entry.get(qk + '@' + si);
+      if (t) pi.push({ name: q.code, ref: pcName.get(qk + '@' + model.streets[si].place), target: t });
+    }));
+    const pl = pi.length ? names(ms + 'p', pi, null, { t31: true }) : null;
+    msRecs.push(multiStreet(ms, { postcodes: pl && pl.head }), ...cl.records, ...(pl ? pl.records : []));
+    allItems.push({ name, target: ms });
+  }
+  stats.multiStreets = msRecs.filter((r) => r.multi).length;
   const an = allItems.length ? names('cy:streets', allItems, null) : null;
   // поиск POI в стране (вид 0x10): узел 0x33 (Ватикан 176815:0, Мальта 245455:0)
   let cpoi = null, cpRecs = [];
@@ -901,19 +1064,19 @@ function directory(model, opt) {
     }
     const cp = poiNames('cy:pn', pois, poiKeys);
     sels.push({ sel: 18, target: cp.head }); recs.push(...cp.records);
-    const ct = catTree('cy:ct', pois, 18, cp.head);
+    const ct = catTree('cy:ct', pois, 18);
     sels.push({ sel: 20, target: ct.head }); recs.push(...ct.records);
     stats.cats = ct.cats; stats.catGroups = ct.groups;
     cpoi = 'cy:pt';
     cpRecs = [select33(cpoi, sels)].concat(recs);
-    stats.poiNames = cp.entries; stats.phones = ph.length;
+    stats.poiNames = cp.entries; stats.phones = ph.length; stats.poiMulti = cp.multi;
   }
   const cx = Math.round((box.x0 + box.x1) / 2), cyy = Math.round((box.y0 + box.y1) / 2);
   const countryRecs = [country('country', {
     code: model.code, iso2: model.iso2, iso3: model.iso3,
     list: cn.head, last: cn.last, postcodes: pn && pn.head, streets: an && an.head, poi: cpoi,
     center: crel([cx, cyy]), min: [0, 0], max: crel([box.x1, box.y1]),
-  })].concat(pn ? pn.records : [], cn.records, paRecs, an ? an.records : [], cpRecs);
+  })].concat(pn ? pn.records : [], cn.records, paRecs, an ? an.records : [], msRecs, cpRecs);
 
   // раскладка по блокам подряд: страна, затем города
   const blocks = pack(countryRecs, cb, corigin);
@@ -926,16 +1089,6 @@ function directory(model, opt) {
   stats.houseStreets = houseExpect.length;
   return { blocks, stats, poiEntry, cityPois, houseExpect };
 }
-
-// Названия страны по языкам интерфейса. Источник — таблица названий стран в
-// самой прошивке (рядом со строкой CYPRUS по 0x09439a6c): CYPRUS, CHIPRE,
-// KYPR, CYPERN, CHYPRE, ZYPERN, CIPRO, CYPR, KIBRIS. Сопоставление языку —
-// по смыслу, это догадка; язык без своего названия получает CYPRUS.
-const CY_NAMES = {
-  deu: 'ZYPERN', fra: 'CHYPRE', fca: 'CHYPRE', ita: 'CIPRO', spa: 'CHIPRE', por: 'CHIPRE',
-  bra: 'CHIPRE', dan: 'CYPERN', nor: 'CYPERN', swe: 'CYPERN', cze: 'KYPR', slo: 'CYPRUS',
-  pol: 'CYPR', tur: 'KIBRIS',
-};
 
 // Ближайший город: сетка с ячейкой ~5 км, поиск расширяющимися кольцами.
 function nearestFn(pl) {
@@ -1238,15 +1391,48 @@ function walk(get, opt) {
     }
   }
   if (sts && sts[0] >= 0) {
-    for (const se of namesUnder(get, sts)) {
-      const t = get(se.target[0]).map.get(se.target[1]);
-      if (!t || t.type !== 0x30 || t.name !== se.name) res.errors.push('улица страны ' + se.name + ': не на имя в городе');
+    const prev = new Set();
+    const onName = (se, p) => {
+      const t = p && get(p[0]).map.get(p[1]);
+      if (!t || t.type !== 0x30 || t.name !== se.name) { res.errors.push('улица страны ' + se.name + ': не на имя в городе'); return; }
+      const st = get(t.f['3c'][0]).map.get(t.f['3c'][1]);
+      if (!st || st.type !== 7) res.errors.push('улица страны ' + se.name + ': имя в городе не на 0x07');
       else res.allStreets = (res.allStreets || 0) + 1;
+    };
+    for (const se of namesUnder(get, sts)) {
+      if (prev.has(se.name)) res.errors.push('улица страны ' + se.name + ': имя повторяется');
+      prev.add(se.name);
+      const t = get(se.target[0]).map.get(se.target[1]);
+      if (!t || t.type !== 0x10) { onName(se, se.target); continue; }
+      // 0x10: вид 4 — следующая запись (города -> имя улицы в городе), вид 3 —
+      // 0x36 при бите 0 ведущего (индексы -> виток 0x31 индекса города)
+      res.multiStreets = (res.multiStreets || 0) + 1;
+      const g = get(se.target[0]);
+      const nx = g.els.find((x) => x.key === se.target[1] + 1 || (x.keys && x.keys[0] === se.target[1] + 1));
+      const cl = nx ? [se.target[0], se.target[1] + 1] : [se.target[0] + 1, 0];
+      const head = get(cl[0]).map.get(cl[1]);
+      if (head && head.type === 0x31) {          // 0x56 списка — имена городов (записи 0x03)
+        for (const p of [head.f['56']].concat(head.f['56*'] || [])) {
+          const c = get(p[0]).map.get(p[1]);
+          const city = c && c.type === 0x30 && get(c.f['3c'][0]).map.get(c.f['3c'][1]);
+          if (!city || city.type !== 3) res.errors.push('0x10 ' + se.name + ': город не на имя города');
+        }
+      }
+      for (const ce of namesUnder(get, cl)) onName(se, ce.target);
+      if (t.lead & 1) {
+        for (const pe of namesUnder(get, t.f['36'])) {
+          const n = get(pe.target[0]).map.get(pe.target[1]);
+          const w = n && n.type === 0x31 && get(pe.target[0]).els.find((x) => (x.keys ? x.keys[1] : x.key) === pe.target[1]);
+          const st = w && get(w.f['3c'][0]).map.get(w.f['3c'][1]);
+          if (!st || st.type !== 7) res.errors.push('0x10 ' + se.name + ': индекс не на виток улицы');
+          else res.multiPostcodes = (res.multiPostcodes || 0) + 1;
+        }
+      }
     }
   }
   return res;
 }
 
-module.exports = { layout, rotations, poiKeys, phoneKey, poiNames, select33, catTree, POI_GROUPS, inTree, pack, estimate, nearestFn, centre, postArea, list31, readAddresses, t18, pos4, countryRecord, spellStats, houseValues, statNames, STAT_IDS, modelFromRoads, walk, namesUnder, entriesFrom, encode, root, list, index, country, city, street, layer, verbatim,
+module.exports = { layout, rotations, poiKeys, phoneKey, poiNames, poi34, multiStreet, select33, catTree, POI_GROUPS, inTree, pack, estimate, nearestFn, centre, postArea, list31, readAddresses, t18, pos4, countryRecord, spellStats, houseValues, statNames, STAT_IDS, modelFromRoads, walk, namesUnder, entriesFrom, encode, root, list, index, country, city, street, layer, verbatim,
                    layout, assemble, transplant, names, directory, anchor, bboxOf, prefix,
-                   CY_NAMES, LIST_MAX, DIRECT_MAX };
+                   LIST_MAX, DIRECT_MAX, CITY_CATS_MAX };

@@ -19,7 +19,8 @@
 //   EJ211.ras        растр по рамке Кипра: ячейка -> тайл (`src/rasidx.js`)
 //   EJ211_CY0n_1.xac тайлы: дороги, `ZF-NAMEN`, `ZE-NAMEN`, `ZE-NAMEN-MMI`,
 //                    `HAUSNUMMERN`, `RASTERINFOS`
-//   EJ211_CY0n_2.xac заглушки уровня 2 — так же поступает завод у 347 тайлов
+//   EJ211_CY0n_2.xac уровень 2: блок дорог уровня 0…3 и LAYER 1 VERWEISE
+//                    (`src/xaclevel.js`); тайл без таких дорог — заглушка
 //   EJ211_0.ort      имена городов Кипра
 //   EJ211_0_3.b/.v, EJ211_0_4.b/.v, EJ211_4.b
 //                    файлы области L3 без блоков — без них не строится маршрут
@@ -38,8 +39,9 @@
 // форма пустого файла.
 //
 // ── Чего в контейнере нет ─────────────────────────────────────────────────
-// Блоков уровней 2…4: данных для них мы не собираем, в строках уровней стоит
-// «данных нет», а файлы области L3 несут только оглавление и пустые места.
+// Блоков уровней 3…4 (у завода так у 248 тайлов из 3777, раскладка 1/1/0/0):
+// в строках уровней стоит «данных нет», а файлы области L3 несут только
+// оглавление и пустые места.
 //
 // На устройстве такой контейнер не проверялся ни разу.
 
@@ -59,6 +61,7 @@ const dataset = require('./dataset');
 const raster = require('./raster');
 const osmpbf = require('./osmpbf');
 const split = require('./xacsplit');
+const xl = require('./xaclevel');
 const xg = require('./xacgraph');
 
 const CYPRUS = 113;                 // код страны в шапке блока и в записи `LD`
@@ -86,6 +89,31 @@ const EMPTY_ZF = Buffer.from(
   '000000020000005800000004000000020000005c00000012363da0280000000000000070' +
   '000000004453543d4e4f5f44000000000d000d0064dc013db4015f64d6e9fc013db4015f' +
   'e9fb0000', 'hex');
+
+// Служебные имена `ZF-NAMEN` уровня 1 — часовой пояс и правило летнего
+// времени. У греческих тайлов уровня 1 (129 из 129 читаемых) в шапке блока
+// «TZ=2.00» и «DST=[[(M3l11h3){M8}]*[(M10l11h4){-M8}]]» (переход в последнее
+// воскресенье марта в 3 ч и октября в 4 ч местного), а в разделе — все
+// четыре имени вида 13. Кипр живёт по тому же времени, что Греция.
+const TZ = 'TZ=2.00', DST = 'DST=[[(M3l11h3){M8}]*[(M10l11h4){-M8}]]';
+const TZ_DST = [DST, 'DST=NO_DST', TZ, 'TZ=NO_TZ'].map((text) => ({ text, kind: 13 }));
+// Вид имени улицы в `ZF-NAMEN`: у завода он зависит от языка — в греческих
+// тайлах улицы 0xca (27 555 из 35 459 имён), в немецких 0x16, в британских
+// 0x1c. Имена у нас латиница по-гречески и по-английски; берём греческий.
+const ZF_STREET = 0xca;
+
+// Таблица «частей имени» `ZE-NAMEN` (хвост раздела, `+0x58…+0x60`): пары
+// байт (язык, вид), старший байт слова на имя — номер пары
+// (`u_decode_nameblk_parts` FUN_08279190: при заданной таблице ниббли
+// заменяются парой `таблица[байт]`). По `GR0G` (17 272 имени, дерево
+// `ZE-NAMEN-MMI`): язык 0x46 — греческий (местные имена), 1…5 — экзонимы;
+// вид 0 — страна (корень), 1/2 — области, 8 — город с потомками, 9/0xa —
+// части города, 0xb — улица. Первой у завода стоит самая частая пара (улица).
+// Корень у нас — страна, города — 8, улицы — 0xb.
+const ZE_PARTS = {
+  table: Buffer.from([0x46, 0x0b, 0x46, 0x08, 0x46, 0x00]),
+  of: (m) => (m.parent === null ? 2 : m.flags === 0x3c ? 1 : 0),
+};
 
 // Парный файл уровня 2: шапка плюс пустой `ZF-NAMEN`. Ровно так выглядят все
 // 347 заводских заглушек — 308 байт.
@@ -138,21 +166,49 @@ function smartHeader(tileNo) {
   return b;
 }
 
-// Область из тайлов без блоков уровня: пара файлов .b/.v.
-function emptyAreaFiles(tiles) {
-  let at = 24 + tiles.length * 16;
+// Файлы области уровня (3 или 4): `.b` — по тайлу `SMART XAC HEADER`, блок,
+// ZF-NAMEN (у завода в таком порядке: `DE44` `_8_3.b` — VEKTORBLOCK 6080,
+// ZF-NAMEN 244); `.v` — `SMART XAC HEADER` и LAYER 1 VERWEISE. Тайл без блоков
+// уровня несёт в `.b` пустой ZF-NAMEN, в `.v` — голый заголовок с размером 0.
+function areaFiles(list, zf) {
+  let at = 24 + list.length * 16;
   const be = [], bp = [];
-  for (const t of tiles) {
+  for (const { tile: t, lv } of list) {
     at += 24;
-    be.push([t, at, 0, EMPTY_ZF.length]);
-    bp.push(smartHeader(t), EMPTY_ZF);
-    at += EMPTY_ZF.length;
+    const blk = lv ? lv.block : Buffer.alloc(0), z = lv ? zf : EMPTY_ZF;
+    be.push([t, at, blk.length, z.length]);
+    bp.push(smartHeader(t), blk, z);
+    at += blk.length + z.length;
   }
-  let av = 24 + tiles.length * 12;
+  let av = 24 + list.length * 12;
   const ve = [], vp = [];
-  for (const t of tiles) { av += 24; ve.push([t, av, 0]); vp.push(smartHeader(t)); }
+  for (const { tile: t, lv } of list) {
+    av += 24;
+    const v = lv ? lv.l1v.section : Buffer.alloc(0);
+    ve.push([t, av, v.length]); vp.push(smartHeader(t), v);
+    av += v.length;
+  }
   return { b: Buffer.concat([verySmart(be, 16)].concat(bp)),
            v: Buffer.concat([verySmart(ve, 12)].concat(vp)) };
+}
+function emptyAreaFiles(tiles) { return areaFiles(tiles.map((tile) => ({ tile })), null); }
+
+// Строка `XAC-STRUKTUR L3/L4` тайла с блоком. Смещения — как в воображаемом
+// файле «XAC HEADER, ZF-NAMEN, VEKTORBLOCK, LAYER 1 VERWEISE»: у завода
+// (`DE44` L3) область блоков с 196 + ZF (440), +0x24 = её конец (6520),
+// +0x28 — размер LAYER 1 VERWEISE (3236).
+function areaRow(lv, first, zf) {
+  const b = Buffer.alloc(st.LEVEL_REC), blk = lv.block;
+  [0x18, 0x1c, 0x20, 0x24].forEach((o, i) => b.writeInt32BE(blk.readInt32BE(o), i * 4));
+  b.writeUInt16BE(1, 0x10);
+  b.writeUInt16BE(first, 0x12);
+  b.writeUInt32BE(tile.HDR + zf.length, 0x14);
+  b.writeUInt32BE(blk.length, 0x18);
+  b.writeUInt32BE(tile.HDR, 0x1c);
+  b.writeUInt32BE(zf.length, 0x20);
+  b.writeUInt32BE(tile.HDR + zf.length + blk.length, 0x24);
+  b.writeUInt32BE(lv.l1v.section.length, 0x28);
+  return b;
 }
 
 function globalL4(tileCount) {
@@ -240,17 +296,25 @@ function strukturRecord(code, file1) {
   return b;
 }
 
-// Строка уровня. Уровень 1 — наш файл, уровни 2…4 объявляются пустыми.
+// Строка уровня. Уровень 1 — файл `_1`, уровень 2 — файл `_2` (с блоками,
+// если `has2`), уровни 3…4 объявляются пустыми.
 //
 // `firstBlock` — накопительный счёт по всей базе: тайл за тайлом, внутри тайла
-// уровни 1, 2, 3, 4 (`base` — первый блок тайла). Рамка уровня 1 — рамка шапки
-// тайла, объединение рамок блоков: так у завода (20 тайлов из 20).
-function levelRow(file1, level, stub, base) {
+// уровни 1, 2, 3, 4 (`base` — первый блок тайла). Рамка уровня — объединение
+// рамок блоков: так у завода (20 тайлов из 20).
+//
+// Строка уровня 2 с блоками — как у завода (`DE44`, `DE45`, `GR2J`): рамка,
+// блоков, первый блок, смещение и размер области блоков в `_2`, размеры
+// `XAC HEADER` и `ZF-NAMEN`, +0x24/+0x28 — смещение и размер
+// `LAYER 1 VERWEISE` («L1V» в журнале DBM «Layer 2: BLK, ZFN, L1V»).
+function levelRow(file1, level, stub, base, has2, first) {
   const b = Buffer.alloc(st.LEVEL_REC);
   const S = xac.sections(file1).list;
   const vb = S.filter((x) => x.name === 'VEKTORBLOCK');
   const hdr = S.find((x) => x.name === 'XAC HEADER');
   const zf = S.find((x) => x.name === 'ZF-NAMEN');
+  const S2 = stub ? xac.sections(stub).list : [];
+  const vb2 = S2.filter((x) => x.name === 'VEKTORBLOCK');
   if (level === 1) {
     tile.bboxOf(file1, vb).forEach((v, i) => b.writeInt32BE(v, i * 4));
     b.writeUInt16BE(vb.length, 0x10);
@@ -260,19 +324,43 @@ function levelRow(file1, level, stub, base) {
     b.writeUInt32BE(hdr ? hdr.total : 0, 0x1c);
     b.writeUInt32BE(zf ? zf.total : 0, 0x20);
     b.writeUInt32BE(0, 0x24);
+  } else if (level === 2 && has2) {
+    const shdr = S2.find((x) => x.name === 'XAC HEADER'), szf = S2.find((x) => x.name === 'ZF-NAMEN');
+    const l1v = S2.find((x) => x.name === 'LAYER 1 VERWEISE');
+    tile.bboxOf(stub, vb2).forEach((v, i) => b.writeInt32BE(v, i * 4));
+    b.writeUInt16BE(vb2.length, 0x10);
+    b.writeUInt16BE(base + vb.length, 0x12);
+    b.writeUInt32BE(vb2[0].offset, 0x14);
+    b.writeUInt32BE(vb2.reduce((a, x) => a + x.total, 0), 0x18);
+    b.writeUInt32BE(shdr.total, 0x1c);
+    b.writeUInt32BE(szf.total, 0x20);
+    b.writeUInt32BE(l1v ? l1v.offset : 0, 0x24);
+    b.writeUInt32BE(l1v ? l1v.total : 0, 0x28);
   } else {
     // Как у всех 160 заводских тайлов с заглушкой: рамка пустая (min > max),
     // а ZF-NAMEN — раздел самой заглушки, а не файла уровня 1.
     [NO_DATA, NO_DATA, 0x80000000, 0x80000000].forEach((v, i) => b.writeUInt32BE(v, i * 4));
     b.writeUInt16BE(0, 0x10);                       // блоков на уровне нет
-    b.writeUInt16BE(base + vb.length, 0x12);        // но счёт уже ушёл вперёд
-    const stubSecs = stub ? xac.sections(stub).list : [];
-    const shdr = stubSecs.find((x) => x.name === 'XAC HEADER');
-    const szf = stubSecs.find((x) => x.name === 'ZF-NAMEN');
+    b.writeUInt16BE(first !== undefined ? first : base + vb.length + vb2.length, 0x12);   // но счёт уже ушёл вперёд
+    const shdr = S2.find((x) => x.name === 'XAC HEADER');
+    const szf = S2.find((x) => x.name === 'ZF-NAMEN');
     b.writeUInt32BE(shdr ? shdr.total : 0, 0x1c);
-    b.writeUInt32BE(szf ? szf.total : 0, 0x20);
+    // у уровней 3…4 при живом уровне 2 завод держит здесь пустой ZF-NAMEN (112)
+    b.writeUInt32BE(level === 2 || !has2 ? (szf ? szf.total : 0) : EMPTY_ZF.length, 0x20);
   }
   return b;
+}
+
+// Файл уровня 2 с блоками: шапка, ZF-NAMEN (служебные имена), блок,
+// LAYER 1 VERWEISE. Шапка — как у `_1`, поля по разделам; `+0xa0` шапки
+// `_2` у завода — число элементов области B `LAYER 1 VERWEISE` (144 из 144),
+// у `_1` там 0.
+function level2File(code, name, index, built, lv, zf2) {
+  const file = tile.buildTile({ code, file: name, index, country: CYPRUS, built,
+                                zf: zf2.section, blocks: [lv.block], extra: [lv.l1v.section] });
+  tile.finishHeader(file, { group: 0, country: CYPRUS, l3: 0, record: Buffer.alloc(st.REC) });
+  file.writeUInt32BE(lv.l1v.count, 0xa0);
+  return file;
 }
 
 // Индекс целиком. Таблицы, не зависящие от покрытия, переносятся из
@@ -396,6 +484,9 @@ function mkxac(opt) {
   }
   log('дорог ' + graph.ways + ', узлов ' + graph.nodes.length + ', рёбер ' + graph.edges.length);
 
+  // уровни сети 2…4 каждого ребра (связки кусков — по всей сети)
+  const lvAdded = xl.netLevels(graph);
+  log('уровни сети: поднято связок рёбер — на 4: ' + lvAdded[4] + ', на 3: ' + lvAdded[3] + ', на 2: ' + lvAdded[2]);
   // ---- тайлы: зоны по сетке растра, разрез рёбер на границах ----
   const bb = [Infinity, Infinity, -Infinity, -Infinity];
   for (const n of graph.nodes) {
@@ -417,15 +508,20 @@ function mkxac(opt) {
   log('тайлов ' + N + ', узлов разреза ' + sp.tiles.reduce((a, t) => a + t.links.length, 0) / 2 +
       (hs ? ', домов без своей улицы в сети ' + hs.lost : ''));
 
-  // имена ведения тайла: свои, по возрастанию
+  // Имена ведения тайла: свои, по возрастанию, плюс четыре служебных имени
+  // часового пояса и летнего времени — как у завода в каждом `ZF-NAMEN`
+  // уровня 1 (вид 13). Номера «TZ=2.00» и правила DST уходят в шапку каждого
+  // блока (+0x44/+0x48, `xac_get_tz_dst`).
   const guide = sp.tiles.map((tl) => {
-    if (!tl.names.length) return { named: null, zf: null };
-    const order = tl.names.map((_, k) => k)
-      .sort((a, b) => (tl.names[a] < tl.names[b] ? -1 : tl.names[a] > tl.names[b] ? 1 : a - b));
+    const all = tl.names.map((text) => ({ text, kind: ZF_STREET })).concat(TZ_DST);
+    const order = all.map((_, k) => k)
+      .sort((a, b) => (all[a].text < all[b].text ? -1 : all[a].text > all[b].text ? 1 : a - b));
     const of = new Int32Array(tl.names.length).fill(-1);
-    order.forEach((g, k) => { of[g] = k; });
-    return { named: { of, attr: attrNamed },
-             zf: zfnamen.buildSection(order.map((g) => ({ text: tl.names[g], kind: 0 })), zfnamen.tokens(xahSrc)) };
+    const pos = new Map();
+    order.forEach((g, k) => { if (g < tl.names.length) of[g] = k; else pos.set(all[g].text, k); });
+    return { named: tl.names.length ? { of, attr: attrNamed } : null,
+             tz: pos.get(TZ), dst: pos.get(DST),
+             zf: zfnamen.buildSection(order.map((g) => all[g]), zfnamen.tokens(xahSrc)) };
   });
 
   // Два прохода: нульвектор узла разреза ссылается на номер записи двойника в
@@ -435,24 +531,94 @@ function mkxac(opt) {
   // раскладка во втором проходе та же — это проверяется.
   const blocksOf = (t, base, maxNodes, links) => roads.buildBlocks(sp.tiles[t], {
     attr, attrIdx, named: guide[t].named, bans: tBans && tBans[t], base, country: CYPRUS,
+    tz: guide[t].tz, dst: guide[t].dst, tile: t,
     maxNodes: maxNodes || o.maxNodes || 9000, links });
   const plan = sp.tiles.map((_, t) => blocksOf(t, 0));
-  const base = [];
-  plan.reduce((a, p, t) => { base[t] = a; return a + p.blocks.length; }, 0);
+
+  // Уровень 2 (`src/xaclevel.js`): сеть дорог уровня 0…3 из той же нарезки,
+  // цепочки уровня 1 — по байтам первого прохода (номера записей в нём те
+  // же, блоки — относительно первого блока уровня 1 тайла).
+  const eta = xl.etaTable(xahSrc), pick = xl.levelPicker(attr);
+  // ZF-NAMEN уровня 2: служебные имена, в шапке блока — «TZ=NO_TZ» и правило
+  // DST (так у греческих `_2.xac`, 237 из 237)
+  const zf2 = (() => {
+    const names = [DST, 'DST=NO_DST', 'TZ=NO_TZ'].sort().map((text) => ({ text, kind: 13 }));
+    return { section: zfnamen.buildSection(names, zfnamen.tokens(xahSrc)),
+             tz: names.findIndex((x) => x.text === 'TZ=NO_TZ'), dst: names.findIndex((x) => x.text === DST) };
+  })();
+  // Сеть уровня k — дороги уровня ≤ SEL[k]: так у завода по 18 тайлам
+  // (`covmulti.js`): уровень 2 берёт дороги уровня 0…3 (59/83/80/69 % рёбер),
+  // 3 — 0…2 (49/59/39 %), 4 — 0…1 (42/51 %); прочие уровни — единицы процентов.
+  // (уровни дорог — `xaclevel.netLevels`, до деления на тайлы: связки
+  // соединяют куски сети через всю сеть)
+  const lev = sp.tiles.map((tl, t) => {
+    const out = {};
+    if (o.levels === false) return out;
+    for (const k of [2, 3, 4]) {
+      const m = xl.model(tl, plan[t].blocks, { attr, eta, pick, sel: (e) => graph.edges[e.orig].net >= k });
+      if (!m.vecs.length) continue;
+      const lay = k === 2 ? xl.layout(m) : xl.layoutV3(m);
+      out[k] = { m, lay, at: new Map(m.nodes.map((n, i) => [n.src, i])) };
+    }
+    return out;
+  });
+  // Сквозная нумерация: тайл за тайлом, внутри тайла уровни 1, 2, 3, 4.
+  const base = [], bases = sp.tiles.map(() => ({}));
+  plan.reduce((acc, p, t) => {
+    base[t] = acc; bases[t][1] = acc; acc += p.blocks.length;
+    for (const k of [2, 3, 4]) { bases[t][k] = acc; if (lev[t][k]) acc++; }
+    return acc;
+  }, 0);
+  // Нульвектор узла разреза: пара k — двойник в соседнем тайле на уровне k
+  // (у завода так у узлов всех уровней, `l2c.js`, `l3keys.js`). Ссылка в блок
+  // с таблицей — номер записи ×2, в блок v3 — смещение узла.
+  const twinLevels = (l) => [1, 2, 3, 4].filter((k) => k === 1 || (lev[l.tile][k] && lev[l.tile][k].at.has(l.twin)));
+  const twinPairs = (l) => twinLevels(l).map((k) => {
+    if (k === 1) {
+      const P = plan[l.tile], q = P.blockOf[l.twin];
+      return { level: 1, block: base[l.tile] + q, ref: 2 * P.firsts[q].first[P.localOf[l.twin]] };
+    }
+    const L = lev[l.tile][k], j = L.at.get(l.twin);
+    return { level: k, block: bases[l.tile][k], ref: k === 2 ? 2 * L.lay.first[L.lay.pos[j]] : L.lay.at[L.lay.pos[j]] };
+  });
+  // смещения блоков v3 (нужны парам соседей до сборки байт)
+  sp.tiles.forEach((tl, t) => {
+    const twin = new Map(tl.links.map((l) => [l.node, l]));
+    for (const k of [3, 4]) {
+      const L = lev[t][k];
+      if (!L) continue;
+      xl.placeV3(L.m, L.lay, (i) => {
+        const l = twin.get(L.m.nodes[L.lay.list[i]].src);
+        if (!l) return 0;
+        const ls = twinLevels(l);
+        return ls[ls.length - 1] > 3 ? 18 : 14;
+      });
+    }
+  });
   const builtAll = sp.tiles.map((tl, t) => {
     const twin = new Map(tl.links.map((l) => [l.node, l]));
-    const b = blocksOf(t, base[t], plan[t].maxNodes, (n) => {
-      const l = twin.get(n);
-      if (!l) return undefined;
-      const P = plan[l.tile], k = P.blockOf[l.twin];
-      // в блок с таблицей ссылка — номер записи, умноженный на два (у завода
-      // чётная у 507 из 507), docs/formats/xac.md «Элемент 0x0000»
-      return [{ level: 1, block: base[l.tile] + k, ref: 2 * P.firsts[k].first[P.localOf[l.twin]] }];
-    });
+    const b = blocksOf(t, base[t], plan[t].maxNodes, (n) => (twin.has(n) ? twinPairs(twin.get(n)) : undefined));
     if (b.maxNodes !== plan[t].maxNodes || b.blocks.length !== plan[t].blocks.length)
       throw new Error('тайл ' + codes[t] + ': раскладка второго прохода разошлась с первым');
     return b;
   });
+  // Блоки уровней 2…4 и их LAYER 1 VERWEISE. В шапке блока — «TZ=NO_TZ» и
+  // правило DST (у завода так у `_2` и у уровней 3/4 `DE44`).
+  const levels = sp.tiles.map((tl, t) => {
+    const twin = new Map(tl.links.map((l) => [l.node, l]));
+    const out = {};
+    for (const k of [2, 3, 4]) {
+      const L = lev[t][k];
+      if (!L) continue;
+      const links = (j) => { const l = twin.get(L.m.nodes[j].src); return l ? twinPairs(l) : undefined; };
+      const spec = { id: bases[t][k], country: CYPRUS, tile: t, tz: zf2.tz, dst: zf2.dst, links };
+      const block = k === 2 ? xl.buildBlock(L.m, L.lay, spec)
+        : xl.buildV3(L.m, L.lay, Object.assign(spec, { mode: k === 3 ? 6 : 0 }));
+      out[k] = { block, l1v: xl.verweise(L.m, L.lay), m: L.m };
+    }
+    return out;
+  });
+  const level2 = levels.map((x) => x[2] || null);
 
   // ---- файлы тайлов ----
   const files = [], tiles = [], regs = [], rows = [];
@@ -466,23 +632,29 @@ function mkxac(opt) {
       zen = roads.zenModel(tl, built, { places: o.places, houses: hs && hs.out[t],
                                         countryName: o.countryName || 'CYPRUS',
                                         placeIn: (x, y) => sp.tileAt(x, y) === t });
+      // +0x16 у тайлового ZE-NAMEN — 0 (у завода 3512 из 3512; страна там только
+      // у `.ort`); таблица «частей имени» — пары (язык, вид), см. ZE_PARTS
       names.push(zenamen.buildSection({ names: zen.names, refs: zen.refs, blocks: zen.blocks,
-                                        version: 2, label: 'ZE-NAMEN', country: CYPRUS }));
+                                        version: 2, label: 'ZE-NAMEN', country: 0,
+                                        parts: ZE_PARTS.table, kinds: zen.mmi.map(ZE_PARTS.of) }));
       names.push(zenamen.mmiBuildSection(zen.mmi));
       if (zen.houses) names.push(require('./hausnr').buildSection({ rows: zen.hnr }));
     }
     const name1 = prefix + '_' + code + '_1';
     const file1 = tile.buildTile({
       code, file: name1, index: t, country: CYPRUS, built: built14,
-      zf: guide[t].zf || tile.section('ZF-NAMEN', Buffer.alloc(92)),
+      zf: guide[t].zf,
       blocks: built.blocks,
       extra: names.concat([rasterSection(grid, rects[t])]),
     });
-    const file2 = stubLevel2(code, prefix + '_' + code + '_2', t, built14);
+    const lv2 = level2[t];
+    const file2 = lv2 ? level2File(code, prefix + '_' + code + '_2', t, built14, lv2, zf2)
+                      : stubLevel2(code, prefix + '_' + code + '_2', t, built14);
     const reg = strukturRecord(code, file1);
     tile.finishHeader(file1, { group: 0, country: CYPRUS, l3: 0, record: reg });
     regs.push(reg);
-    rows.push([1, 2, 3, 4].map((n) => levelRow(file1, n, file2, base[t])));
+    rows.push([1, 2, 3, 4].map((n) => (n >= 3 && levels[t][n] ? areaRow(levels[t][n], bases[t][n], zf2.section)
+      : levelRow(file1, n, file2, base[t], !!lv2, n >= 3 ? bases[t][n] : undefined))));
     files.push({ name: name1 + '.xac', data: file1 }, { name: prefix + '_' + code + '_2.xac', data: file2 });
     const area = built.blocks.reduce((a, b) => a + b.length, 0);
     tiles.push({ code, nodes: tl.nodes.length, edges: tl.edges.length, blocks: built.blocks.length,
@@ -495,7 +667,10 @@ function mkxac(opt) {
                ', домов ' + zen.houses + ')' : ''));
   }
   if (bans) log('запретов записано в узлы: ' + turns + (turnLost ? ', не уложилось: ' + turnLost : ''));
-  const blocks = base[N - 1] + builtAll[N - 1].blocks.length;
+  const blocks = bases[N - 1][4] + (levels[N - 1][4] ? 1 : 0);
+  levels.forEach((ls, t) => [2, 3, 4].forEach((k) => { const l = ls[k]; if (l) log('уровень ' + k + ' ' + codes[t] + ': узлов ' +
+    l.m.nodes.length + ', векторов ' + l.m.vecs.length + ' (не легло ' + l.m.lost + '), блок ' + l.block.length +
+    ' б, LAYER 1 VERWEISE ' + l.l1v.section.length + ' б, элементов ' + l.l1v.count); }));
 
   // ---- индекс ----
   const xahBuf = buildXah(xahSrc, { regs, rows, blocks, neighbors: split.neighbors(rects) });
@@ -519,12 +694,14 @@ function mkxac(opt) {
   }
   // Область L3 номер 0 из всех тайлов (так объявлено в `L3 GRUPPEN`, `+0x50`
   // шапки и `+0xb4` шапки тайла).
-  const area = emptyAreaFiles(rects.map((_, t) => t));
   for (const L of [3, 4]) {
+    const area = areaFiles(rects.map((_, t) => ({ tile: t, lv: levels[t][L] })), zf2.section);
     files.push({ name: prefix + '_0_' + L + '.b', data: area.b });
     files.push({ name: prefix + '_0_' + L + '.v', data: area.v });
+    // общий `_4.b` — то же по всем тайлам базы (у завода данные тайла в нём и
+    // в `_N_4.b` побайтно одинаковы, `DE44`); у нас область одна — тот же файл
+    if (L === 4) files.push({ name: prefix + '_4.b', data: area.b });
   }
-  files.push({ name: prefix + '_4.b', data: globalL4(N) });
   files.sort((a, b) => (a.name < b.name ? -1 : 1));
 
   const container = buildContainer(files, headSrc);
@@ -579,7 +756,7 @@ function verifyEdges(r) {
 }
 
 module.exports = { mkxac, buildXah, buildContainer, strukturRecord, levelRow, verifyEdges,
-                   rasterSection, stubLevel2, readHouses, emptyAreaFiles, globalL4, urbanIndex,
+                   rasterSection, stubLevel2, readHouses, emptyAreaFiles, areaFiles, areaRow, globalL4, urbanIndex,
                    EMPTY_ZF, CYPRUS };
 
 if (require.main === module) {
@@ -619,8 +796,21 @@ if (require.main === module) {
     names += n.total; hit += n.hit; coords += n.coords;
   }
   console.log('ссылки «имя -> дорога»: ' + names + ', попали в запись ' + hit + ', концы совпали ' + coords);
+  // уровни 2…4: каждый вектор разворачивается в свои концы; маршруты по уровням
+  const xroute = require('./xacroute'), net = xroute.open(out), ca = xroute.checkAll(net);
+  let lvBad = 0;
+  for (const k of [2, 3, 4]) {
+    console.log('уровень ' + k + ': векторов ' + ca[k].vectors + ', развёртка в свои концы ' + ca[k].ends + ', рвётся ' + ca[k].broken);
+    if (ca[k].broken || ca[k].ends !== ca[k].vectors) lvBad++;
+  }
+  for (const [f, t, name] of xroute.PAIRS) {
+    const rt = xroute.route(net, xroute.P(...f), xroute.P(...t));
+    console.log('маршрут ' + name + ' по уровням: ' + (xroute.ok(rt) ? rt.final.km.toFixed(1) + ' км (уровень 1 целиком ' +
+      rt.l1.km.toFixed(1) + '), рёбер по уровням ' + JSON.stringify(rt.levels) : 'НЕТ'));
+    if (!xroute.ok(rt)) lvBad++;
+  }
   const bad = v.once !== v.edges || v.extra || v.read !== v.pieces || v.unused || v.badCut || v.lost ||
-              hit !== names || coords !== names;
+              hit !== names || coords !== names || lvBad;
   console.log(bad ? 'ЕСТЬ РАСХОЖДЕНИЯ' : 'расхождений нет');
   process.exit(bad ? 1 : 0);
 }

@@ -95,7 +95,30 @@ function countryCode(xahBuf, name) {
   return r ? r.code : null;
 }
 
-module.exports = { sections, vectorBlocks, countries, countryCode,
+// Названия страны по языкам — то, что прошивка показывает как текущую страну
+// (CWhereAmI / getCountryFromCarPosition -> FUN_08281d90(страна, язык)). По коду
+// xac_country.cpp: `COUNTRY` +0x2a — число строк, +0x2e — смещение таблицы строк
+// по 6 байт (u16 страна, u32 номер имени; FUN_08281664, FUN_0828163c,
+// FUN_082814ec, FUN_0828198c); имя — строка `BASIC NAME` (+0x1a — смещение
+// таблицы, по 6 байт: u16 язык, u32 смещение строки; FUN_0828260c, FUN_082826f0,
+// FUN_0828266c); строка — в `STRING` с +0x22, UTF-8 до нуля. Ответ — {язык: имя},
+// язык — номер записи `LANGUAGE` (1 — GER, 2 — ENG, …).
+function countryNames(xahBuf, code) {
+  const sec = (n) => sections(xahBuf).list.find((x) => x.name === n).offset;
+  const C = sec('COUNTRY'), N = sec('BASIC NAME'), S = sec('STRING') + 0x22;
+  const nt = N + xahBuf.readUInt32BE(N + 0x1a);
+  const ct = C + xahBuf.readUInt32BE(C + 0x2e), n = xahBuf.readUInt32BE(C + 0x2a);
+  const out = {};
+  for (let i = 0; i < n; i++) {
+    if (xahBuf.readUInt16BE(ct + 6 * i) !== code) continue;
+    const r = nt + 6 * xahBuf.readUInt32BE(ct + 6 * i + 2);
+    const s = S + xahBuf.readUInt32BE(r + 2);
+    out[xahBuf.readUInt16BE(r)] = xahBuf.toString('utf8', s, xahBuf.indexOf(0, s));
+  }
+  return out;
+}
+
+module.exports = { sections, vectorBlocks, countries, countryCode, countryNames,
                    toLon, toLat, fromLon, fromLat, SCALE_X, SCALE_Y };
 
 if (require.main === module) {

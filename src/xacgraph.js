@@ -25,6 +25,59 @@ const xv = require('./xacvec');
 const xw = require('./xacwrite');
 const nvec = require('./nullvec');
 
+// Списки узлов блока v5 подряд, как их проходит прошивка: от координаты (и
+// байт запретов поворотов за длинной формой) элемент за элементом, длина
+// элемента — по биту 15 слов (`FUN_08273360`: слово с меткой ≠ 00 тянет за
+// собой следующее, пока у предыдущего поднят бит 15); слово с меткой 00 —
+// конец списка (ноль — нульвектор, 14 или 18 байт по биту 15 слова +12).
+// Где кончается список, прошивка узнаёт по таблице (`FUN_082723a8`), мы —
+// по началу следующего узла или его заголовка под-блока.
+//
+// Нужен потому, что таблица адресует не всё: у завода номер есть у записей
+// векторов и у первого элемента узла, а встречные ссылки дальше по списку
+// номеров не имеют (1,2 млн из 1,2 млн). Рукав узла (запреты поворотов,
+// обход по VID) — позиция в этом списке, а не в таблице.
+//
+// Возвращает Map: смещение координаты узла -> [{ at, tag, len, entry }],
+// `tag` — старшие два бита первого слова, `entry` — номер в таблице или -1.
+function nodeLists(s) {
+  const tab = s.readUInt32BE(0x6c), cnt = s.readUInt16BE(0x70);
+  const box = [s.readInt32BE(0x18), s.readInt32BE(0x1c), s.readInt32BE(0x20), s.readInt32BE(0x24)];
+  const entryAt = new Map(), starts = new Set();
+  for (let i = 1; i < cnt; i++) {
+    const w = s.readUInt16BE(tab + i * 2) * 2;
+    if (w) entryAt.set(w, i);
+    const o = xv.nodeOffset(s, tab, cnt, i);
+    if (o) starts.add(o);
+  }
+  const stop = new Set(starts);
+  for (const o of starts) if (o >= xw.SUB && xw.looksSub(s, o - xw.SUB, box)) stop.add(o - xw.SUB);
+  const out = new Map();
+  for (const o of starts) {
+    const b0 = s[o], long = (s.readUInt16BE(o) & 0xc000) === 0x8000;
+    let p = o + (long ? (((b0 >> 5) & 1) ? 8 : 6) : 4);
+    if (long && (b0 & 0x0f)) {                         // байты запретов поворотов
+      let n = b0 & 0x0f;
+      if (n === 0x0f) { n = s.readUInt16BE(p); p += 2; }
+      p += n * 2;
+    }
+    const list = [];
+    while (p + 2 <= tab && !stop.has(p)) {
+      const w = s.readUInt16BE(p), tag = w >>> 14;
+      if (tag === 0) {
+        if (w === 0 && p + 14 <= tab) list.push({ at: p, tag, len: (s.readUInt16BE(p + 12) & 0x8000) ? 18 : 14, entry: -1 });
+        break;
+      }
+      let q = p, v;
+      do { v = s.readUInt16BE(q); q += 2; } while ((v & 0x8000) && q + 2 <= tab);
+      list.push({ at: p, tag, len: q - p, entry: entryAt.has(p) ? entryAt.get(p) : -1 });
+      p = q;
+    }
+    out.set(o, list);
+  }
+  return out;
+}
+
 // Блок v5 -> { nodes: [{x, y, vectors: [{to, idx}]}], ... }.
 // Узлы нумеруются в порядке появления в таблице, векторы — в порядке записей.
 //
@@ -33,6 +86,10 @@ const nvec = require('./nullvec');
 // `to` стоят `block` (сквозной номер блока-цели) и `ref` (номер записи в его
 // таблице). Порядок в `entries` тот же, что в таблице, поэтому пересборка
 // тайла может раздать номера заново и переписать ссылки.
+//
+// `arms` — элементы списка узла в порядке лежания (`nodeLists`): векторы
+// `{to}`/`{block, ref}` и встречные `{back}`/`{back, block}`, в том числе без
+// номера в таблице. Номер рукава в запретах поворотов — индекс в `arms`.
 //
 // Нульвекторы снимаются, только если передать таблицу ATTRIBUTE (`opt.attr`):
 // найти элемент можно лишь обходом записей узла, а длина записи зависит от
@@ -50,7 +107,7 @@ function graphOf(s, opt) {
       const c = xv.koord(s, off, ox, oy);
       if (!c) continue;
       ni = nodes.length;
-      nodes.push({ x: c.x, y: c.y, vectors: [], entries: [], links: [], off });
+      nodes.push({ x: c.x, y: c.y, vectors: [], entries: [], arms: [], links: [], off });
       byOff.set(off, ni);
     }
     entryNode[i] = ni;
@@ -95,6 +152,22 @@ function graphOf(s, opt) {
     local++;
   }
 
+  // рукава — по спискам узлов подряд
+  const base0 = s.readUInt16BE(0x36), lists = nodeLists(s);
+  for (const [off, list] of lists) {
+    const ni = byOff.get(off);
+    if (ni === undefined) continue;
+    for (const el of list) {
+      const w = s.readUInt16BE(el.at);
+      if (el.tag === 1) nodes[ni].arms.push({ back: w & 0x3fff });
+      else if (el.tag === 2) nodes[ni].arms.push({ back: w & 0x3fff, block: base0 + (s.readUInt16BE(el.at + 2) & 0x7fff) });
+      else if (el.tag === 3) {
+        if ((s[el.at + 2] >> 6) & 1) nodes[ni].arms.push({ ref: w & 0x3fff, block: base0 + (s.readUInt16BE(el.at + 4) & 0x7fff) });
+        else nodes[ni].arms.push({ to: entryNode[w & 0x3fff] });
+      }
+    }
+  }
+
   // Куда переедет запись с прежним номером: в нашем блоке сначала идут
   // векторы узла, потом его встречные ссылки. Номер понадобится, чтобы
   // переписать встречные ссылки на новую нумерацию.
@@ -107,22 +180,16 @@ function graphOf(s, opt) {
     brs.forEach((e, k) => { if (e.old !== undefined) byOld.set(e.old, { node: i, at: vecs.length + k }); });
   }
 
-  // Нульвекторы: элемент лежит сразу за записями узла, и опознаёт его разбор
-  // блока (`xacwrite.readBlock`). Узел находим по смещению координаты.
+  // Нульвекторы: элемент в конце списка узла (`nodeLists`). Снимаются по
+  // `opt.attr`, как и прежде (тогда они нужны пересборке).
   let links = 0;
   if (opt && opt.attr) {
-    const m = xw.readBlock(s, opt.attr);
-    if (m) {
-      let at = -1;
-      for (const it of m.items) {
-        if (it.kind === 'coord') { at = it.at; continue; }
-        if (it.kind !== 'null') continue;
-        const ni = byOff.get(at);
-        if (ni === undefined) continue;
-        const p = nvec.pairs(s, it.at, nvec.wideMask(s));
-        for (const q of p.list) if (q) nodes[ni].links.push(q);
-        links += p.list.filter(Boolean).length;
-      }
+    for (const [off, list] of lists) {
+      const ni = byOff.get(off), el = list[list.length - 1];
+      if (ni === undefined || !el || el.tag !== 0) continue;
+      const p = nvec.pairs(s, el.at, nvec.wideMask(s));
+      for (const q of p.list) if (q) nodes[ni].links.push(q);
+      links += p.list.filter(Boolean).length;
     }
   }
   return { nodes, cnt, ox, oy, cross, local, dangling, links, backs, entryNode, base,
@@ -152,6 +219,7 @@ function regenBlock(s, padTo) {
   if (!g.nodes.length) return null;
   const blk = xw.buildBlock({
     nodes: g.nodes,
+    allBacks: true,                                 // встречные из таблицы — все с номером
     origin: [g.ox, g.oy],
     id: s.readUInt16BE(0x34),
     tileBase: s.readUInt16BE(0x36),
@@ -321,7 +389,7 @@ function regenTile(buf, opt) {
           nodes[i].vectors.push({ block: e.block, ref: first.get(tk)[tn], idx: e.idx });
         }
       }
-      const blk = xw.buildBlock({ nodes, origin: [g.ox, g.oy], id: g.id, tileBase: g.base,
+      const blk = xw.buildBlock({ nodes, allBacks: true, origin: [g.ox, g.oy], id: g.id, tileBase: g.base,
         country: raws[k].readUInt16BE(0x3a), flags: raws[k].readUInt16BE(0x3c) });
       if (blk.length > list[k].total) { keep.add(k); over = true; stat.tooBig++; continue; }
       built.set(k, blk);
@@ -389,7 +457,7 @@ function nodeTurns(s, off) {
   return out;
 }
 
-module.exports = { graphOf, regenBlock, regenTile, tileEdges, entryCoords, firstEntries, nodeTurns, routeVectors };
+module.exports = { graphOf, nodeLists, regenBlock, regenTile, tileEdges, entryCoords, firstEntries, nodeTurns, routeVectors };
 
 // Таблица ATTRIBUTE из общего индекса набора — нужна для нульвекторов.
 function attrOfSet() {

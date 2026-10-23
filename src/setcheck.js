@@ -230,6 +230,17 @@ function checkTiles(root) {
     for (const q of n.links) {
       r.links++;
       const w = whose(q.block);
+      // пара k — двойник в соседнем тайле на уровне k (так у завода у узлов
+      // обоих уровней, docs/formats/xac.md «Уровни 2…4»)
+      if (q.level >= 2 && w && w.level === q.level) {
+        r.links2 = (r.links2 || 0) + 1;
+        const u = order.indexOf(w.code);
+        if (nb[t].indexOf(u) < 0) r.nbBad++;
+        const b2 = levelBlock(c, w.code, u, q.level, w.local);
+        const got = b2 && nv.resolve(b2, q.ref);
+        if (!got || got.c.x !== n.x || got.c.y !== n.y) r.coordBad++;
+        continue;
+      }
       if (!w || w.level !== 1 || q.level !== 1) { r.levelBad++; continue; }
       const u = order.indexOf(w.code);
       if (nb[t].indexOf(u) < 0) r.nbBad++;
@@ -246,20 +257,36 @@ function checkTiles(root) {
   return r;
 }
 
-// Нульвекторы узлов. Ищутся так, как их находит обходчик прошивки: за
-// последней записью узла (номера записей — по таблице блока). Разбор блока
-// подряд (`xacwrite.readBlock`) для этого не годится: слово 0x8xxx
-// (встречная ссылка в другой блок) он не знает и дальше списка не идёт.
+// Блок уровня 2…4 тайла: уровень 2 — файл `_2.xac`, 3/4 — файлы области
+// `_<i>_3.b`, `_<i>_4.b` (оглавление `VERYSMART XAC HD`, запись по тайлу).
+function levelBlock(c, code, tileNo, level, local) {
+  const blocks = (buf) => xac.vectorBlocks(buf).map((v) => buf.subarray(v.offset, v.offset + v.size));
+  if (level === 2) {
+    const e = c.ents.find((x) => x.name.indexOf('_' + code + '_2.xac') > 0);
+    return e ? blocks(fldb.read(c.db, e))[local] : null;
+  }
+  for (const e of c.ents.filter((x) => new RegExp('_\\d+_' + level + '\\.b$').test(x.name))) {
+    const b = fldb.read(c.db, e), n = b.readUInt16BE(22);
+    for (let k = 0; k < n; k++) {
+      const o = 24 + k * 16;
+      if (b.readUInt16BE(o) !== tileNo) continue;
+      const off = b.readUInt32BE(o + 4), sz = b.readUInt32BE(o + 8);
+      return sz ? blocks(b.subarray(off, off + sz))[local] : null;
+    }
+  }
+  return null;
+}
+
+// Нульвекторы узлов. Ищутся так, как их находит обходчик прошивки: в конце
+// списка узла (`xacgraph.nodeLists`, длина элемента по биту 15). Номер в
+// таблице есть не у каждого элемента (встречные не первыми — без номера, как у
+// завода), поэтому «за последней записью по таблице» искать нельзя; разбор
+// блока подряд (`xacwrite.readBlock`) не годится тоже: слово 0x8xxx он не знает.
 function withLinks(b, g, attr, nv) {
-  const tab = b.readUInt32BE(0x6c), last = new Int32Array(g.nodes.length).fill(-1);
-  g.entryNode.forEach((ni, i) => { if (ni >= 0) last[ni] = i; });
-  g.nodes.forEach((n, ni) => {
-    n.links = [];
-    if (last[ni] < 0) return;
-    const p = b.readUInt16BE(tab + last[ni] * 2) * 2, k = b.readUInt16BE(p) >>> 14;
-    // слово 0x0xxx — узел без записей: таблица указывает прямо за координату
-    const end = k === 1 ? p + 2 : k === 2 ? p + 4 : k === 3 ? require('./xacrec').record(b, p, attr, () => {}).end : p;
-    if (end + 14 <= tab && b.readUInt16BE(end) === 0) n.links = nv.pairs(b, end, nv.wideMask(b)).list.filter(Boolean);
+  const lists = require('./xacgraph').nodeLists(b);
+  g.nodes.forEach((n) => {
+    const list = lists.get(n.off) || [], el = list[list.length - 1];
+    n.links = el && el.tag === 0 ? nv.pairs(b, el.at, nv.wideMask(b)).list.filter(Boolean) : [];
   });
   return g;
 }
@@ -484,7 +511,7 @@ if (require.main === module) {
     console.log('тайлов ' + l.tiles + ': шапки и блоки против реестра — расхождений ' + l.head +
       '; RASTERINFOS против .ras — ячеек ' + l.cells + ', расхождений ' + l.cellBad +
       ', ячеек .ras вне сетки своего тайла ' + l.orphan);
-    console.log('нульвекторов ' + l.links + ': не уровень 1 ' + l.levelBad + ', не в соседа ' + l.nbBad +
+    console.log('нульвекторов ' + l.links + ' (из них пар уровней 2…4 ' + (l.links2 || 0) + '): уровень пары и блока разошлись ' + l.levelBad + ', не в соседа ' + l.nbBad +
       ', координата не сошлась ' + l.coordBad + ', нет обратной связи ' + l.backBad +
       ', не по одной записи у копий ' + l.degBad);
   }

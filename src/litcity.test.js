@@ -66,3 +66,20 @@ test('завод EU: дома мальтийских улиц и Ватикан�
   assert.deepEqual([1, 8, 9, 18, 20].map((n) => LC.houseOk(h, n)), [true, true, false, true, false]);
   o.L.vols.forEach((v) => fs.closeSync(v.fd));
 });
+
+// Точки одного имени — путь goToPoiGeoIndex (FUN_08cdae88): у Мальты все 402
+// имени с несколькими точками — 0x33 [16 -> 0x34], прочитано ровно 0x65 у
+// каждого, и пара 0x22 витка — та же точка, что у записи 0x24; дерево
+// 129958:2054 (836 точек) и цепочка 125835:1738 (0x80 + 0x40, 172) — целиком.
+test('завод EU: Мальта — имена с несколькими точками через 0x34', { skip: !has(EU) }, () => {
+  const o = require('./litkeys').open(EU);
+  const r = LC.poiSearch(o.get, [245455, 0], 18, 0);
+  assert.deepEqual(r.bad, []);
+  assert.equal(r.multiNames, 402);
+  assert.equal(r.names, 9424);
+  for (const [p, n] of [[[129958, 2054], 836], [[125835, 1738], 172]]) {
+    const g = LC.geo34(o.get, p);
+    assert.equal(g.total, n);
+    assert.equal(new Set(g.pts.map((x) => x.pos.join(':'))).size, n);
+  }
+});

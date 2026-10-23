@@ -13,7 +13,9 @@ const xv = require('./xacvec');
 const xr = require('./xacrec');
 
 const HDR = 0x74;          // размер шапки, он же лежит в поле 0x40
-const SUB = 0x16;          // заголовок под-блока сразу за шапкой
+const SUB = 0x16;          // заголовок под-блока, первый — сразу за шапкой
+const SUB_NODES = 150;     // узлов в под-блоке не больше (поле — байт; у завода до 150)
+const SUB_BYTES = 3700;    // новый под-блок, когда текущий длиннее (у завода max 3718, медиана 470)
 const K = (40000000 / 360) / 72000;   // единиц X на метр по экватору
 
 // Поле 0x16 — множитель перевода дельт X в метры: cos(широты середины рамки)
@@ -87,12 +89,19 @@ function formAt(s, p) {
 // Заголовок под-блока: 22 байта, метка 0xc0 — та же, что у записи вектора.
 // Прошивка их не путает, потому что никогда не идёт по области подряд: она
 // прыгает по таблице, и FUN_08272410 перескакивает 0x16 байт, когда отход
-// назад попал на метку 0xc0. Нам подряд идти надо, и различает их раскладка:
+// назад попал на метку 0xc0. Нам подряд идти надо, и различает их раскладка
+// (поля — по FUN_08270da0 и обходчику векторов в квадрате FUN_0827134c):
 //
-//   +0x00 u16  0xc000 | значение
-//   +0x02 u16  значение (старший полубайт всегда ноль)
-//   +0x04 i32  xmin, +0x08 i32 ymin, +0x0c i32 xmax, +0x10 i32 ymax — своя рамка
-//   +0x14 u16  счётчик, растущий вдоль области
+//   +0x00 u16  0xc000 | n — n узлов под-блока (не больше 255)
+//   +0x02 u16  расстояние в байтах до следующего заголовка, 0 — последний
+//   +0x04 i32  xmin, +0x08 i32 ymin, +0x0c i32 xmax, +0x10 i32 ymax — рамка
+//              его векторов (оба конца)
+//   +0x14 u16  2 × номер в таблице первой записи под-блока
+//
+// Поиск векторов у координаты (цель маршрута, sort_add_vectors_at_coord)
+// идёт только этой цепочкой: рамка не задевает квадрат — под-блок
+// пропускается, иначе записи с номера +0x14/2 перебираются, пока не пройдёт
+// n узлов (шаг таблицы ≠ 0) или не встретится шаг 0xff.
 //
 // Признак «две пары i32 внутри рамки блока, xmin<=xmax, ymin<=ymax» сошёлся на
 // 12 722 из 12 722 заголовков, найденных отходом по таблице, и не сработал ни
@@ -116,7 +125,21 @@ function encodeLength(v) {
   return null;
 }
 
-// Заголовок записи вектора. Бит 15 слова 1 прошивка не читает — переносим.
+// Слово длины (метры) или времени: мантисса 12 бит, сдвиг — удвоенное поле
+// битов 12…14 (`xacrec`: `(w & 0x0fff) << ((w & 0x7000) >> 11)`). Значение
+// округляется к ближайшему представимому; бит 15 — забота вызывающего.
+function lengthWord(v) {
+  v = Math.max(0, Math.round(v));
+  for (let n = 0; n <= 7; n++) {
+    const m = Math.round(v / (1 << (2 * n)));
+    if (m <= 0xfff) return (n << 12) | m;
+  }
+  return 0x7fff;
+}
+
+// Заголовок записи вектора. Бит 15 слова 1 разборщик записи не читает, но обход
+// списка узла (FUN_08273360) по нему считает длину элемента: бит 15 стоит у
+// каждого слова записи, кроме последнего (у завода сплошь: «10», «110», «1110»…).
 function encodeHeader(node, idx, hi, keep15) {
   return [
     (0xc000 | (node & 0x3fff)) & 0xffff,
@@ -305,12 +328,13 @@ function nameAttributes(attr) {
   return out;
 }
 
-// Хвост записи: имена ведения по два байта, бит 6 первого — «есть следующий».
+// Хвост записи: имена ведения по два байта, бит 6 первого — «есть следующий»,
+// бит 15 — «запись продолжается» (у всех, кроме последнего слова записи).
 function encodeNames(list) {
   const out = Buffer.alloc(list.length * 2);
   list.forEach((v, i) => {
     if (!(v >= 0 && v < 0x3fff)) throw new Error('номер имени ведения вне 14 бит: ' + v);
-    out.writeUInt16BE((i < list.length - 1 ? 0x4000 : 0) | v, i * 2);
+    out.writeUInt16BE((i < list.length - 1 ? 0xc000 : 0) | v, i * 2);
   });
   return out;
 }
@@ -426,33 +450,66 @@ function buildBlock(spec) {
   const ox = spec.origin ? spec.origin[0] : xmax + 1;
   const oy = spec.origin ? spec.origin[1] : Math.floor((ymin + ymax) / 2);
 
-  // Номера в таблице раздаются подряд, начиная с единицы: у узла с k векторами
-  // занято k номеров, у узла без векторов — один.
+  // Номера в таблице раздаются подряд, начиная с единицы. Как у завода (каждый
+  // 80-й тайл, 1,64 млн узлов): номер есть у каждой записи вектора и у ПЕРВОГО
+  // элемента списка узла, а встречные ссылки (0x4xxx, 0x8xxx) не первыми в
+  // списке номера не получают — ни одной из 1,7 млн. Векторы у нас идут
+  // первыми, поэтому номеров у узла max(1, векторов). `allBacks` — прежняя
+  // раскладка «номер у каждой записи» (пересборка заводских блоков в xacgraph,
+  // где встречные берутся только те, что в таблице).
+  const indexed = (n) => (n.vectors || []).length +
+    (spec.allBacks ? (n.backs || []).length : ((n.vectors || []).length ? 0 : Math.min(1, (n.backs || []).length)));
   const first = new Array(nodes.length);
   let id = 1;
   for (let i = 0; i < nodes.length; i++) {
     first[i] = id;
-    id += Math.max(1, (nodes[i].vectors || []).length + (nodes[i].backs || []).length);
+    id += Math.max(1, indexed(nodes[i]));
   }
   const cnt = id;
   if (cnt > 0x3fff) throw new Error('записей больше 16383 — номер не влезает в слово');
 
   const body = [];
   let p = HDR;
-  const sub = Buffer.alloc(SUB);                   // заголовок под-блока
-  sub.writeUInt16BE(0xc000, 0);
-  sub.writeInt32BE(xmin, 4); sub.writeInt32BE(ymin, 8);
-  sub.writeInt32BE(xmax, 12); sub.writeInt32BE(ymax, 16);
-  sub.writeUInt16BE(1, 20);
-  body.push(sub); p += SUB;
+  // Под-блоки: у завода в среднем 39 узлов и 470 байт, не больше 149 узлов
+  // (38 286 заголовков, 20 тайлов). Рамка — по обоим концам векторов; конец
+  // в чужом блоке берётся из v.x/v.y (без них — только узел записи).
+  const subs = [];
+  const closeSub = () => {
+    const s = subs[subs.length - 1];
+    if (!s) return;
+    s.buf.writeUInt16BE(0xc000 | s.n, 0);
+    for (let k = 0; k < 4; k++) s.buf.writeInt32BE(s.box[k], 4 + k * 4);
+  };
+  const grow = (s, x, y) => {
+    if (x < s.box[0]) s.box[0] = x;
+    if (y < s.box[1]) s.box[1] = y;
+    if (x > s.box[2]) s.box[2] = x;
+    if (y > s.box[3]) s.box[3] = y;
+  };
 
+  // номер 0 не используется (FUN_08272410 отвечает на него нулём): слово 0, шаг
+  // 0xff — как у завода (слово 0 у 1181 блока из 1181)
   const word = new Array(cnt).fill(0), step = new Array(cnt).fill(255);
-  word[0] = (HDR + SUB) / 2;                       // номер 0 не используется: FUN_08272410
-                                                   // отвечает на него нулём, а слово по
-                                                   // этому смещению — координата, не вектор
   let vectors = 0, junctions = 0;
   for (let i = 0; i < nodes.length; i++) {
     const n = nodes[i], vs = n.vectors || [];
+    let cur = subs[subs.length - 1], lead = 0;
+    // новый под-блок — на границе куска kd-деления (n.sub), иначе по потолкам
+    if (!cur || n.sub !== cur.sub || cur.n >= SUB_NODES || p - cur.at >= SUB_BYTES) {
+      closeSub();
+      if (cur) cur.buf.writeUInt16BE(p - cur.at, 2);
+      cur = { at: p, n: 0, sub: n.sub, buf: Buffer.alloc(SUB), box: [Infinity, Infinity, -Infinity, -Infinity] };
+      cur.buf.writeUInt16BE(first[i] * 2, 20);
+      subs.push(cur);
+      body.push(cur.buf); p += SUB;
+      lead = SUB;                                  // шаг первого узла ведёт на заголовок, как у завода
+    }
+    cur.n++;
+    grow(cur, n.x, n.y);
+    for (const v of vs) {
+      if (v.block === undefined) { if (nodes[v.to]) grow(cur, nodes[v.to].x, nodes[v.to].y); }
+      else if (v.x !== undefined) grow(cur, v.x, v.y);
+    }
     const tb = encodeTurns(n.turns, vs.length + (n.backs || []).length, i);
     // запреты поворотов живут только в длинной форме координаты (метка 0x8000)
     const form = tb ? Math.max(6, coordForm(n, ox, oy, true)) : coordForm(n, ox, oy, true);
@@ -462,7 +519,7 @@ function buildBlock(spec) {
     const nodeAt = p;
     p += form;
     if (tb) { body.push(tb); p += tb.length; }
-    const head = form + (tb ? tb.length : 0);   // шаг от первой записи назад к узлу
+    const head = lead + form + (tb ? tb.length : 0);   // шаг от первой записи назад к узлу
     junctions++;
     const backs = n.backs || [];
     if (!vs.length && !backs.length) {                              // узел без векторов всё равно адресуем
@@ -475,9 +532,12 @@ function buildBlock(spec) {
         if (v.block === undefined) {
           const to = first[v.to];
           if (to === undefined) throw new Error('вектор узла ' + i + ' ведёт в никуда');
-          b = Buffer.alloc(4);
-          const [w0, w1] = encodeHeader(to, v.idx, 0, 0);
+          // слова длины и времени (`v.len`, блоки с флагом 0x38 = 4) — за заголовком
+          const lw = v.len ? [lengthWord(v.len[0]), lengthWord(v.len[1])] : null;
+          b = Buffer.alloc(lw ? 8 : 4);
+          const [w0, w1] = encodeHeader(to, v.idx, 0, (v.names && v.names.length) || lw ? 0x8000 : 0);
           b.writeUInt16BE(w0, 0); b.writeUInt16BE(w1, 2);
+          if (lw) { b.writeUInt16BE(0x8000 | lw[0], 4); b.writeUInt16BE(lw[1], 6); }
         } else {
           const off = v.block - (spec.tileBase || 0);
           if (off < 0 || off > 0x7fff)
@@ -486,8 +546,9 @@ function buildBlock(spec) {
           if (!(v.ref > 0 && v.ref <= 0x3fff))
             throw new Error('межблочный вектор узла ' + i + ': запись ' + v.ref);
           b = Buffer.alloc(6);
-          const [w0, w1] = encodeHeader(v.ref, v.idx, 0x40, 0);   // бит 6 старшего байта
-          b.writeUInt16BE(w0, 0); b.writeUInt16BE(w1, 2); b.writeUInt16BE(off, 4);
+          const [w0, w1] = encodeHeader(v.ref, v.idx, 0x40, 0x8000);   // бит 6 старшего байта
+          b.writeUInt16BE(w0, 0); b.writeUInt16BE(w1, 2);
+          b.writeUInt16BE((v.names && v.names.length ? 0x8000 : 0) | off, 4);
         }
         body.push(b);
         word[first[i] + k] = p / 2;
@@ -523,9 +584,11 @@ function buildBlock(spec) {
         b.writeUInt16BE(off, 2);
       }
       body.push(b);
-      const slot = first[i] + vs.length + k;
-      word[slot] = p / 2;
-      step[slot] = (vs.length === 0 && k === 0) ? head / 2 : 0;
+      if (spec.allBacks || (vs.length === 0 && k === 0)) {
+        const slot = first[i] + vs.length + k;
+        word[slot] = p / 2;
+        step[slot] = (vs.length === 0 && k === 0) ? head / 2 : 0;
+      }
       p += b.length;
     }
     if (n.links && n.links.length) {               // нульвектор идёт сразу за записями
@@ -534,28 +597,46 @@ function buildBlock(spec) {
       p += nul.length;
     }
   }
+  closeSub();
+  // рамка блока — объединение рамок под-блоков (у завода 208 блоков из 208)
+  const bx = [xmin, ymin, xmax, ymax];
+  for (const s of subs) { bx[0] = Math.min(bx[0], s.box[0]); bx[1] = Math.min(bx[1], s.box[1]);
+                          bx[2] = Math.max(bx[2], s.box[2]); bx[3] = Math.max(bx[3], s.box[3]); }
   while (p % 4) { body.push(Buffer.alloc(1)); p++; }   // таблица выровнена на 4
 
   const tab = p;
-  const table = Buffer.alloc(cnt * 2 + 2 + cnt);
+  // замыкающая запись номер cnt: слово — конец области (tab/2), шаг 0xff; по ней
+  // FUN_082723a8 находит конец списка последнего узла (у завода 607 блоков из 607)
+  const table = Buffer.alloc(cnt * 2 + 2 + cnt + 1);
   for (let i = 0; i < cnt; i++) table.writeUInt16BE(word[i], i * 2);
+  table.writeUInt16BE(tab / 2, cnt * 2);
   for (let i = 0; i < cnt; i++) table[cnt * 2 + 2 + i] = step[i];
+  table[cnt * 3 + 2] = 0xff;
 
   const head = Buffer.alloc(HDR);
   head.write('VEKTORBLOCK     ', 0, 16, 'latin1');
   head.writeUInt16BE(5, 0x14);
-  head.writeUInt16BE(scaleAt(ymin, ymax), 0x16);   // cos(широты) в формате 1.15
-  head.writeInt32BE(xmin, 0x18); head.writeInt32BE(ymin, 0x1c);
-  head.writeInt32BE(xmax, 0x20); head.writeInt32BE(ymax, 0x24);
+  head.writeUInt16BE(scaleAt(bx[1], bx[3]), 0x16);   // cos(широты) в формате 1.15
+  head.writeInt32BE(bx[0], 0x18); head.writeInt32BE(bx[1], 0x1c);
+  head.writeInt32BE(bx[2], 0x20); head.writeInt32BE(bx[3], 0x24);
   head.writeInt32BE(ox, 0x28); head.writeInt32BE(oy, 0x2c);
   head.writeUInt16BE(vectors, 0x30);               // записей таблицы с меткой 0xc000
   head.writeUInt16BE(junctions, 0x32);             // разных узлов, адресуемых таблицей
   head.writeUInt16BE(spec.id || 0, 0x34);
   head.writeUInt16BE(spec.tileBase || 0, 0x36);
-  head.writeUInt16BE(2, 0x38);                     // (байт 0x39 >> 1) & 3 == 1: длин в записи нет
+  // (байт 0x39 >> 1) & 3: 1 — длин в записи нет (уровень 1, у завода 2), 2 — в
+  // записи слово длины и слово времени (уровни 2…4, у завода 4)
+  head.writeUInt16BE(spec.mode || 2, 0x38);
   head.writeUInt16BE(spec.country || 0, 0x3a);
+  head.writeUInt16BE(spec.tile || 0, 0x3e);         // номер тайла в реестре XAC-STRUKTUR
   head.writeUInt16BE(spec.flags === undefined ? 0x95 : spec.flags, 0x3c);
   head.writeUInt16BE(HDR, 0x40);                   // размер шапки, он же 0x74
+  // Номера имён `TZ=…` и `DST=…` в ZF-NAMEN тайла: их читает `xac_get_tz_dst`
+  // (`FUN_082754d0`: `(*FUN_08275680)(блок + 0x44)` и `+ 0x48`). У завода оба —
+  // имена вида 13 (5583 блока из 5583), у греческих тайлов уровня 1 «TZ=2.00» и
+  // «DST=[[(M3l11h3){M8}]*[(M10l11h4){-M8}]]».
+  head.writeUInt32BE(spec.tz || 0, 0x44);
+  head.writeUInt32BE(spec.dst || 0, 0x48);
   head.writeUInt32BE(2, 0x68);
   head.writeUInt32BE(tab, 0x6c);
   head.writeUInt16BE(cnt, 0x70);
@@ -569,7 +650,7 @@ function buildBlock(spec) {
 module.exports = { readBlock, writeBlock, buildBlock, simpleAttributes,
                    nameAttributes, encodeNames, encodeCoord,
                    coordForm, looksSub, encodeLength, encodeHeader, encodeNull, scaleAt,
-                   recordParts, encodeTurns, HDR, SUB };
+                   recordParts, encodeTurns, lengthWord, HDR, SUB };
 
 if (require.main === module) {
   const fldb = require('./fldb');

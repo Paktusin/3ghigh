@@ -103,7 +103,7 @@ function pairByFrc(attr, family) {
     for (const i of c0) {
       for (const j of c1) {
         const vi = attr[i] >>> 0, vj = attr[j] >>> 0;
-        const sc = (CAT(vi) !== CAT(vj) ? 100 : 0) + bits(vi ^ vj ^ 0x08);
+        const sc = (CAT(vi) !== CAT(vj) ? 100 : 0) + (CAT(vi) !== L1_CAT ? 50 : 0) + bits(vi ^ vj ^ 0x08);
         if (!best || sc < best.sc) best = { i, j, sc };
       }
     }
@@ -146,22 +146,38 @@ function speedClass(kmh) {
 // ним «Motorway». Чужую категорию 0/5 берём только в крайнем случае.
 const catCost = (c, want) => (c === want ? 0 : (c === 0 || c === 5) ? 5000 : 100);
 
+// Категория дорог уровня 1. Таблица ATTRIBUTE поделена по уровням: у завода
+// записи уровня 1 берут индексы от 353 и категорию 4 (97,6 % записей, каждый
+// 30-й тайл, 5,6 млн), файлы `_2.xac` — индексы 0…352 и категорию 2 (152 из
+// 160 используемых). Индексы 0…2, которые давал прежний подбор «ближе всего по
+// битам», у завода на уровне 1 не встречаются ни разу.
+const L1_CAT = 4;
+
 function speedPicker(attr, list, base) {
   const cache = new Map(), inexact = {};
+  let first = Infinity;
+  for (let i = 0; i < attr.length; i++) if (attr[i] && CAT(attr[i] >>> 0) === L1_CAT && i < first) first = i;
+  const l1 = list.filter((i) => i >= first);
   const pick = (frc, dir, cls, wantCat) => {
     const key = frc + ':' + dir + ':' + cls + (wantCat === undefined ? '' : ':c' + wantCat);
     if (cache.has(key)) return cache.get(key);
     const b = base[frc] === undefined ? null : attr[base[frc]] >>> 0;
     let best = null;
-    const want = wantCat === undefined ? (b === null ? 0 : CAT(b)) : wantCat;
+    const want = wantCat === undefined ? L1_CAT : wantCat;
+    // Среди подходящих по (уровень, направление, класс, категория) — меньший
+    // индекс: у завода самый частый индекс сочетания совпал с наименьшим из
+    // уровня 1 у 75 сочетаний из 90 (простые) и 71 из 105 (с именами), а на
+    // них приходится основная масса записей (353, 354, 355, 359, 361…).
     if (b !== null) {
-      const ref = ((b & ~0x1cf8) | (dir << 3) | (cls << 5) | (want << 10)) >>> 0;
-      for (const i of list) {
+      // только индексы уровня 1 (от первого индекса категории 4 — у завода 353),
+      // если среди них есть нужные уровень и направление
+      const fit = (i) => (attr[i] & 7) === frc && DIR(attr[i] >>> 0) === dir;
+      const pool = l1.some(fit) ? l1 : list;
+      for (const i of pool) {
         const v = attr[i] >>> 0;
         if ((v & 7) !== frc || DIR(v) !== dir) continue;
         const c = (v >>> 5) & 7;
-        const sc = 1000 * Math.abs(c - cls) - (c > cls ? 1 : 0) +
-                   catCost(CAT(v), want) + bits(v ^ ref);
+        const sc = 1000 * Math.abs(c - cls) - (c > cls ? 1 : 0) + catCost(CAT(v), want);
         if (!best || sc < best.sc) best = { i, sc, c, cat: CAT(v) !== want ? CAT(v) : false };
       }
     }
@@ -419,6 +435,8 @@ function turnBans(graph, rels, coord) {
 // Рекурсивное деление по длинной стороне рамки, пока в блоке больше `maxNodes`
 // узлов. Медиана, а не середина рамки: иначе город в углу тайла даёт блок,
 // набитый до потолка, рядом с пустыми.
+const SUB_LEAF = 48;   // узлов в куске kd-деления блока (у завода медиана 37, max 150)
+
 function splitNodes(nodes, idx, maxNodes) {
   if (idx.length <= maxNodes) return [idx];
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
@@ -508,14 +526,16 @@ function nameRefs(graph, lay, firsts, blockCount) {
   return { refs, blocks: blockCount, place };
 }
 
-// Номера записей: у узла столько номеров, сколько у него записей, счёт с
-// единицы. Та же раскладка, что в генераторе (xacwrite.buildBlock).
+// Номера записей: по номеру на каждый вектор узла, у узла без векторов — один
+// (на первую встречную ссылку или на сам узел), счёт с единицы. Та же раскладка,
+// что в генераторе (xacwrite.buildBlock): встречные не первыми номеров не
+// получают, как у завода.
 function firstEntries(rec) {
   const first = new Array(rec.length);
   let id = 1;
   for (let i = 0; i < rec.length; i++) {
     first[i] = id;
-    id += Math.max(1, rec[i].vecs.length + rec[i].backs.length);
+    id += Math.max(1, rec[i].vecs.length);
   }
   return { first, count: id };
 }
@@ -531,7 +551,11 @@ function buildBlocks(graph, opt) {
   const attrIdx = o.attrIdx;
 
   for (let round = 0; round < 8; round++) {
-    const groups = splitNodes(graph.nodes, graph.nodes.map((_, i) => i), maxNodes);
+    // внутри блока узлы идут кусками kd-деления — каждый кусок станет под-блоком
+    // компактным пятном, как у завода (медиана 37 узлов, рамка ~1000×1000)
+    const leafOf = new Int32Array(graph.nodes.length);
+    const groups = splitNodes(graph.nodes, graph.nodes.map((_, i) => i), maxNodes).map((g) =>
+      splitNodes(graph.nodes, g, SUB_LEAF).flatMap((leaf, li) => leaf.map((n) => (leafOf[n] = li, n))));
     const lay = layout(graph, groups, attrIdx, o.named);
     const firsts = lay.recs.map(firstEntries);
     const tooMany = firsts.findIndex((f) => f.count > MAX_ENTRIES);
@@ -558,17 +582,18 @@ function buildBlocks(graph, opt) {
         return {
           turns,
           links: o.links && o.links(gi),
-          x: graph.nodes[gi].x, y: graph.nodes[gi].y,
+          x: graph.nodes[gi].x, y: graph.nodes[gi].y, sub: leafOf[gi],
           vectors: r.vecs.map((v) => v.cross === undefined
             ? { to: v.to, idx: v.idx, names: v.names }
             : { block: base + v.cross, ref: firsts[v.cross].first[v.node], idx: v.idx,
-                names: v.names }),
+                names: v.names,             // конец в чужом блоке — для рамки под-блока
+                x: graph.nodes[groups[v.cross][v.node]].x, y: graph.nodes[groups[v.cross][v.node]].y }),
           backs: r.backs.map((b) => b.crossBlock === undefined ? { from: b.from, at: b.at }
             : { block: base + b.crossBlock,
                 ref: firsts[b.crossBlock].first[b.node] + b.at }),
         };
       });
-      const blk = xw.buildBlock({ nodes, id: base + bi, tileBase: base, country,
+      const blk = xw.buildBlock({ nodes, id: base + bi, tileBase: base, country, tz: o.tz, dst: o.dst, tile: o.tile,
                                   flags: o.flags === undefined ? 0x95 : o.flags });
       if (blk.length > MAX_BYTES) { over = true; break; }
       blocks.push(blk);

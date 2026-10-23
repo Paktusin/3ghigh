@@ -37,6 +37,7 @@ const S = require('./litschema');
 const VM = require('./litvm');
 const P = require('./litpoi');
 const B = require('./litblock');
+const X = require('./xac');
 
 const CAP = 13795;                  // потолок листа: самый большой заводской блок
 const NODE = 0;                     // блок с узлами дерева
@@ -89,6 +90,16 @@ function build(pois, opt) {
              bytes: blocks.reduce((a, b) => a + b.length, 0) };
   }
   return buildAddr(pois, o, tpl, cap, slots);
+}
+
+// Заводской индекс .xah (из него — названия страны по языкам, countryNames).
+function factoryXah(root) {
+  const fldb = require('./fldb');
+  const d = path.join(root, 'pkgdb', 'XAC');
+  const db = fldb.open(path.join(d, fs.readdirSync(d).find((f) => /\.db$/i.test(f))));
+  const xah = fldb.read(db, fldb.entries(db).find((e) => /\.xah$/i.test(e.name)));
+  fs.closeSync(db.fd);
+  return xah;
 }
 
 // Заводские куски: язык корня, таблицы 0x18, заголовок POI.
@@ -171,6 +182,21 @@ function emptyLayer(li) {
                      x79: null, n42: 0, x7a: null, n7b: 0 }] };
 }
 
+// Рамка слоя для шапки 0x20 — в точках карты: опора блока узлов плюс
+// объединение двух прямоугольников корня (ключ 1). Так у завода: 120458 —
+// опора шапки + (8192, 16384) … + (15044608, 4894720) = опора блока узлов +
+// [0, 0] … [15036416, 4878336]. CLitPoiTileDb (poitile.c) берёт ненулевую
+// рамку витка как есть, а нулевую — из корня слоя тем же способом.
+function layerFrame(schema, b, blk) {
+  const KS = require('./litkeys');
+  const org = [b.readInt32BE(4), b.readInt32BE(8)];
+  const n = KS.keyed(schema, b, blk).els.find((e) => e.key === 1);
+  if (!n || n.type !== 0x22) throw new Error('в (' + blk + ', 1) не узел слоя');
+  const xs = [n.f['61'], n.f['60'], n.f['64'], n.f['63']].filter(Boolean);
+  return { min: [Math.min(...xs.map((p) => p[0])) + org[0], Math.min(...xs.map((p) => p[1])) + org[1]],
+           max: [Math.max(...xs.map((p) => p[0])) + org[0], Math.max(...xs.map((p) => p[1])) + org[1]] };
+}
+
 function buildAddr(pois, o, tpl, cap, slots) {
   const A = require('./litaddr');
   const fac = o.factory ? factoryParts(o.factory) : null;
@@ -234,11 +260,17 @@ function buildAddr(pois, o, tpl, cap, slots) {
   const fallback = [{ code: Buffer.from('2a0000', 'hex'), id: 0, tableCount: 0, table: null },
                     { code: Buffer.from('eng'), id: 5, tableCount: 0, table: null }];
   const langs = (fac ? fac.langs : fallback).map((l, i) => Object.assign({}, l, { list: 'cn' + i }));
-  const all = [...new Set(['CYPRUS'].concat(Object.values(A.CY_NAMES)))].sort();
+  // Названия страны — из XAC (countryNames): текущую страну по положению машины
+  // HMI берёт оттуда на языке интерфейса («КИПР»), и ввод цели ищет это имя в
+  // LIT (FUN_08f0ee68 -> FUN_08ccb6cc); не нашлось — страна из описания места
+  // стирается, и поиск идёт «без области». У завода виток i — язык i записи
+  // LANGUAGE (5290 пар из 5290 у 46 стран), виток 0 — все названия; языку без
+  // названия в XAC — английское (2), как у завода.
+  const xn = o.xah ? X.countryNames(o.xah, (o.addr && o.addr.code) || 113) : { 2: 'CYPRUS' };
+  const all = [...new Set(Object.values(xn))].sort();
   const country = 'country';
   const lists = langs.map((l, i) => {
-    const code = l.code.toString('latin1');
-    const nm = i === 0 ? all : [A.CY_NAMES[code] || 'CYPRUS'];
+    const nm = i === 0 ? all : [xn[i] || xn[2]];
     return A.list('cn' + i, nm.map((name) => ({ name, target: country })), { direct: true, owner: null });
   });
   const set = countrySet(A, o.addr, C, pois, fac && fac.countryTemplate);
@@ -257,10 +289,22 @@ function buildAddr(pois, o, tpl, cap, slots) {
   blocks.push({ blk: 1, origin: { x: 0, y: 0 }, width: 24, records: set });
   if (fac) {
     fac.tables.forEach((b, i) => blocks.push({ blk: 2 + i, bytes: b }));
-    // шапка: ссылка на заголовок заводского слоя -> на заголовок нашего того же слоя
+    // шапка: ссылка на заголовок заводского слоя -> на заголовок нашего того же
+    // слоя; рамка витка (0x3e, 0x3d) — рамка нашего слоя (см. layerFrame)
     const ours = new Map(fac.layers.map((l, i) => [l.root[0], [layers[i].nodeBlk, 0]]));
-    blocks.push({ blk: H, bytes: A.transplant(fac.header.schema, fac.header.block, EU_POI_HEADER,
-                                              { blk: H, map: (p) => ours.get(p[0]) || p }) });
+    const hb = fac.header.block, ho = [hb.readInt32BE(4), hb.readInt32BE(8)];
+    // пустой слой (у завода их нет) — рамка EU как есть
+    const frames = new Map(layers.filter((l) => l.pois.length)
+      .map((l) => [l.nodeBlk, layerFrame(fac.header.schema, l.node, l.nodeBlk)]));
+    blocks.push({ blk: H, bytes: A.transplant(fac.header.schema, hb, EU_POI_HEADER, {
+      blk: H, map: (p) => ours.get(p[0]) || p,
+      pair: (t, ref) => {
+        const f = ref && frames.get(ref[0]);
+        if (!f || (t.type !== 0x3e && t.type !== 0x3d)) return undefined;
+        const v = t.type === 0x3e ? f.min : f.max, d = [v[0] - ho[0], v[1] - ho[1]];
+        if (d.some((x) => x < 0 || x >= 1 << 24)) throw new Error('рамка слоя вне опоры шапки: ' + d);
+        return d;
+      } }) });
   }
   for (const l of layers) {
     blocks.push({ blk: l.nodeBlk, bytes: l.node });
@@ -278,7 +322,7 @@ function buildAddr(pois, o, tpl, cap, slots) {
   const sizeOf = (a, z) => list.slice(a, z).reduce((s, b) => s + b.length, 0);
   return { buf: litfile.build({ head: tpl.head, ttd: tpl.ttd, blocks: list }),
            leaves: used.length, pois: used.reduce((a, l) => a + l.pois, 0),
-           node: layers.reduce((a, l) => a + l.node.length, 0), nodeBlk: N, poiHeader: H, countryBlk: C,
+           node: layers.reduce((a, l) => a + l.node.length, 0), nodeBlk: N, poiHeader: H, countryBlk: C, countryNames: xn,
            layers: layers.map((l) => ({ idx: l.idx, nodeBlk: l.nodeBlk, count: l.pois.length,
                                         first: l.leaves.length ? l.leaves[0].blk : null,
                                         last: l.leaves.length ? l.leaves[l.leaves.length - 1].blk : null,
@@ -343,9 +387,15 @@ function verify(buf, r, pois) {
         const byBlk = new Map(lays.map((L) => [L.nodeBlk, L.idx]));
         const ents = hp && hp[0] === r.poiHeader ? ks.get(hp[0]).els.filter((e) => e.type === 0x20) : [];
         const nl = lays.length;
+        const hb = m.blocks[r.poiHeader], ho = [hb.readInt32BE(4), hb.readInt32BE(8)];
         rep.poiPath = ents.length > nl && ents.every((e, i) => {
           const li = byBlk.get(e.f['3c'][0]);
           if (li === undefined || e.f['3c'][1] !== 0) return false;
+          // рамка витка — рамка корня его слоя (как у завода, 68 из 68)
+          if (lays.find((L) => L.nodeBlk === e.f['3c'][0]).count) {
+            const f = layerFrame(schema, m.blocks[e.f['3c'][0]], e.f['3c'][0]);
+            if ([0, 1].some((k) => e.f['3e'][k] + ho[k] !== f.min[k] || e.f['3d'][k] + ho[k] !== f.max[k])) return false;
+          }
           return i >= ents.length - nl ? li === e.f['49'] : li === r.layerOf({ cat: e.f['49'] });
         });
       }
@@ -390,7 +440,8 @@ function verify(buf, r, pois) {
         const nm = LC.poiSearch(ks.get, node, 18, 0);
         const ph = two ? LC.poiSearch(ks.get, node, 9, 0) : { names: 0, pois: 0, bad: [] };
         rep.poiSearch = { names: nm.names, pois: nm.pois, bad: nm.bad.length + ph.bad.length,
-                          phones: ph.names, phonePois: ph.pois, sample: nm.sample, cities: 0, cityPois: 0 };
+                          phones: ph.names, phonePois: ph.pois, sample: nm.sample, cities: 0, cityPois: 0,
+                          multiNames: nm.multiNames || 0, multiPois: nm.multi || 0 };
         // поиск по категории (litcity.catSearch): страна — селектор 18, город — 1
         rep.catSearch = { errors: [], cats: 0, groups: 0, pois: 0, cities: 0, cityPois: 0 };
         const cityExp = new Map((r.catExpect ? r.catExpect.cities : [])
@@ -412,15 +463,25 @@ function verify(buf, r, pois) {
           if (exp) { catCheck(rep.catSearch, LC.catSearch(ks.get, t, 1), exp, 'город ' + c.name); rep.catSearch.cities++; cityExp.delete(c.target.join(':')); }
         }
         rep.catSearch.missing = cityExp.size;
-        // 0x66 точки -> виток 0x31 категории её города, а его 0x3c — сама точка
+        // 0x66 точки -> виток 0x31 категории её города, а его 0x3c — сама точка;
+        // у категорий вне цикла города — её имя 0x30 в названиях города, а его
+        // 0x3c — точка или узел 0x33 имени, в списке которого она есть
         let ok = 0, n = 0;
+        const holds = (p, b, k) => {
+          if (!p) return false;
+          if (p[0] === b && p[1] === k) return true;
+          const x = ks.get(p[0]).map.get(p[1]);
+          const o = { pois: new Set(), bad: [] };
+          if (x && x.type === 0x33) LC.poisOf(ks.get, p, o);
+          return o.pois.has(b + ':' + k);
+        };
         for (const L of lays) for (const b of L.leaves) {
           for (const e of ks.get(b).els) {
-            if (e.type !== 0x24 || n >= 2000) continue;
+            if (e.type !== 0x24) continue;
             n++;
             const back = e.f['66'], t = back && back[0] >= 0 ? ks.get(back[0]).map.get(back[1]) : null;
-            const it = t && t.type === 0x31 ? ks.get(back[0]).els.find((x) => (x.keys ? x.keys[1] : x.key) === back[1]) : null;
-            if (it && it.f['3c'] && it.f['3c'][0] === b && it.f['3c'][1] === e.key) ok++;
+            const it = t && (t.type === 0x31 || t.type === 0x30) ? ks.get(back[0]).els.find((x) => (x.keys ? x.keys[1] : x.key) === back[1]) : null;
+            if (it && holds(it.f['3c'], b, e.key)) ok++;
           }
         }
         rep.poiSearch.backOk = ok; rep.poiSearch.backSeen = n;
@@ -481,9 +542,17 @@ function verify(buf, r, pois) {
       for (let l = 0; l < nl; l++) codes.push(LC.countryByCode(ko, 113, l));
       ko.L.vols.forEach((v) => fs.closeSync(v.fd));
       const bad = codes.filter((c) => c.why !== 'ок');
+      // страна по положению машины: HMI берёт имя из XAC на языке l и ищет его
+      // по имени (виток 0) — каждое имя XAC обязано вести к тем же городам; и в
+      // витке языка l имя страны — то же, что в XAC (как у завода)
+      const xn = r.countryNames || { 2: 'CYPRUS' };
+      const byName = [...new Set(Object.values(xn))].map((n) => ({ n, c: LC.cities([dir], n).cities.length }));
+      const nameBad = byName.filter((x) => x.c !== em.cities.length).map((x) => x.n)
+        .concat(codes.filter((c, l) => l > 0 && c.name !== (xn[l] || xn[2])).map((c) => 'язык ' + c.lang + ': ' + c.name));
       rep.emul = { cities: em.cities.length, notCity: em.cities.filter((c) => c.type !== 3).length,
                    byCode: bad.length ? bad[0].why : 'ок', name: codes.map((c) => c.name).filter(Boolean)[1] || codes[0].name,
-                   langs: codes.length, langsOk: codes.length - bad.length };
+                   langs: codes.length, langsOk: codes.length - bad.length,
+                   byName: byName.map((x) => x.n), nameBad };
     }
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -496,15 +565,18 @@ function verify(buf, r, pois) {
                                rep.catSearch.cityPois !== (r.dirStats.poisInTree || 0))) ||
             (rep.poiSearch && (rep.poiSearch.bad || rep.poiSearch.pois !== (r.dirStats.poisInCities || 0) ||
                                rep.poiSearch.cityPois !== (r.dirStats.poisInCities || 0) ||
-                               rep.poiSearch.backOk !== rep.poiSearch.backSeen)) ||
+                               rep.poiSearch.backOk !== rep.poiSearch.backSeen ||
+                               rep.poiSearch.multiNames !== (r.dirStats.poiMulti || 0))) ||
             (rep.houses && (rep.houses.bad.length || rep.houses.reached !== rep.houses.streets ||
                             rep.houses.ok !== rep.houses.nums || rep.houses.extra ||
                             rep.houses.streets !== r.dirStats.houseStreets)) ||
-            (rep.emul && (rep.emul.cities !== r.cities + ((r.dirStats && r.dirStats.districts) || 0) || rep.emul.notCity || rep.emul.byCode !== 'ок')) ||
+            (rep.emul && (rep.emul.cities !== r.cities + ((r.dirStats && r.dirStats.districts) || 0) || rep.emul.notCity || rep.emul.byCode !== 'ок' ||
+                          rep.emul.nameBad.length)) ||
             (rep.countrySet && (!rep.countrySet.length || rep.countrySet.some((c) => !c.ok) ||
                                 rep.tableCount.root !== rep.tableCount.found)) ||
             (rep.addr && ((rep.addr.postcodes || 0) !== (r.postcodes || 0) ||
-                          (rep.addr.centres || 0) !== r.cities || (rep.addr.allStreets || 0) !== r.streets)) ||
+                          (rep.addr.centres || 0) !== r.cities || (rep.addr.allStreets || 0) !== r.streets ||
+                          (rep.addr.multiStreets || 0) !== ((r.dirStats && r.dirStats.multiStreets) || 0))) ||
             (rep.addr && (rep.addr.errors.length > 0 ||
                           rep.addr.cities.length !== r.cities + ((r.dirStats && r.dirStats.districts) || 0) ||
                           rep.addr.streets !== r.streets + ((r.dirStats && r.dirStats.districtStreets) || 0)));
@@ -554,7 +626,7 @@ function report(rep, r, log) {
   log('листья дочитываются до конца: ' + rep.leavesEnd + ' из ' + r.leaves);
   log('точек прочитано обратно: ' + rep.poisBack + ' из ' + r.pois);
   log('спуск по дереву POI: проверено ' + rep.seen + ', лист найден у ' + rep.hit);
-  if (rep.poiPath !== undefined) log('путь корень -> 0x20 -> 0x21 своего слоя -> узлы: ' + rep.poiPath);
+  if (rep.poiPath !== undefined) log('путь корень -> 0x20 (рамка витка = рамка слоя) -> 0x21 своего слоя -> узлы: ' + rep.poiPath);
   if (r.layers) log('слои POI: ' + r.layers.map((L) => L.idx + ':' + L.count + (L.leaves.length ? '/' + L.leaves.length + 'л' : '')).join(' ') +
                     '; заголовки 0x21 (номер, число точек, первый/последний лист): ' + rep.layerHdr);
   if (rep.addr) {
@@ -565,10 +637,14 @@ function report(rep, r, log) {
         (a.errors.length ? ', ошибок ' + a.errors.length + ': ' + a.errors.slice(0, 3).join('; ') : ''));
     log('  индексы страны -> 0x04: ' + (a.postcodes || 0) + ' из ' + (r.postcodes || 0) +
         '; индексы в городах -> 0x31: ' + (a.cityPostcodes || 0) + '; точки-центры 0x24: ' + (a.centres || 0) +
-        ' из ' + r.cities + '; все улицы страны -> имя в городе: ' + (a.allStreets || 0) + ' из ' + r.streets);
+        ' из ' + r.cities + '; все улицы страны -> имя в городе: ' + (a.allStreets || 0) + ' из ' + r.streets +
+        ' (имён нескольких улиц -> 0x10: ' + (a.multiStreets || 0) + ' из ' + ((r.dirStats && r.dirStats.multiStreets) || 0) +
+        ', из них по индексам -> витков улиц ' + (a.multiPostcodes || 0) + ')');
   }
   if (rep.emul) log('путь прошивки (litcity): CYPRUS -> городов ' + rep.emul.cities + ' (не 0x03: ' + rep.emul.notCity +
-                    '); FUN_08ccd098(113): языков ' + rep.emul.langsOk + ' из ' + rep.emul.langs + ' (напр. «' + rep.emul.name + '») — ' + rep.emul.byCode);
+                    '); FUN_08ccd098(113): языков ' + rep.emul.langsOk + ' из ' + rep.emul.langs + ' (напр. «' + rep.emul.name + '») — ' + rep.emul.byCode +
+                    '; имена XAC по имени и по языкам: ' + rep.emul.byName.join(', ') +
+                    (rep.emul.nameBad.length ? ' — НЕ ВЕДУТ: ' + rep.emul.nameBad.join('; ') : ' — все ведут к стране'));
   if (rep.countrySet) {
     log('набор стран (0x18/7000): ' + rep.countrySet.map((c) => c.code + ' -> (' + c.pos + ')' + (c.ok ? '' : ' НЕ 0x02')).join(', ') +
         '; статистик символов ' + rep.stats + '; записей таблицы: в корне ' + rep.tableCount.root +
@@ -579,9 +655,10 @@ function report(rep, r, log) {
   if (rep.poiSearch) {
     const q = rep.poiSearch;
     log('поиск POI (litcity.poiSearch): страна, селектор 18 «названия» — имён ' + q.names + ' -> точек ' + q.pois +
-        ' (напр. «' + q.sample[0] + '»); 9 «телефоны» — ' + q.phones + ' -> ' + q.phonePois +
+        ' (напр. «' + q.sample[0] + '»; имён с несколькими точками 0x33/16 -> 0x34: ' + q.multiNames + ' из ' +
+        (r.dirStats.poiMulti || 0) + ', точек по ним ' + q.multiPois + '); 9 «телефоны» — ' + q.phones + ' -> ' + q.phonePois +
         '; города с 0x4000: ' + q.cities + ', селектор 1 -> точек ' + q.cityPois +
-        '; 0x66 точки -> виток 0x31 категории города и обратно: ' + q.backOk + ' из ' + q.backSeen +
+        '; 0x66 точки -> виток 0x31 категории города (вне цикла — имя в названиях города) и обратно: ' + q.backOk + ' из ' + q.backSeen +
         (q.bad ? '; ОШИБОК ' + q.bad : ''));
   }
   if (rep.catSearch) {
@@ -590,6 +667,12 @@ function report(rep, r, log) {
         ', точек через свою категорию ' + c.pois + '; города: ' + c.cities + ' (без дерева ' + (c.missing || 0) +
         '), точек через категорию города ' + c.cityPois +
         (c.errors.length ? '; ОШИБОК ' + c.errors.length + ': ' + c.errors.slice(0, 3).join('; ') : ''));
+    const off = r.dirStats.offLoop || [];
+    const by = {};
+    for (const x of off) by[x] = (by[x] || 0) + 1;
+    log('  вне дерева категорий (не в группах 40…48): точек ' + (r.dirStats.poisInCities - r.dirStats.poisInTree) +
+        '; вне цикла категорий города (больше ' + require('./litaddr').CITY_CATS_MAX + '): точек ' + off.length +
+        (off.length ? ' (' + Object.entries(by).map(([k, v]) => k + ': ' + v).join(', ') + ')' : ''));
   }
   if (rep.houses) {
     const h = rep.houses;
@@ -607,7 +690,7 @@ function report(rep, r, log) {
   log(rep.bad ? 'ЕСТЬ РАСХОЖДЕНИЯ' : 'расхождений нет');
 }
 
-module.exports = { build, verify, report, template, factoryParts, CAP, NODE };
+module.exports = { build, verify, report, template, factoryParts, factoryXah, CAP, NODE };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
@@ -630,6 +713,7 @@ if (require.main === module) {
                                   addrs: require('./litaddr').readAddresses(pbf),
                                   houses: require('./mkxac').readHouses(pbf) });
     opt.factory = ['LIT', 'LIT2', 'LIT3', 'LIT4'].map((d) => path.join(flag('maps', 'maps'), 'pkgdb', d));
+    opt.xah = factoryXah(flag('maps', 'maps'));
   }
   const r = build(pois, opt);
   console.log('листьев ' + r.leaves + ', точек в них ' + r.pois + ', блок узлов ' + r.node + ' б' +

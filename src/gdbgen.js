@@ -15,8 +15,8 @@
 //     +0x14 4×i32 рамка карты в мировых единицах
 //     +0x24 u8   число уровней   +0x2D таблица 32 пар (u32 смещение, u32 размер)
 //     +301  ff ff, дальше метка сборки «20220218092956» и имя набора «EJ211»
-//     +577  u32  число записей каталога блобов  +581 u32 смещение  +585 u32 размер
-//     +589  u32  конец области уровней = начало данных
+//     +577  u32  число записей каталога таблиц ссылок  +581 u32 смещение  +585 u32 размер
+//     +589…+604  каталог блобов: смещение, размер, 64, число — у нас нули (блобов нет)
 //
 //   ── УРОВЕНЬ ───────────────────────────────────────────────────────────
 //     +0  u32 cellX  +4 u32 cellY  +8 u8 potX  +9 u8 potY
@@ -56,9 +56,9 @@ const SIG = 0xDEADBEEF;
 const VERSION = 37;
 const FRAME = [-8978432, -196608, 16850000, 11517028];   // рамка карты EJ211
 
-// Хвост шапки (+576…+792) оригинала: каталог блобов и таблица из 41 числа,
-// назначение которой не установлено. Переносится как есть — кроме полей
-// каталога и «начала данных», которые пересчитываются под собранный том.
+// Хвост шапки (+576…+792) оригинала: каталоги и таблица из 41 числа,
+// назначение которой не установлено. Переносится как есть — кроме каталога
+// таблиц ссылок (+577…+588, пересчитывается) и каталога блобов (+589…+604, нули).
 // Это единственное место, где в сборку попадают байты чужого файла.
 const TAIL_576 = Buffer.from(
   '000000aecb000d59da00057658000b774f0001e28b0000004000000002000000000000000000000000' +
@@ -176,34 +176,146 @@ const attrOf = r => (r.attr === undefined ? r.cls : r.attr) >>> 0;
 // них. Многоугольник моря поверх суши не кладётся: у завода вода (0x50)
 // рисуется ПОСЛЕ суши (озёра в тайле Германии идут последними).
 const LAND = 0x5f, SEA = 0x50;
-// 3·n точек в элементе; поле позволяет 65535, но у завода во всей Европе нет
-// многоугольника больше 1818 точек — режем на куски по 1500 (500 треугольников)
-const MAX_TRIS = 500;
+// У завода во всей Европе нет многоугольника больше 1818 точек — кусок
+// крупнее режется на элементы по 1500 точек (по границам примитивов)
+const MAX_PTS = 1500;
 
+// Как у завода (docs/formats/gdb.md, «Площади: элемент — связный кусок
+// объекта»): элемент — один связный кусок одного объекта в тайле, его
+// треугольники уложены веерами, полосами и списком одиночных треугольников.
+// area — {empty} | {full} | {land: [кусок…], sea: [кусок…], layers: [{attr, e9,
+// parts}]}, кусок — массив треугольников.
 function areaElements(area, f) {
   if (!area || area.empty) return [gm.encodeFrame(f.X, f.Y, f.W, f.simple)];
   const out = [];
-  const list = (attr, tris, edge, pre) => {
-    for (let i = 0; i < tris.length; i += MAX_TRIS) {
-      const part = tris.slice(i, i + MAX_TRIS);
-      const el = gm.encodePolygon(part.flat(), gm.listFlags(part.length, edge), attr, f);
-      out.push(i === 0 && pre ? Buffer.concat([pre, el]) : el);
+  let e9 = 0xff, attr = null;
+  const put = (a, parts, ly9) => {
+    for (const part of parts) {
+      for (const el of polyElements(part, a === LAND || a === SEA ? f.simple : false)) {
+        const pre = [];
+        if (ly9 !== e9) { pre.push(0xe0, ly9); e9 = ly9; }
+        out.push(Buffer.concat([Buffer.from(pre), gm.encodePolygon(el.pts, el.flags, a === attr ? null : a, f)]));
+        attr = a;
+      }
     }
   };
   if (area.full) {
     const pts = f.simple ? [[f.X, f.Y], [0, f.Y], [0, 0], [f.X, 0]] : [[f.X, 0], [f.X, f.Y], [0, f.Y], [0, 0]];
     out.push(gm.encodePolygon(pts, [3, 2, 3, 2], LAND, f));      // веер, как рамка
+    attr = LAND;
   } else {
-    list(LAND, area.land, true);
-    list(SEA, area.sea, false);
+    put(LAND, area.land, 0xff);
+    put(SEA, area.sea, 0xff);
   }
   // слои — в порядке завода; E0 держится до смены, у суши/моря/ступеней 0xFF
-  let e9 = 0xff;
-  for (const ly of area.layers || []) {
-    const pre = ly.e9 !== e9 ? Buffer.from([0xe0, ly.e9]) : null;
-    e9 = ly.e9;
-    list(ly.attr, ly.tris, ly.attr !== SEA, pre);
+  for (const ly of area.layers || []) put(ly.attr, ly.parts, ly.e9);
+  return out;
+}
+
+// Кусок (треугольники) → элементы: примитивы (stripify), не больше MAX_PTS
+// точек в элементе, признаки точек. Бит 0 ведёт автомат граней
+// (gm.polyTriangles): веер 1,0,1…1,0; полоса 0,1…1,0; список 0,0,c,1,1,c….
+// Бит 1 — по заводу (Крит L0, 99 %): 1, если ребро внутреннее (у двух
+// треугольников элемента): веер — ребро к следующей точке (последняя — к
+// центру), полоса — (i−1, i+1), у первой (0,1), у последней (n−2, n−1),
+// список — ребро треугольника к следующей вершине. У суши и моря выше L0
+// завод ставит 1 всем точкам (hide).
+function polyElements(tris, hide) {
+  const els = [];
+  let cur = null;
+  const flush = () => { if (cur) els.push(cur); cur = null; };
+  for (const pr of stripify(tris)) {
+    let pts = pr.pts;
+    for (;;) {
+      if (cur && cur.n + (pr.mode === 'list' ? 3 : pts.length) > MAX_PTS) flush();
+      if (!cur) cur = { n: 0, prims: [] };
+      let take = Math.min(pts.length, MAX_PTS - cur.n);
+      if (pr.mode === 'list') take -= take % 3;
+      cur.prims.push({ mode: pr.mode, pts: pts.slice(0, take) });
+      cur.n += take;
+      if (take === pts.length) break;
+      // остаток: веер — с центра и последней точки, полоса — с двух последних
+      pts = pr.mode === 'list' ? pts.slice(take) : pr.mode === 'fan' ? [pts[0], ...pts.slice(take - 1)] : pts.slice(take - 2);
+      flush();
+    }
   }
+  flush();
+  return els.map(e => {
+    const tr = [];
+    for (const p of e.prims) tr.push(...primTris(p));
+    const cnt = new Map();
+    for (const t of tr) for (let k = 0; k < 3; k++) { const q = edgeId(t[k], t[(k + 1) % 3]); cnt.set(q, (cnt.get(q) || 0) + 1); }
+    const inner = (a, b) => (hide || cnt.get(edgeId(a, b)) > 1 ? 1 : 0);
+    const pts = [], flags = [];
+    for (const { mode, pts: q } of e.prims) {
+      const n = q.length;
+      q.forEach((p, i) => {
+        let b0, b1;
+        if (mode === 'fan') { b0 = i === 0 ? 1 : i === 1 || i === n - 1 ? 0 : 1; b1 = inner(p, q[(i + 1) % n]); }
+        else if (mode === 'strip') { b0 = i === 0 || i === n - 1 ? 0 : 1; b1 = i === 0 ? inner(q[0], q[1]) : i === n - 1 ? inner(q[n - 2], q[n - 1]) : inner(q[i - 1], q[i + 1]); }
+        else { const k = i % 3; b0 = i < 3 ? (k < 2 ? 0 : +(i + 1 < n)) : (k < 2 ? 1 : +(i + 1 < n)); b1 = inner(p, q[i - k + (k + 1) % 3]); }
+        pts.push(p); flags.push(b0 | (b1 << 1));
+      });
+    }
+    return { pts, flags };
+  });
+}
+
+const primTris = ({ mode, pts: q }) => {
+  const t = [];
+  if (mode === 'fan') for (let i = 2; i < q.length; i++) t.push([q[0], q[i - 1], q[i]]);
+  else if (mode === 'strip') for (let i = 2; i < q.length; i++) t.push([q[i - 2], q[i - 1], q[i]]);
+  else for (let i = 2; i < q.length; i += 3) t.push([q[i - 2], q[i - 1], q[i]]);
+  return t;
+};
+const ptId = p => p[0] * 65536 + p[1];
+const edgeId = (a, b) => { const p = ptId(a), q = ptId(b); return p < q ? p + ':' + q : q + ':' + p; };
+
+// Треугольники → веера, полосы и список одиночных — жадно, как отрисовка сетки
+// в тесселяторе GLU (render.c: из трёх вееров и трёх полос у каждого
+// треугольника берётся самый длинный, одиночные собираются в один список).
+// Завод выдаёт ровно эти три вида примитивов (Крит L0: вееров 15 775, полос
+// 9 738, списков 1 218 у леса) — что у него GLU, догадка.
+function stripify(tris) {
+  const byEdge = new Map();
+  tris.forEach((t, i) => {
+    for (let k = 0; k < 3; k++) {
+      const e = edgeId(t[k], t[(k + 1) % 3]);
+      if (!byEdge.has(e)) byEdge.set(e, []);
+      byEdge.get(e).push(i);
+    }
+  });
+  const used = new Uint8Array(tris.length);
+  const nb = (i, a, b, seen) => { for (const j of byEdge.get(edgeId(a, b))) if (j !== i && !used[j] && !seen.has(j)) return j; return -1; };
+  const third = (j, a, b) => { const pa = ptId(a), pb = ptId(b); return tris[j].find(p => ptId(p) !== pa && ptId(p) !== pb); };
+  const fan = (i, c, a, b) => {
+    const seen = new Set([i]), fw = [], bw = [];
+    for (let j, cur = i, x = b; (j = nb(cur, c, x, seen)) >= 0; cur = j) { seen.add(j); x = third(j, c, x); fw.push([j, x]); }
+    for (let j, cur = i, x = a; (j = nb(cur, c, x, seen)) >= 0; cur = j) { seen.add(j); x = third(j, c, x); bw.push([j, x]); }
+    bw.reverse();
+    return { mode: 'fan', ids: [...bw.map(q => q[0]), i, ...fw.map(q => q[0])], pts: [c, ...bw.map(q => q[1]), a, b, ...fw.map(q => q[1])] };
+  };
+  const strip = (i, a, b, c) => {
+    const seen = new Set([i]), ids = [i], pts = [a, b, c];
+    for (let j; (j = nb(ids[ids.length - 1], pts[pts.length - 2], pts[pts.length - 1], seen)) >= 0;) {
+      seen.add(j); ids.push(j); pts.push(third(j, pts[pts.length - 2], pts[pts.length - 1]));
+    }
+    for (let j; (j = nb(ids[0], pts[0], pts[1], seen)) >= 0;) { seen.add(j); ids.unshift(j); pts.unshift(third(j, pts[0], pts[1])); }
+    return { mode: 'strip', ids, pts };
+  };
+  const out = [], lonely = [];
+  tris.forEach((t, i) => {
+    if (used[i]) return;
+    let best = null;
+    for (let k = 0; k < 3; k++) {
+      const a = t[k], b = t[(k + 1) % 3], c = t[(k + 2) % 3];
+      for (const q of [fan(i, a, b, c), strip(i, a, b, c)]) if (!best || q.ids.length > best.ids.length) best = q;
+    }
+    for (const j of best.ids) used[j] = 1;
+    if (best.ids.length === 1) lonely.push(...t);
+    else out.push({ mode: best.mode, pts: best.pts });
+  });
+  if (lonely.length) out.push({ mode: 'list', pts: lonely });
   return out;
 }
 
@@ -237,8 +349,9 @@ const cutY = (a, b, y) => [a[0] + (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]), y]
 // часовой; перекрытия объектов одного класса сливаются, а не гасятся.
 // Разбиение на трапеции полосами между соседними y вершин; трапеции между
 // одной и той же парой рёбер склеиваются по высоте. Возвращает {empty} |
-// {full} | {inside: [[p,p,p]…], outside: [[p,p,p]…]} с целыми координатами.
-function regionTris(rings, X, Y) {
+// {full} | {inside: [кусок…], outside: [кусок…]}, кусок — связные треугольники
+// с целыми координатами.
+function regionParts(rings, X, Y) {
   const near = rings.filter(r => r.bbox[0] <= X && r.bbox[2] >= 0 && r.bbox[1] <= Y && r.bbox[3] >= 0);
   if (!near.length) return { empty: true };
   const polys = near.map(r => clipRing(r.pts, X, Y).map(([x, y]) => [Math.round(x), Math.round(y)])).filter(p => p.length >= 3);
@@ -281,14 +394,120 @@ function regionTris(rings, X, Y) {
   }
   for (const t of open.values()) done.push(t);
   const inside = [], outside = [];
-  for (const t of done) {
-    const a = [xAt(t.l, t.y0), t.y0], b = [xAt(t.r, t.y0), t.y0], c = [xAt(t.r, t.y1), t.y1], d = [xAt(t.l, t.y1), t.y1];
-    const dst = t.in ? inside : outside;
-    for (const tri of [[a, b, c], [a, c, d]]) if (area2(tri) !== 0) dst.push(tri);
-  }
+  for (const col of columns(done, xAt)) (col.in ? inside : outside).push(...col.tris);
   if (!inside.length) return { empty: true };
   if (!outside.length) return { full: true };
-  return { inside, outside };
+  return { inside: pieces(inside), outside: pieces(outside) };
+}
+
+// То же, но треугольники одним списком (для проверок площади)
+function regionTris(rings, X, Y) {
+  const r = regionParts(rings, X, Y);
+  return r.inside ? { inside: r.inside.flat(), outside: r.outside.flat() } : r;
+}
+
+// Трапеции → столбцы: верх трапеции совпадает с низом следующей — это одна
+// y-монотонная область. Точки на ребре между вершинами («лишние», от чужих
+// вершин на той же высоте) выбрасываются, если ни один столбец не начинается и
+// не кончается в них — так соседние столбцы делят ребро с одними и теми же
+// точками, и суша с морем закрывают тайл без щелей. Столбец режется на
+// треугольники без новых точек (monoTris); не сошлась площадь — на трапеции.
+function columns(traps, xAt) {
+  for (const t of traps) {
+    t.bl = [xAt(t.l, t.y0), t.y0]; t.br = [xAt(t.r, t.y0), t.y0];
+    t.tl = [xAt(t.l, t.y1), t.y1]; t.tr = [xAt(t.r, t.y1), t.y1];
+  }
+  const spanKey = (inn, a, b) => (inn ? 'I' : 'O') + a[1] + ':' + a[0] + ':' + b[0];
+  const bottoms = new Map(), tops = new Map();
+  const add = (m, k, t) => m.set(k, m.has(k) ? null : t);
+  for (const t of traps) {
+    if (t.bl[0] !== t.br[0]) add(bottoms, spanKey(t.in, t.bl, t.br), t);
+    if (t.tl[0] !== t.tr[0]) add(tops, spanKey(t.in, t.tl, t.tr), t);
+  }
+  const next = new Map(), hasPrev = new Set();
+  for (const [k, t] of tops) {
+    const u = t && bottoms.get(k);
+    if (u) { next.set(t, u); hasPrev.add(u); }
+  }
+  const cols = [];
+  for (const t of traps) {
+    if (hasPrev.has(t)) continue;
+    const c = [t];
+    while (next.has(c[c.length - 1])) c.push(next.get(c[c.length - 1]));
+    cols.push(c);
+  }
+  const corner = new Set();
+  for (const c of cols) for (const p of [c[0].bl, c[0].br, c[c.length - 1].tl, c[c.length - 1].tr]) corner.add(ptId(p));
+  const chain = (c, side) => {
+    const out = [c[0][side === 'l' ? 'bl' : 'br']];
+    c.forEach((t, i) => {
+      const p = t[side === 'l' ? 'tl' : 'tr'];
+      if (i + 1 < c.length && edgeKey(t[side]) === edgeKey(c[i + 1][side]) && !corner.has(ptId(p))) return;
+      const q = out[out.length - 1];
+      if (q[0] !== p[0] || q[1] !== p[1]) out.push(p);
+    });
+    return out;
+  };
+  return cols.map(c => {
+    let tris = monoTris(chain(c, 'l'), chain(c, 'r'));
+    if (!tris) {
+      tris = [];
+      for (const t of c) for (const tri of [[t.bl, t.br, t.tr], [t.bl, t.tr, t.tl]]) if (area2(tri) !== 0) tris.push(tri);
+    }
+    return { in: c[0].in, tris };
+  });
+}
+
+// y-монотонный многоугольник (левая и правая цепи снизу вверх) → треугольники
+// на его же вершинах (монотонная триангуляция со стеком, порядок — по y, затем
+// по x). Возвращает null, если площадь не сошлась с многоугольником.
+function monoTris(left, right) {
+  const same = (a, b) => a[0] === b[0] && a[1] === b[1];
+  const u0 = left[0], uN = right[right.length - 1];
+  const A = right.slice(same(right[0], u0) ? 1 : 0, -1).map(p => ({ p, c: 'A' }));
+  const B = left.slice(1, same(left[left.length - 1], uN) ? -1 : undefined).map(p => ({ p, c: 'B' }));
+  const ring = [u0, ...A.map(q => q.p), uN, ...B.map(q => q.p).reverse()];
+  if (ring.length < 3) return [];
+  const u = [{ p: u0, c: 'S' }, ...A.concat(B).sort((a, b) => a.p[1] - b.p[1] || a.p[0] - b.p[0]), { p: uN, c: 'S' }];
+  for (let i = 1; i < u.length; i++) if (same(u[i].p, u[i - 1].p)) return null;
+  const tris = [];
+  const emit = (a, b, c) => { if (area2([a, b, c]) !== 0) tris.push([a, b, c]); };
+  const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const st = [u[0], u[1]];
+  for (let j = 2; j < u.length - 1; j++) {
+    const v = u[j];
+    if (v.c !== st[st.length - 1].c) {
+      while (st.length > 1) { const w = st.pop(); emit(v.p, w.p, st[st.length - 1].p); }
+      st.pop();
+      st.push(u[j - 1], v);
+    } else {
+      let last = st.pop();
+      while (st.length) {
+        const top = st[st.length - 1], x = cross(top.p, last.p, v.p);
+        if (v.c === 'A' ? x <= 0 : x >= 0) break;
+        emit(v.p, last.p, top.p);
+        last = st.pop();
+      }
+      st.push(last, v);
+    }
+  }
+  const v = u[u.length - 1];
+  while (st.length > 1) { const w = st.pop(); emit(v.p, w.p, st[st.length - 1].p); }
+  const want = Math.abs(ring.reduce((s, p, i) => { const q = ring[(i + 1) % ring.length]; return s + p[0] * q[1] - q[0] * p[1]; }, 0));
+  const got = tris.reduce((s, t) => s + Math.abs(area2(t)), 0);
+  return got === want ? tris : null;
+}
+
+// Треугольники → связные куски (общая вершина): у завода элемент — связный
+// кусок (Крит L0: 100 % элементов, L1: 99 %)
+function pieces(tris) {
+  const par = new Map();
+  const find = k => { while (par.get(k) !== k) { par.set(k, par.get(par.get(k))); k = par.get(k); } return k; };
+  for (const t of tris) for (const p of t) if (!par.has(ptId(p))) par.set(ptId(p), ptId(p));
+  for (const t of tris) { const r = find(ptId(t[0])); par.set(find(ptId(t[1])), r); par.set(find(ptId(t[2])), find(r)); }
+  const by = new Map();
+  for (const t of tris) { const r = find(ptId(t[0])); if (!by.has(r)) by.set(r, []); by.get(r).push(t); }
+  return [...by.values()];
 }
 
 function windingAt(rings, x, y) {
@@ -305,18 +524,21 @@ function windingAt(rings, x, y) {
 
 // Суша и море тайла: {empty} | {full} | {land, sea}
 function landArea(rings, X, Y) {
-  const r = regionTris(rings, X, Y);
+  const r = regionParts(rings, X, Y);
   return r.inside ? { land: r.inside, sea: r.outside } : r;
 }
 const edgeKey = e => (typeof e === 'string' ? e : e[0].join(',') + '>' + e[1].join(','));
 const area2 = ([a, b, c]) => (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]);
 
 // Дуглас — Пекер для ломаной: концы остаются (допуск в тех же единицах)
-function simplifyLine(pts, tol) {
+// fixed(p) — точка остаётся всегда (развилка, через которую склеена линия).
+function simplifyLine(pts, tol, fixed) {
   if (pts.length < 3 || tol <= 0) return pts;
   const keep = new Uint8Array(pts.length);
   keep[0] = keep[pts.length - 1] = 1;
-  const stack = [[0, pts.length - 1]];
+  const stack = [];
+  let from = 0;
+  for (let i = 1; i < pts.length; i++) if (i === pts.length - 1 || (fixed && fixed(pts[i]))) { keep[i] = 1; stack.push([from, i]); from = i; }
   while (stack.length) {
     const [i0, i1] = stack.pop();
     const [ax, ay] = pts[i0], [bx, by] = pts[i1];
@@ -376,14 +598,20 @@ function ringArea(p) {
 //   0x56 аэродромы — L0…L4; 0x57 перроны — L0…L3; 0x50 вода — все уровни.
 // Порядок в тайле: суша/море, ступени, лес, парки, застройка, промзоны,
 // аэродромы, перроны, вода (у завода вода идёт последней, ступени — сразу за сушей).
+// min — наименьшая площадь объекта (км²) по уровням L0…L4: у завода мелочь
+// выше L0 отсеяна — 10-й процентиль площади элемента (Греция и Балканы,
+// 19–27° в. д., 36–42° с. ш.): застройка L1 0,10, L2 0,39, L3 0,67, L4 0,79;
+// лес 0,03 / 0,05 / 0,06 / 0,07; парки 0,08 / 0,37 / 1,96 / 0,15; вода
+// 0,008 / 0,005 / 0,01 / 0,03 (docs/formats/gdb.md, «Мелкие площади выше L0»)
+const GREEN_MIN = [0, 0.03, 0.05, 0.06, 0.07];
 const OVERLAY = [
-  { cls: 'forest', attr: 0x51, maxLevel: 4, e9: () => 20 },
-  { cls: 'park', attr: 0x52, maxLevel: 4, e9: () => 16 },
-  { cls: 'built', attr: 0x53, maxLevel: 4, e9: a => (a >= 5 ? 22 : a >= 1 ? 18 : 13) },
-  { cls: 'industrial', attr: 0x54, maxLevel: 4, e9: () => 19 },
-  { cls: 'airport', attr: 0x56, maxLevel: 4, e9: () => 20 },
-  { cls: 'apron', attr: 0x57, maxLevel: 3, e9: () => 18 },
-  { cls: 'water', attr: 0x50, maxLevel: 11, e9: a => (a >= 5 ? 34 : a >= 0.5 ? 25 : 18) },
+  { cls: 'forest', attr: 0x51, maxLevel: 4, e9: () => 20, min: GREEN_MIN },
+  { cls: 'park', attr: 0x52, maxLevel: 4, e9: () => 16, min: [0, 0.08, 0.37, 1.96, 0.15] },
+  { cls: 'built', attr: 0x53, maxLevel: 4, e9: a => (a >= 5 ? 22 : a >= 1 ? 18 : 13), min: [0, 0.1, 0.39, 0.67, 0.79] },
+  { cls: 'industrial', attr: 0x54, maxLevel: 4, e9: () => 19, min: GREEN_MIN },
+  { cls: 'airport', attr: 0x56, maxLevel: 4, e9: () => 20, min: GREEN_MIN },
+  { cls: 'apron', attr: 0x57, maxLevel: 3, e9: () => 18, min: GREEN_MIN },
+  { cls: 'water', attr: 0x50, maxLevel: 11, e9: a => (a >= 5 ? 34 : a >= 0.5 ? 25 : 18), min: [0, 0.008, 0.008, 0.01, 0.03] },
 ];
 
 // Объект мельче ~4×4 единиц уровня (выше L0 — 8×8) на уровень не идёт
@@ -409,17 +637,24 @@ function layersForLevel(opts, lv, L) {
       if (rings.length) out.push({ attr: (0x60 | (b.h << 8)) >>> 0, e9: 0xff, rings });
     }
   }
+  // площади — слиянием объектов класса (по обмотке): элемент — связный кусок
+  // слияния в тайле, как у завода (docs/formats/gdb.md, «Площади: элемент —
+  // связный кусок»)
   const lim = minKm2(L);
   for (const o of OVERLAY) {
     if (lv > o.maxLevel) continue;
     const groups = new Map();
     for (const f of (opts.areas || [])) {
-      if (f.cls !== o.cls || f.km2 < lim) continue;
+      if (f.cls !== o.cls || f.km2 < Math.max(lim, o.min[Math.min(lv, 4)])) continue;
       const e9 = o.e9(f.km2);
       if (!groups.has(e9)) groups.set(e9, []);
       groups.get(e9).push(...landForLevel(f.rings, L, { tol: layerTol(L) }));
     }
     for (const [e9, rings] of [...groups].sort((a, b) => a[0] - b[0])) if (rings.length) out.push({ attr: o.attr, e9, rings });
+  }
+  for (const ly of out) {
+    ly.bbox = [Math.min(...ly.rings.map(r => r.bbox[0])), Math.min(...ly.rings.map(r => r.bbox[1])),
+               Math.max(...ly.rings.map(r => r.bbox[2])), Math.max(...ly.rings.map(r => r.bbox[3]))];
   }
   return out;
 }
@@ -594,7 +829,8 @@ function refTable(levels) {
 // на L1). Тогда вектор идёт по первой линии до общей точки и по второй от неё —
 // как два элемента в поиске по координатам у завода (FUN_08cb6578).
 const JOIN_REACH = 64;                           // на сколько точек искать общую
-function refsForLevel(st, vectors) {
+// skip(v, refs) — вектор не записывать (на L0 его найдёт поиск по координатам).
+function refsForLevel(st, vectors, skip) {
   const bySrc = new Map();
   for (const p of st.pieces) {
     if (!bySrc.has(p.src)) bySrc.set(p.src, []);
@@ -645,7 +881,7 @@ function refsForLevel(st, vectors) {
       }
       if (join) refs = cover(join.a, join.ia, join.ja).concat(cover(join.z, join.jz, join.iz));
     }
-    if (!refs || !refs.length) continue;
+    if (!refs || !refs.length || (skip && skip(v, refs))) continue;
     if (!out.has(v.block)) out.set(v.block, []);
     out.get(v.block).push({ key: v.rec * 2, refs });
   }
@@ -653,13 +889,46 @@ function refsForLevel(st, vectors) {
   return out;
 }
 
-// Таблицы всех блоков: уровни из stats (номер -> итог roadsToLevel). Таблица
-// длиннее заводского максимума (65 000 б) теряет L0 — там линию находит поиск
-// по координатам, как у завода у большинства векторов L0.
+// Найдёт ли вектор без записи поиск по координатам на L0 — как у завода.
+// Без записи на L0 перевод даёт «сырую» ссылку (FUN_08caddf4(…, 1), флаг 4),
+// и при отрисовке CGdbRouteMatcher (FUN_08cb9cb8) зовёт поиск FUN_08cb6578:
+// тайл у каждого конца, в нём линии, у которых ОБА конца вектора — точки
+// линии (точное равенство), число совпадений > 1 — отдельный код. Запись не
+// нужна, только когда этот поиск однозначно найдёт ту же линию: оба конца
+// строго внутри одного тайла (на границе тайл выбирает прошивка), ровно одна
+// линия тайла несёт обе точки, и каждую ровно один раз (у кольца начало = конец).
+// У завода записи L0 у ~5 % векторов (docs/formats/gdb.md, «Сверка 23.10»).
+function coordSearchFinds(st) {
+  const byTile = new Map();
+  for (const p of st.pieces) {
+    if (!byTile.has(p.tile)) byTile.set(p.tile, { rect: p.rect, lines: [] });
+    const cnt = new Map();
+    for (const k of p.ts) { const w = st.keys[p.src][k]; if (w) cnt.set(w, (cnt.get(w) || 0) + 1); }
+    byTile.get(p.tile).lines.push({ el: p.el, cnt });
+  }
+  return (v, refs) => {
+    const t = refs.length === 1 && byTile.get(refs[0].tile);
+    if (!t) return false;
+    const [x0, y0, x1, y1] = t.rect;
+    const inside = q => q.x > x0 && q.x < x1 && q.y > y0 && q.y < y1;
+    if (!inside(v.a) || !inside(v.z)) return false;
+    const a = v.a.x + ',' + v.a.y, z = v.z.x + ',' + v.z.y;
+    const hits = t.lines.filter(l => l.cnt.has(a) && l.cnt.has(z));
+    return hits.length === 1 && hits[0].el === refs[0].el && hits[0].cnt.get(a) === 1 && hits[0].cnt.get(z) === 1;
+  };
+}
+
+// Таблицы всех блоков: уровни из stats (номер -> итог roadsToLevel). На L0
+// записи только там, где поиск по координатам не справится (coordSearchFinds).
+// Таблица длиннее заводского максимума (65 000 б) теряет L0 целиком.
 const REF_TABLE_MAX = 65000;
 function refTables(stats, vectors, blocks) {
   const per = new Map();                           // уровень -> Map блок -> записи
-  for (const [L, st] of stats) per.set(L, refsForLevel(st, vectors));
+  let byCoord = 0;
+  for (const [L, st] of stats) {
+    const finds = L === 0 ? coordSearchFinds(st) : null;
+    per.set(L, refsForLevel(st, vectors, finds && ((v, refs) => finds(v, refs) && ++byCoord)));
+  }
   const tables = [];
   let refs = 0, noL0 = 0;
   for (let b = 0; b < blocks; b++) {
@@ -671,7 +940,7 @@ function refTables(stats, vectors, blocks) {
     tables[b] = t;
   }
   for (const m of per.values()) for (const l of m.values()) refs += l.length;
-  return { tables, refs, noL0, max: Math.max(0, ...tables.map(t => t.length)),
+  return { tables, refs, noL0, byCoord, max: Math.max(0, ...tables.map(t => t.length)),
            total: tables.reduce((a, t) => a + t.length, 0) };
 }
 
@@ -737,6 +1006,21 @@ function build(spec) {
       // Тайлы кластера — сплошная сетка 2^(potX−lw) × 2^(potY−lh) в порядке
       // Мортона; клетки, для которых тайла не дали, ссылаются на общий пустой
       // тайл — ровно так устроены «морские» кластеры оригинала.
+      // листья kd-дерева (roadsToLevel): начало в ячейках от угла кластера,
+      // размер у каждого свой, порядок — Мортон начала
+      if (c.leaves) {
+        const recs = c.leaves.slice().sort((a, b) => mortonIndex(a.ix, a.iy) - mortonIndex(b.ix, b.iy)).map(t => {
+          const x = p.key0.x0 + (c.cx << p.L.potX) + t.ix, y = p.key0.y0 + (c.cy << p.L.potY) + t.iy;
+          if (t.t) return { x, y, lw: t.lw, lh: t.lh, attr: t.t.attr, b10: t.t.b10, off: put(t.t.blob), size: t.t.blob.length };
+          const em = emptyFor(p.L, t.lw, t.lh);
+          return { x, y, lw: t.lw, lh: t.lh, attr: em.attr, b10: em.b10, off: em.off, size: em.size };
+        });
+        const blob = clusterBlob(recs);
+        const off = put(blob);
+        entries[slot] = { off, sz: blob.length };
+        placed.push({ cx: c.cx, cy: c.cy, slot, off, size: blob.length, tiles: recs });
+        continue;
+      }
       const lw = c.lw === undefined ? 5 : c.lw, lh = c.lh === undefined ? 5 : c.lh;
       const byIdx = new Map();
       for (const t of c.tiles) byIdx.set(mortonIndex(t.ix, t.iy), t);
@@ -817,7 +1101,12 @@ function build(spec) {
   head.writeUInt32BE(refs.count, 577);
   head.writeUInt32BE(refs.offset, 581);
   head.writeUInt32BE(refs.size, 585);
-  head.writeUInt32BE(regionEnd, 589);  // начало данных
+  // +589 смещение, +593 размер, +597, +601 число записей каталога блобов
+  // (FUN_08cb20f0 → read_blob_table FUN_08cb1fd8, зовётся только при числе > 0).
+  // В хвосте завода они указывают на его блобы (растр 9000 и 9200), у нас по
+  // этому смещению лежали бы наши тайлы. Нули — «GDB has no blobs at all»,
+  // успешный выход открытия базы (docs/formats/gdb.md, «Каталог блобов…»).
+  head.fill(0, 589, 605);
 
   // 4. уровни
   const levelBufs = plan.map(p => {
@@ -1006,30 +1295,50 @@ function mergeLines(lines, lv) {
     return { pts: (raw ? ln : ln.pts) || [], c, labels,
              key: c.cls + '|' + c.e9 + '|' + labels.map(l => l.hi + ':' + l.text).join(';') };
   });
-  const at = new Map();                        // группа + точка -> номера линий с концом в ней
-  const end = (it, p) => it.key + '@' + p[0] + ',' + p[1];
+  const at = new Map();                        // группа + точка -> концы [линия, 0 | 1]
   items.forEach((it, i) => {
     if (it.pts.length < 2) return;
-    for (const p of [it.pts[0], it.pts[it.pts.length - 1]]) {
-      const k = end(it, p);
+    [it.pts[0], it.pts[it.pts.length - 1]].forEach((p, e) => {
+      const k = it.key + '@' + p[0] + ',' + p[1];
       if (!at.has(k)) at.set(k, []);
-      at.get(k).push(i);
-    }
+      at.get(k).push([i, e]);
+    });
   });
-  const used = new Uint8Array(items.length);
-  const other = (i, p) => {                    // второй, ещё не взятый конец в точке p
-    const l = at.get(end(items[i], p));
-    if (!l || l.length !== 2 || l[0] === l[1]) return -1;
-    const j = l.find(x => !used[x]);
-    return j === undefined ? -1 : j;
+  // пары концов в узле: два конца — склеиваются всегда; развилка (три и больше)
+  // выше L0 — по самым прямым продолжениям (поворот меньше 60°). У завода линии
+  // идут сквозь перекрёстки: Крит L1, класс 3 — 20 точек на линию, у нас без
+  // этого было 7 (docs/formats/gdb.md, «Линии: классы по уровням и склейка»)
+  const pair = new Map();
+  const link = (u, v) => { pair.set(u.join(':'), v); pair.set(v.join(':'), u); };
+  const dir = ([i, e]) => {
+    const q = items[i].pts, a = q[e ? q.length - 1 : 0], b = q[e ? q.length - 2 : 1];
+    const dx = (b[0] - a[0]) * 0.82, dy = b[1] - a[1], d = Math.hypot(dx, dy) || 1;
+    return [dx / d, dy / d];
   };
-  // нарастить линию с конца, пока в нём ровно один сосед своей группы
-  const grow = (i, pts) => {
-    for (let j; (j = other(i, pts[pts.length - 1])) >= 0;) {
-      used[j] = 1;
-      const q = items[j].pts, last = pts[pts.length - 1];
-      const fwd = q[0][0] === last[0] && q[0][1] === last[1];
-      pts = pts.concat((fwd ? q : q.slice().reverse()).slice(1));
+  for (const l of at.values()) {
+    if (l.length === 2) { if (l[0][0] !== l[1][0]) link(l[0], l[1]); continue; }
+    if (lv < 1 || l.length < 3) continue;
+    const ds = l.map(dir), cand = [];
+    for (let u = 0; u < l.length; u++) {
+      for (let v = u + 1; v < l.length; v++) {
+        const cos = ds[u][0] * ds[v][0] + ds[u][1] * ds[v][1];
+        if (l[u][0] !== l[v][0] && cos < -0.5) cand.push([cos, u, v]);
+      }
+    }
+    const taken = new Set();
+    for (const [, u, v] of cand.sort((x, y) => x[0] - y[0])) {
+      if (taken.has(u) || taken.has(v)) continue;
+      taken.add(u); taken.add(v); link(l[u], l[v]);
+    }
+  }
+  const used = new Uint8Array(items.length);
+  // нарастить линию с дальнего конца (линия i, конец e), пока у него есть пара
+  const grow = (i, e, pts) => {
+    for (let q; (q = pair.get(i + ':' + e)) && !used[q[0]];) {
+      used[q[0]] = 1;
+      const add = items[q[0]].pts;
+      pts = pts.concat((q[1] === 0 ? add : add.slice().reverse()).slice(1));
+      i = q[0]; e = 1 - q[1];
     }
     return pts;
   };
@@ -1037,11 +1346,23 @@ function mergeLines(lines, lv) {
   items.forEach((it, i) => {
     if (used[i]) return;
     used[i] = 1;
-    const pts = it.pts.length < 2 ? it.pts : grow(i, grow(i, it.pts.slice()).reverse()).reverse();
+    const pts = it.pts.length < 2 ? it.pts : grow(i, 0, grow(i, 1, it.pts.slice()).reverse()).reverse();
     out.push({ pts, c: it.c, labels: it.labels });
   });
   return out;
 }
+
+// Заводские рамки тайла по уровням (сверка 23.10, вся Европа): тайл L0 —
+// 99 % не больше 28 820 б (максимум 59 816), L1–L3 — 99 % до 33 756 б (макс.
+// 38 513), L4+ — до 42 523 б (макс. 51 238). Подбор берёт самый крупный тайл,
+// который влезает в рамку, — поэтому рамка и задаёт размер тайла.
+const LEVEL_BUDGET = [32768, 36000, 36000, 36000, 42000, 42000, 42000, 42000, 42000, 42000, 42000, 42000];
+// log2 заводского максимума тайлов на кластер: 1 145, 115, 315, 111, 29, 66,
+// 58, 17, 16, 12, 11, 4 (см. «Тайлов на кластер»)
+const LEVEL_BITS = [10, 6, 8, 6, 4, 6, 5, 4, 4, 3, 3, 2];
+// Заводской максимум элементов в тайле по уровням: каждый элемент — место в
+// куче NDL (5 МиБ, docs/firmware.md), тайл сверх него делится, как по байтам
+const LEVEL_ELS = [3723, 927, 1143, 1445, 1341, 1010, 1007, 1045, 1347, 1063, 1554, 952];
 
 function roadsToLevel(lines, opts = {}) {
   const lvNr = opts.level || 0;
@@ -1057,6 +1378,7 @@ function roadsToLevel(lines, opts = {}) {
   const vertex = new Map(), pieces = [], keys = [];
   const merged = mergeLines(lines, lvNr);
   merged.forEach((ln, mi) => {
+    ln.keep = new Set();
     if (ln.pts.length < 2) { skipped++; return; }
     keys[mi] = ln.pts.map(([lon, lat], k) => {
       const w = Math.round(lon * gm.UNITS_PER_LON) + ',' + Math.round(lat * gm.UNITS_PER_LAT);
@@ -1075,9 +1397,16 @@ function roadsToLevel(lines, opts = {}) {
     for (const run of splitGrid(cells, CW, CH)) {
       const k = run.gx + ',' + run.gy;
       if (!perCluster.has(k)) perCluster.set(k, { cx: run.gx, cy: run.gy, pieces: [] });
-      perCluster.get(k).pieces.push({ cells: run.pts, cls: ln.c.cls, e9: ln.c.e9, labels: ln.labels, src: mi });
+      perCluster.get(k).pieces.push({ cells: run.pts, cls: ln.c.cls, e9: ln.c.e9, labels: ln.labels, src: mi, keep: ln.keep });
     }
   });
+  // точки, общие с другой линией (стыки, развилки), упрощение выше L0 не
+  // трогает: через них таблицы ссылок стыкуют вектор с соседней линией
+  // (refsForLevel, JOIN), а склейка через развилки делает их внутренними
+  for (const l of vertex.values()) {
+    if (l.length < 4 || l.every((m, i) => i % 2 || m === l[0])) continue;
+    for (let i = 0; i < l.length; i += 2) merged[l[i]].keep.add(l[i + 1]);
+  }
 
   // 1б. суша: кольца уровня и кластеры, которых они касаются (в том числе
   //     без единой дороги — суша нужна и там)
@@ -1098,7 +1427,7 @@ function roadsToLevel(lines, opts = {}) {
   // 2. на каждый кластер — самый крупный размер тайла, при котором блобы влезают
   const clusters = [];
   let dropped = 0;
-  const budget = opts.maxBlob || MAX_BLOB;
+  const budget = opts.maxBlob || LEVEL_BUDGET[lvNr];
   for (const c of perCluster.values()) {
     let chosen = null;
     // кольца, заранее отсечённые прямоугольником кластера (с запасом)
@@ -1112,128 +1441,148 @@ function roadsToLevel(lines, opts = {}) {
         return { pts, bbox: [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)], whole: r };
       }).filter(Boolean);
     const cland = cut(land);
-    const clayers = layers.map(ly => Object.assign({}, ly, { rings: cut(ly.rings) })).filter(ly => ly.rings.length);
-    // если ни один размер не влез в заводские рамки — вторая попытка до
-    // пределов формата, третья без подписей (лучше дороги без имён, чем без дорог)
-    for (let attempt = 0; attempt < 3 && !chosen; attempt++) {
-      const cap = attempt === 0 ? budget : MAX_BLOB;
-      if (attempt === 2) { for (const pc of c.pieces) pc.labels = []; unlabeled++; }
-      for (const [lw, lh] of tileSizes(L)) {
-        // размер кластера в таблице уровня — u16: не больше 3449 записей по 19 байт;
-        // в первой попытке 1024 (19 456 б) — у завода индекс не больше 22 809 б
-        if ((L.potX - lw) + (L.potY - lh) > (attempt === 0 ? 10 : 11)) break;
-        const f = tileFormat(L, lw, lh);
-        const step = [1 << lw, 1 << lh];
-        const byTile = new Map();
-        let out = 0;
-        for (const pc of c.pieces) {
-          for (const run of splitGrid(pc.cells, step[0], step[1])) {
-            const tx = run.gx * step[0], ty = run.gy * step[1];
-            const raw = [];
-            for (const [x, y, t] of run.pts) {
-              const q = [Math.min(f.X, Math.max(0, Math.round((x - tx) * L.cellX / u))),
-                         Math.min(f.Y, Math.max(0, Math.round((y - ty) * L.cellY / u))), t];
-              const last = raw[raw.length - 1];
-              if (!last || last[0] !== q[0] || last[1] !== q[1]) raw.push(q);
-            }
-            // на грубых уровнях единица крупная: кусок может схлопнуться в точку
-            if (raw.length < 2) { out++; continue; }
-            // выше L0 линии упрощаются, как площади: у завода детальность
-            // уровня — его единица, точки OSM как есть раздувают тайлы L1–L4
-            const line = lvNr > 0 ? simplifyLine(raw, LINE_TOL) : raw;
-            if (line.length === 2 && line[0][0] === line[1][0] && line[0][1] === line[1][1]) { out++; continue; }
-            for (let s = 0; s < line.length - 1; s += 0xfffe) {
-              const k = tx + ',' + ty;
-              if (!byTile.has(k)) byTile.set(k, { tx, ty, roads: [] });
-              const part = line.slice(s, s + 0xffff);
-              byTile.get(k).roads.push({ pts: part.map(q => [q[0], q[1]]), ts: part.map(q => q[2]),
-                                         src: pc.src, cls: pc.cls, e9: pc.e9, labels: pc.labels });
-            }
+    const clayers = layers.filter(ly => ly.bbox[0] <= cx0 + CWr && ly.bbox[2] >= cx0 && ly.bbox[1] <= cy0 + CHr && ly.bbox[3] >= cy0)
+      .map(ly => Object.assign({}, ly, { rings: cut(ly.rings) })).filter(ly => ly.rings.length);
+    // куски линий по сетке тайлов размера lw×lh (кэш на размер)
+    let runsCache = new Map(), tileCache = new Map();
+    const runsFor = (lw, lh) => {
+      const ck = lw + 'x' + lh;
+      if (runsCache.has(ck)) return runsCache.get(ck);
+      const f = tileFormat(L, lw, lh), step = [1 << lw, 1 << lh];
+      const byTile = new Map(), out = new Map();
+      const bump = k => out.set(k, (out.get(k) || 0) + 1);
+      for (const pc of c.pieces) {
+        for (const run of splitGrid(pc.cells, step[0], step[1])) {
+          const tx = run.gx * step[0], ty = run.gy * step[1], k = tx + ',' + ty;
+          const raw = [];
+          for (const [x, y, t] of run.pts) {
+            const q = [Math.min(f.X, Math.max(0, Math.round((x - tx) * L.cellX / u))),
+                       Math.min(f.Y, Math.max(0, Math.round((y - ty) * L.cellY / u))), t];
+            const last = raw[raw.length - 1];
+            if (!last || last[0] !== q[0] || last[1] !== q[1]) raw.push(q);
+          }
+          // на грубых уровнях единица крупная: кусок может схлопнуться в точку
+          if (raw.length < 2) { bump(k); continue; }
+          // выше L0 линии упрощаются, как площади: у завода детальность
+          // уровня — его единица, точки OSM как есть раздувают тайлы L1–L4
+          const line = lvNr > 0 ? simplifyLine(raw, LINE_TOL, q => pc.keep && pc.keep.has(q[2])) : raw;
+          if (line.length === 2 && line[0][0] === line[1][0] && line[0][1] === line[1][1]) { bump(k); continue; }
+          for (let s = 0; s < line.length - 1; s += 0xfffe) {
+            if (!byTile.has(k)) byTile.set(k, []);
+            const part = line.slice(s, s + 0xffff);
+            byTile.get(k).push({ pts: part.map(q => [q[0], q[1]]), ts: part.map(q => q[2]),
+                                 src: pc.src, cls: pc.cls, e9: pc.e9, labels: pc.labels });
           }
         }
-        // суша: каждый тайл кластера, которого касаются кольца или который
-        // целиком внутри суши
-        const areas = new Map();
-        if (cland.length) {
-          for (let ix = 0; ix < (1 << (L.potX - lw)); ix++) {
-            for (let iy = 0; iy < (1 << (L.potY - lh)); iy++) {
-              const tx = c.cx * CW + (ix << lw), ty = c.cy * CH + (iy << lh);
-              const tx0 = tx * L.cellX / u, ty0 = ty * L.cellY / u;
-              const near = cland.filter(r => r.bbox[0] <= tx0 + f.X && r.bbox[2] >= tx0 && r.bbox[1] <= ty0 + f.Y && r.bbox[3] >= ty0);
-              let a;
-              if (near.length) a = landArea(shiftRings(near, tx0, ty0), f.X, f.Y);
-              else a = windingAt(cland.map(r => r.whole), tx0 + f.X / 2, ty0 + f.Y / 2) ? { full: true } : { empty: true };
-              if (a.empty) continue;
-              // слои поверх суши: ступени рельефа, лес, застройка, вода …
-              a.layers = [];
-              for (const ly of clayers) {
-                const nearL = ly.rings.filter(r => r.bbox[0] <= tx0 + f.X && r.bbox[2] >= tx0 && r.bbox[1] <= ty0 + f.Y && r.bbox[3] >= ty0);
-                let q;
-                if (nearL.length) q = regionTris(shiftRings(nearL, tx0, ty0), f.X, f.Y);
-                else q = windingAt(ly.rings.map(r => r.whole), tx0 + f.X / 2, ty0 + f.Y / 2) ? { full: true } : { empty: true };
-                if (q.empty) continue;
-                a.layers.push({ attr: ly.attr, e9: ly.e9, tris: q.full ? rectTris(f.X, f.Y) : q.inside });
-              }
-              const k = tx + ',' + ty;
-              areas.set(k, a);
-              if (!byTile.has(k)) byTile.set(k, { tx, ty, roads: [] });
-            }
-          }
-        }
-        let fits = true;
-        const tiles = [];
-        for (const t of byTile.values()) {
-          let blob;
-          const area = areas.get(t.tx + ',' + t.ty) || null;
-          try { blob = tileBlob(t.roads, f, area); } catch (e) { fits = false; break; }
-          if (blob.length > cap) { fits = false; break; }
-          tiles.push({
-            roads: t.roads, tx: t.tx, ty: t.ty,
-            ix: (t.tx - c.cx * CW) >> lw, iy: (t.ty - c.cy * CH) >> lh,
-            lw, lh, blob, attr: f.W, b10: f.simple ? 1 : 0, lines: t.roads.length, land: area ? (area.full ? 'full' : 'coast') : null,
-          });
-        }
-        if (fits) { chosen = { lw, lh, tiles, out }; break; }
       }
+      const r = { byTile, out };
+      runsCache.set(ck, r);
+      return r;
+    };
+    // суша и слои тайла: кольца задевают тайл или он целиком внутри суши
+    const areaOf = (tx, ty, f) => {
+      if (!cland.length) return null;
+      const tx0 = tx * L.cellX / u, ty0 = ty * L.cellY / u;
+      const near = cland.filter(r => r.bbox[0] <= tx0 + f.X && r.bbox[2] >= tx0 && r.bbox[1] <= ty0 + f.Y && r.bbox[3] >= ty0);
+      let a;
+      if (near.length) a = landArea(shiftRings(near, tx0, ty0), f.X, f.Y);
+      else a = windingAt(cland.map(r => r.whole), tx0 + f.X / 2, ty0 + f.Y / 2) ? { full: true } : { empty: true };
+      if (a.empty) return null;
+      // слои поверх суши: ступени рельефа, лес, застройка, вода …
+      a.layers = [];
+      for (const ly of clayers) {
+        if (ly.bbox[0] > tx0 + f.X || ly.bbox[2] < tx0 || ly.bbox[1] > ty0 + f.Y || ly.bbox[3] < ty0) continue;
+        const nearL = ly.rings.filter(r => r.bbox[0] <= tx0 + f.X && r.bbox[2] >= tx0 && r.bbox[1] <= ty0 + f.Y && r.bbox[3] >= ty0);
+        let q;
+        if (nearL.length) q = regionParts(shiftRings(nearL, tx0, ty0), f.X, f.Y);
+        else q = windingAt(ly.rings.map(r => r.whole), tx0 + f.X / 2, ty0 + f.Y / 2) ? { full: true } : { empty: true };
+        if (q.empty) continue;
+        a.layers.push({ attr: ly.attr, e9: ly.e9, parts: q.full ? [rectTris(f.X, f.Y)] : q.inside });
+      }
+      return a;
+    };
+    // тайл (tx, ty — в ячейках уровня) или null, если в нём ничего нет
+    const makeTile = (tx, ty, lw, lh) => {
+      const tk = lw + 'x' + lh + '@' + tx + ',' + ty;
+      if (tileCache.has(tk)) return tileCache.get(tk);
+      const f = tileFormat(L, lw, lh), R = runsFor(lw, lh), k = tx + ',' + ty;
+      const roads = R.byTile.get(k) || [], area = areaOf(tx, ty, f);
+      let t = null;
+      if (roads.length || area) {
+        let blob = null;
+        try { blob = tileBlob(roads, f, area); } catch (e) { blob = null; }
+        t = { roads, tx, ty, lw, lh, blob, attr: f.W, b10: f.simple ? 1 : 0, lines: roads.length,
+              land: area ? (area.full ? 'full' : 'coast') : null };
+      }
+      tileCache.set(tk, t);
+      return t;
+    };
+    // Деление — как у завода: kd-дерево внутри кластера. Тайл, не влезающий в
+    // рамку, делится пополам — по X, если он шире (lw > lh), иначе по Y; листья
+    // разного размера, порядок записей — Мортон начала (у завода так все 1 947
+    // кластеров L0 со смешанным размером, docs/formats/gdb.md, «Кластер: kd-дерево»).
+    // Попытки: заводская рамка и заводское число тайлов на кластер; затем до
+    // пределов формата (u16); затем до 2048 тайлов; затем без подписей.
+    for (let attempt = 0; attempt < 4 && !chosen; attempt++) {
+      const cap = attempt === 0 ? budget : MAX_BLOB;
+      const maxLeaves = 1 << (attempt < 2 ? LEVEL_BITS[lvNr] : 11);
+      if (attempt === 3) { for (const pc of c.pieces) pc.labels = []; unlabeled++; runsCache = new Map(); tileCache = new Map(); }
+      const leaves = [];
+      let fail = false;
+      const place = (tx, ty, lw, lh) => {
+        if (fail) return;
+        const t = makeTile(tx, ty, lw, lh);
+        if (!t || (t.blob && t.blob.length <= cap && (attempt > 1 || t.blob.readUInt16BE(6) <= LEVEL_ELS[lvNr]))) { leaves.push(t || { tx, ty, lw, lh }); if (leaves.length > maxLeaves) fail = true; return; }
+        if (!lw && !lh) { fail = true; return; }
+        if (lw > lh) { place(tx, ty, lw - 1, lh); place(tx + (1 << (lw - 1)), ty, lw - 1, lh); }
+        else { place(tx, ty, lw, lh - 1); place(tx, ty + (1 << (lh - 1)), lw, lh - 1); }
+      };
+      for (let iy = 0; iy < 1 << (L.potY - L.lh); iy++) {
+        for (let ix = 0; ix < 1 << (L.potX - L.lw); ix++) place(c.cx * CW + (ix << L.lw), c.cy * CH + (iy << L.lh), L.lw, L.lh);
+      }
+      if (!fail) chosen = { leaves, out: leaves.reduce((s, t) => s + (runsFor(t.lw, t.lh).out.get(t.tx + ',' + t.ty) || 0), 0) };
     }
     if (!chosen) { skipped += c.pieces.length; continue; }
+    const tilesOf = chosen.leaves.filter(t => t.blob);
     // куски линий в тайлах: ключ тайла, номер элемента (его дал tileBlob) и
     // места точек на исходной линии
     const k0 = gm.keyOrigin(lvNr);
-    for (const t of chosen.tiles) {
+    for (const t of tilesOf) {
       const tile = (((k0.y0 + t.ty) << 16) | (k0.x0 + t.tx)) >>> 0;
-      for (const r of t.roads) if (r.src !== undefined) pieces.push({ src: r.src, tile, el: r.el, ts: r.ts });
-      delete t.roads;
+      const x0 = FRAME[0] + t.tx * L.cellX, y0 = FRAME[1] + t.ty * L.cellY;
+      const rect = [x0, y0, x0 + (L.cellX << t.lw), y0 + (L.cellY << t.lh)];
+      for (const r of t.roads) if (r.src !== undefined) pieces.push({ src: r.src, tile, el: r.el, ts: r.ts, rect });
     }
     dropped += chosen.out;
-    landTiles += chosen.tiles.filter(t => t.land).length;
-    if (!chosen.tiles.length) continue;
-    clusters.push({ cx: c.cx, cy: c.cy, lw: chosen.lw, lh: chosen.lh, tiles: chosen.tiles });
+    landTiles += tilesOf.filter(t => t.land).length;
+    if (!tilesOf.length) continue;
+    clusters.push({ cx: c.cx, cy: c.cy, lw: L.lw, lh: L.lh, tiles: tilesOf.map(t => ({
+      ix: t.tx - c.cx * CW, iy: t.ty - c.cy * CH, lw: t.lw, lh: t.lh, blob: t.blob, attr: t.attr, b10: t.b10,
+      lines: t.lines, land: t.land })),
+      leaves: chosen.leaves.map(t => ({ ix: t.tx - c.cx * CW, iy: t.ty - c.cy * CH, lw: t.lw, lh: t.lh, t: t.blob ? t : null })) });
   }
 
   L.clusters = clusters;
   const tiles = clusters.reduce((a, c) => a + c.tiles.length, 0);
   const elements = clusters.reduce((a, c) => a + c.tiles.reduce((b, t) => b + t.lines, 0), 0);
   const sizes = {};
-  for (const c of clusters) sizes['2^' + c.lw + 'x2^' + c.lh] = (sizes['2^' + c.lw + 'x2^' + c.lh] || 0) + 1;
+  for (const c of clusters) for (const t of c.tiles) sizes['2^' + t.lw + 'x2^' + t.lh] = (sizes['2^' + t.lw + 'x2^' + t.lh] || 0) + 1;
   return { level: L, tiles, clusters: clusters.length, skipped, dropped, elements, sizes, landTiles, unlabeled,
            vertex, pieces, keys };
 }
 
-// Классы дорог по уровням — та же пирамида, что у завода: чем мельче масштаб,
-// тем меньше классов остаётся. Ключ — тег `highway` из OSM; дороги без класса
-// считаются мелкими и выше L0 не идут.
+// Классы дорог по уровням — правило завода (вся Европа и Крит, сверка 23.10):
+// L1–L2 — классы 0…3, L3 — 0…2 (класса 3 на всю Европу 56 линий), L4 и выше —
+// 0…1 (класса 2 — 14–25 линий). Наши классы (classFor): автомагистраль — 1
+// (на L7+ — 0), trunk/primary — 2, secondary и tertiary выше L0 — 3. Ключ —
+// тег `highway` из OSM; дороги без класса считаются мелкими и выше L0 не идут.
 const LEVEL_CLASSES = [
   null,                                                              // L0 — всё
   ['motorway', 'trunk', 'primary', 'secondary', 'tertiary'],         // L1
   ['motorway', 'trunk', 'primary', 'secondary'],                     // L2
-  ['motorway', 'trunk', 'primary', 'secondary'],                     // L3
-  ['motorway', 'trunk', 'primary'],                                  // L4
-  ['motorway', 'trunk', 'primary'],                                  // L5
-  ['motorway', 'trunk', 'primary'],                                  // L6
-  ['motorway', 'trunk'],                                             // L7
-  ['motorway', 'trunk'],                                             // L8
-  ['motorway'], ['motorway'], ['motorway'],                          // L9…L11
+  ['motorway', 'trunk', 'primary'],                                  // L3: классы 0…2
+  ['motorway'], ['motorway'], ['motorway'], ['motorway'],            // L4…L7: классы 0…1
+  ['motorway'], ['motorway'], ['motorway'], ['motorway'],            // L8…L11
 ];
 
 // Оставить для уровня только те дороги, чей класс на нём ещё рисуется.
@@ -1356,7 +1705,7 @@ function component(outDir, v, opt) {
 }
 
 module.exports = {
-  landArea, regionTris, clipRing, simplifyRing, landForLevel, layersForLevel, OVERLAY, LAND, SEA,
+  landArea, regionTris, regionParts, stripify, polyElements, clipRing, simplifyRing, landForLevel, layersForLevel, OVERLAY, LAND, SEA,
   PROLOGUE, SIG, VERSION, FRAME, MAGIC, MAX_BLOB, FRAME_ELEMENT, EUROPE_LEVELS, CLUSTER_REC,
   insertCuts, refDirectory, refTable, refLevel, refsForLevel, tileBlob, emptyTile, readTileRoads, tileFormat, classFor, splitGrid, mergeLines, mortonIndex, clusterBlob, build,
   degToTile, degToTileL, cellX, cellY, cellXL, cellYL, roadsToLevel, volumeFromRoads,

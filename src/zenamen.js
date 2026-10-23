@@ -497,7 +497,8 @@ function buildSection(spec) {
       bodies.push(pl);
       at += pl.length;
     }
-    words.writeUInt16BE((prefix & 0x1f) | (list ? 0x80 : 0), i * 2); // старший байт — ноль
+    // старший байт — номер пары в таблице «частей» (spec.kinds), младший — флаги
+    words.writeUInt16BE(((spec.kinds ? spec.kinds[i] & 0xff : 0) << 8) | (prefix & 0x1f) | (list ? 0x80 : 0), i * 2);
     prev = n;
   });
   const stream = Buffer.concat(bodies);
@@ -512,10 +513,15 @@ function buildSection(spec) {
   // мы пишем ноль, поэтому хватает одной записи. Счётчик лежит в +0x58, форма
   // «записи по два байта плюс нулевое слово» — самая частая у завода.
   // Догадка: смысл самих пар не разобран, поэтому пишем нули.
-  const parts = spec.parts || (refs ? Buffer.alloc(4) : null);
-  const partCount = spec.partCount === undefined
-    ? (parts ? Math.max(1, (parts.length >> 1) - 1) : 0)
-    : spec.partCount;
+  // spec.parts — сами пары (язык, вид): у завода длина хвоста — пары, добитые
+  // до кратного 4 нулевым словом (337 разделов из 337), счётчик — число пар.
+  let parts = refs ? Buffer.alloc(4) : null, partCount = parts ? 1 : 0;
+  if (spec.parts) {
+    partCount = spec.parts.length >> 1;
+    parts = Buffer.alloc(Math.ceil(spec.parts.length / 4) * 4);
+    spec.parts.copy(parts);
+  }
+  if (spec.partCount !== undefined) partCount = spec.partCount;
 
   const idxOff = HEAD;
   const perOff = idxOff + keyCount * REC;

@@ -125,7 +125,8 @@ function mkcyprus(outDir, opt) {
                                             levels: gdbgen.EUROPE_LEVELS.map((_, i) => i) });
   const rt = v.refs;
   log('таблицы ссылок XAC → GDB: векторов ' + vectors.length + ', записей ' + rt.refs + ', ' +
-      (rt.total / 1024).toFixed(0) + ' КБ, самая большая ' + rt.max + ' б' + (rt.noL0 ? ', без L0: ' + rt.noL0 : ''));
+      (rt.total / 1024).toFixed(0) + ' КБ, самая большая ' + rt.max + ' б; на L0 без записи (найдёт поиск по координатам) ' +
+      rt.byCoord + (rt.noL0 ? ', без L0: ' + rt.noL0 : ''));
   const gdbSrc = fs.readdirSync(path.join(root, 'pkgdb', 'GDB')).find((f) => /\.gdb$/i.test(f));
   out.components.push(component(outDir, 'GDB', gdbSrc, v.gdb, root, log));
   out.gdb = { lines: lines.length };
@@ -144,7 +145,7 @@ function mkcyprus(outDir, opt) {
                                       { classes, districts, houses: o.houses,
                                         addrs: litaddr.readAddresses(o.pbf || 'out/cyp/cyprus-latest.osm.pbf') });
   const factory = ['LIT', 'LIT2', 'LIT3', 'LIT4'].map((d) => path.join(root, 'pkgdb', d));
-  const l = cyplit.build(pois, { from: litPath, addr, factory });
+  const l = cyplit.build(pois, { from: litPath, addr, factory, xah: cyplit.factoryXah(root) });
   log('адреса: городов ' + l.cities + ', улиц ' + l.streets + '; части: корень ' + l.parts.root +
       ' б, таблицы 0x18 ' + l.parts.tables + ' б, POI ' + l.parts.poi + ' б, адреса ' + l.parts.addr + ' б');
   const rep = cyplit.verify(l.buf, l, pois);

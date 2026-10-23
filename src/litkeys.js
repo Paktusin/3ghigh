@@ -43,7 +43,7 @@ function keyed(schema, block, blk) {
     tap: (t) => {
       if (t.rule === 18) { lead = t.val; return; }
       if (!cur) return;
-      if (!cur.loop && cur.b1 === undefined && (t.rule === 287 || t.rule === 195 || t.rule === 165)) cur.b1 = t.val;
+      if (!cur.loop && cur.b1 === undefined && (t.rule === 287 || t.rule === 195 || t.rule === 165 || t.rule === 146)) cur.b1 = t.val;
       if (!t.type) return;
       const h = t.type.toString(16);
       let v;
@@ -69,7 +69,7 @@ function keyed(schema, block, blk) {
     if (Buffer.isBuffer(v)) e.name = byAt.get(v.byteOffset - block.byteOffset);
   }
   const count = block.readUInt16BE(0);
-  return { els, run: r, count, next };
+  return { els, run: r, count, next, origin: [block.readInt32BE(4), block.readInt32BE(8)] };
 }
 
 // Карта ключ -> элемент (первый виток доступен и по своему ключу).

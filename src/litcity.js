@@ -143,7 +143,7 @@ function countryByCode(dirs, code, lang) {
 // (вид 0x11) (FUN_08ccdd2c, FUN_08cd05c0). У завода страна — 9 телефоны,
 // 18 названия, 20 категории (все 46 стран EU), город — 1 названия, 20
 // категории (Валлетта, Ватикан 176815:238). Имя с несколькими точками ведёт в
-// узел 0x33 с селектором 1 -> список 0x31 точек (Ватикан 176815:4 -> :7 -> :10).
+// узел 0x33: [16 -> 0x34] (Мальта, geo34) или [1 -> 0x31] (Ватикан 176815:4 -> :7 -> :10).
 function elAt(get, pos) {
   const g = get(pos[0]);
   const e = g.map.get(pos[1]);
@@ -159,14 +159,66 @@ function selectors(get, pos) {
     out.push({ sel: (sel += g.els[j].f['49']), target: g.els[j].f['3c'] });
   return out;
 }
+// Точки имени под узлом 0x33 [16 -> 0x34] — путь CLwtLitAccess::goToPoiGeoIndex
+// (FUN_08f098ac -> FUN_08ccd298: критерий 0x10 -> FUN_08cdae88). Запись 0x34
+// с битом 1 флагов (b1) — узел: дети 0x5f и 0x62 в очередь, у левого предел —
+// начало правого. Лист: витки записи (FUN_08cc7b3c), затем стоп, если поле
+// 0x2b (бит 6, +0x614) не ноль, иначе следующая запись (FUN_08ccece8), пока
+// она 0x34 и стоит до предела. Ответ — {pts: [{pos, xy}], total: 0x65, bad}.
+function geo34(get, pos) {
+  const rep = { pts: [], total: null, bad: [] };
+  const before = (p, lim) => !lim || p[0] < lim[0] || (p[0] === lim[0] && p[1] < lim[1]);
+  const queue = [{ pos, lim: null }];
+  for (let guard = 0; queue.length && guard < 100000; guard++) {
+    const { pos: p, lim } = queue.pop();
+    let blk = p[0], g = get(blk);
+    let i = g.els.findIndex((e) => e.key === p[1] && !e.loop);
+    if (i < 0 || g.els[i].type !== 0x34) { rep.bad.push('не 0x34 ' + p); continue; }
+    if (rep.total === null) rep.total = g.els[i].f['65'];
+    const head = g.els[i];
+    if (head.b1 & 2) { queue.push({ pos: head.f['62'], lim }, { pos: head.f['5f'], lim: head.f['62'] }); continue; }
+    for (;;) {
+      const e = g.els[i];
+      for (let j = i; j < g.els.length && (j === i || g.els[j].loop); j++) {
+        const x = g.els[j];
+        if (!x.f['3c']) continue;
+        rep.pts.push({ pos: x.f['3c'], xy: [x.f['22'][0] + g.origin[0], x.f['22'][1] + g.origin[1]] });
+      }
+      if (e.b1 & 0x40) break;
+      do i++; while (i < g.els.length && g.els[i].loop);
+      if (i >= g.els.length) { g = get(++blk); i = 0; }
+      const nx = g.els[i];
+      if (!nx || nx.type !== 0x34 || !before([blk, nx.key], lim)) break;
+    }
+  }
+  return rep;
+}
 const POI_NODE_SELS = new Set([2, 3, 4, 13, 14, 15, 17, 19, 20, 22, 23, 24, 25]);
 function poisOf(get, target, out, depth) {
   const e = elAt(get, target);
   if (!e) { out.bad.push('нет ' + target); return; }
   if (e.type === 0x24) { out.pois.add(target.join(':')); return; }
   if (e.type === 0x33 && (depth || 0) < 4) {
-    const s = selectors(get, target).find((x) => x.sel === 1);
-    if (!s) { out.bad.push('0x33 без селектора 1 ' + target); return; }
+    const ss = selectors(get, target);
+    const z = ss.find((x) => x.sel === 16);
+    if (z) {                                   // точки одного имени: 0x34
+      const r = geo34(get, z.target);
+      out.multiNames = (out.multiNames || 0) + 1;
+      out.bad.push(...r.bad);
+      if (r.total !== r.pts.length) out.bad.push('0x34 ' + z.target + ': 0x65 = ' + r.total + ', прочитано ' + r.pts.length);
+      for (const p of r.pts) {
+        const q = elAt(get, p.pos);
+        if (!q || q.type !== 0x24) { out.bad.push('0x34: не точка ' + p.pos); continue; }
+        // пара 0x22 витка от опоры его блока — та же точка, что пара 0x22 самой 0x24
+        const og = get(p.pos[0]).origin;
+        if (q.f['22'][0] + og[0] !== p.xy[0] || q.f['22'][1] + og[1] !== p.xy[1]) out.bad.push('0x34: координата не та ' + p.pos);
+        out.pois.add(p.pos.join(':'));
+        out.multi = (out.multi || 0) + 1;
+      }
+      return;
+    }
+    const s = ss.find((x) => x.sel === 1);
+    if (!s) { out.bad.push('0x33 без селектора 1 и 16 ' + target); return; }
     for (const x of enumerate(get, s.target, null, 100000).out) poisOf(get, x.target, out, (depth || 0) + 1);
     return;
   }
@@ -215,7 +267,11 @@ function catSearch(get, node, sel) {
     const ent = { pois: pois(pick(g.target, sel)), cats: [] };
     for (const c of (sub && selectors(get, sub)) || []) {
       ent.cats.push(c.sel);
-      if (!rep.cats.has(c.sel)) rep.cats.set(c.sel, pois(pick(c.target, sel)));
+      // у каждой группы своя копия категории (как у завода) — точки те же
+      const ps = pois(pick(c.target, sel)), was = rep.cats.get(c.sel);
+      if (!was) rep.cats.set(c.sel, ps);
+      else if (was.size !== ps.size || [...ps].some((x) => !was.has(x)))
+        rep.bad.push('категория ' + c.sel + ' в группе ' + g.sel + ': точки не те, что в первой');
     }
     rep.groups.set(g.sel, ent);
   }
@@ -263,7 +319,7 @@ function houseOk(h, n) {
                                 (g.kind === 3 || (n & 1) === (g.kind === 2 ? 1 : 0))));
 }
 
-module.exports = { enumerate, cities, countryByCode, selectors, poiSearch, catSearch, houses, houseOk };
+module.exports = { enumerate, cities, countryByCode, selectors, geo34, poisOf, poiSearch, catSearch, houses, houseOk };
 
 if (require.main === module) {
   const [dirs, country] = process.argv.slice(2);

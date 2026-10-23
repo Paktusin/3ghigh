@@ -70,6 +70,8 @@ function model() {
     streets.push({ name: String.fromCharCode(65 + (j % 9)) + ' STREET ' + j, place: 0, pts: [[x, y], [x + 50, y + 30]] });
   }
   for (let j = 0; j < 3; j++) streets.push({ name: 'ROAD ' + j, place: 5, pts: [[2344500, 3863500], [2344600, 3863600]] });
+  // то же имя в другом городе: во «всех улицах» страны — одно имя -> 0x10
+  streets.push({ name: 'ROAD 0', place: 7, pts: [[2346300, 3860700], [2346400, 3860800]] });
   // дома: как TRIQ DESAIN у Мальты (1, чётные 8…18) и улица с 40 номерами
   // через три (больше 15 значений — счёт отдельным числом)
   streets[0].houses = new Set([1, 8, 10, 12, 14, 16, 18]);
@@ -88,20 +90,27 @@ const pois = (n) => Array.from({ length: n }, (_, i) => ({
   x: 2318400 + (i % 30) * 370, y: 3833333 + Math.floor(i / 30) * 410, name: 'POI ' + i, cat: 56,
 }));
 
-test('справочник читается обратно: страна -> 60 городов -> 123 улицы', { skip: !haveMaps }, () => {
-  const r = CL.build(pois(300), { template: CL.template(LIT), addr: model(), cap: 1500 });
-  const rep = CL.verify(r.buf, r, pois(300));
+test('справочник читается обратно: страна -> 60 городов -> 124 улицы', { skip: !haveMaps }, () => {
+  // 260 точек с одним именем: узел 0x33 [16 -> 0x34], три записи по <= 100
+  const ps = pois(300).map((q, i) => (i < 260 ? Object.assign(q, { name: 'PARKING' }) : q));
+  const r = CL.build(ps, { template: CL.template(LIT), addr: model(), cap: 1500 });
+  const rep = CL.verify(r.buf, r, ps);
   assert.equal(rep.keysOk, rep.blocks, 'число ключей совпало с заголовком у каждого блока');
   assert.equal(rep.parsedOk, rep.blocks, 'каждый блок дочитан до конца');
   assert.equal(rep.addr.code, 113);
   assert.deepEqual(rep.addr.iso, ['CY', 'CYP']);
   assert.equal(rep.addr.cities.length, 60);
-  assert.equal(rep.addr.streets, 123);
+  assert.equal(rep.addr.streets, 124);
   assert.deepEqual(rep.addr.errors, []);
   assert.equal(rep.addr.postcodes, 2, 'индексы с нашими улицами -> 0x04');
   assert.equal(rep.addr.cityPostcodes, 3, '1010 в двух городах и 2020 -> 0x31');
   assert.equal(rep.addr.centres, 60, 'у каждого города точка-центр');
-  assert.equal(rep.addr.allStreets, 123, 'все улицы страны ведут на имя в городе');
+  assert.equal(rep.addr.allStreets, 124, 'все улицы страны ведут на имя в городе');
+  assert.equal(rep.addr.multiStreets, 1, 'ROAD 0 в двух городах — одно имя -> 0x10');
+  assert.equal(rep.addr.multiPostcodes, 1, 'у 0x10 список индексов: 1010 -> виток ROAD 0');
+  assert.equal(rep.poiSearch.multiNames, 1, 'PARKING -> 0x33/16 -> 0x34');
+  assert.equal(rep.poiSearch.multiPois, 260, 'все точки имени найдены');
+  assert.equal(rep.poiSearch.pois, 300);
   assert.equal(rep.hit, rep.seen, 'дерево POI с заголовком слоя находится от ключа 1');
   assert.deepEqual([rep.houses.streets, rep.houses.reached, rep.houses.nums, rep.houses.ok, rep.houses.extra],
                    [2, 2, 50, 50, 0], 'дома: улицы достижимы, номера приняты, лишних нет');
@@ -125,6 +134,20 @@ test('с заводскими частями: таблицы, заголовок
   const rep = CL.verify(r.buf, r, pois(300));
   assert.equal(rep.poiPath, true, 'корень 0x4a -> 0x20 -> 0x21');
   assert.equal(rep.addr.cities.length, 60);
+  assert.ok(!rep.bad);
+});
+
+// Страна по положению машины: HMI берёт имя из XAC на языке интерфейса
+// («КИПР» по-русски) и ищет его в LIT по имени. Названия — из заводского .xah.
+test('названия страны из XAC: «КИПР» ведёт к стране, у каждого языка своё имя', { skip: !haveMaps }, () => {
+  const xah = CL.factoryXah('maps');
+  const xn = require('./xac').countryNames(xah, 113);
+  assert.equal(xn[26], 'КИПР');
+  assert.equal(xn[1], 'ZYPERN');
+  const r = CL.build(pois(300), { template: CL.template(LIT), addr: model(), factory: FACTORY, cap: 1500, xah });
+  const rep = CL.verify(r.buf, r, pois(300));
+  assert.ok(rep.emul.byName.includes('КИПР'));
+  assert.deepEqual(rep.emul.nameBad, []);
   assert.ok(!rep.bad);
 });
 
@@ -180,30 +203,56 @@ test('буква длиннее 50 имён: индекс второго уро�
   for (const l of lists) assert.ok(reached.has(l.sym), 'список ' + l.sym + ' без ветви');
 });
 
-// Три уровня: ветвь «LA» длиннее 50 — свой индекс с приставкой «LA».
-test('многоуровневый индекс: приставка растёт, все списки достижимы', () => {
+// Все имена начинаются с «LA»: корень сразу с приставкой «LA» (0xdb, как EU
+// 75660:1696 «ULICA »), без цепочки «L» -> «LA» с одной ветвью (у завода
+// индексов с одной ветвью 0 из 40 196).
+test('индекс: приставка — общая часть имён, ветвей не меньше двух', () => {
   const items = [];
   for (let i = 0; i < 120; i++) items.push({ name: 'LA' + String.fromCharCode(65 + (i % 3)) + String(i).padStart(3, '0') });
   const r = A.names('t', items, null);
-  const pre = r.records.filter((x) => /^t:i\d+$/.test(x.sym)).map((x) => x.tokens()[4].raw.toString());
-  assert.deepEqual(pre.sort(), ['L', 'LA']);
+  assert.equal(r.records.filter((x) => /^t:i\d+$/.test(x.sym)).length, 0);
+  const t = r.records[0].tokens();
+  assert.equal(t[0].u8, 0xdb);
+  assert.equal(t[4].raw.toString(), 'LA');
+  assert.equal(r.records[0].n, 3);
   const lists = r.records.filter((x) => /:l\d+$/.test(x.sym));
   assert.ok(lists.every((l) => l.n <= 50));
   assert.equal(lists.reduce((a, l) => a + l.n, 0), 120);
 });
 
-test('POI: повороты названий, телефоны, двойники — узел 0x33 со списком 0x31', () => {
+test('POI: повороты названий, телефоны, двойники — узел 0x33 [16 -> 0x34]', () => {
   assert.deepEqual(A.rotations('SAN PIETRO'), ['PIETRO%SAN ']);
   assert.equal(A.phoneKey('+357 22 942 742'), '35722942742');
   assert.equal(A.phoneKey('22942742'), '35722942742');
-  const pois = [{ name: 'EKO', pos: [5, 1] }, { name: 'EKO', pos: [5, 2] }, { name: 'LIDL STORE', pos: [6, 1] }];
+  const pois = [{ name: 'EKO', pos: [5, 1], x: 20, y: 5, cat: 8 }, { name: 'EKO', pos: [5, 2], x: 10, y: 7, cat: 8 },
+                { name: 'LIDL STORE', pos: [6, 1], x: 1, y: 1, cat: 9 }];
   const r = A.poiNames('p', pois, (q) => [q.name].concat(A.rotations(q.name)));
   assert.equal(r.entries, 3);                          // EKO, LIDL STORE, STORE%LIDL
+  assert.equal(r.multi, 1);
   const sel = r.records.find((x) => x.sym === 'p:g0');
-  assert.equal(sel.tokens()[0].u8, 0xf1);
-  const l31 = r.records.find((x) => x.sym === 'p:g0l:l0');
-  assert.equal(l31.tokens()[0].u8, 0xe1);
-  assert.equal(l31.n, 2);
+  assert.deepEqual(sel.tokens().slice(0, 2), [{ u8: 0xf1 }, { v: 16 }]);
+  const z = r.records.find((x) => x.sym === 'p:g0z');
+  // одна запись: голова и последняя (0xc0), 0x65 = 2, категория одна, витки по x
+  assert.deepEqual(z.tokens().slice(0, 6), [{ u8: 0x97 }, { u8: 0xc0 }, { v: 2 }, { v: 8 }, { v: 2 }, { apair: [10, 7] }]);
+});
+
+// Как у завода: до 500 точек — цепочка записей по 100 (EU 125835:1738 — 0x80,
+// 100 витков; :1839 — 0x40, 72), больше — дерево, делится, пока в листе > 250
+// (129958:2054: 836 точек -> 4 листа по 209).
+test('0x34: цепочка по 100 витков, больше 500 точек — дерево', () => {
+  const pts = (n, cat) => Array.from({ length: n }, (_, i) => ({ pos: [9, i], x: (i * 7919) % 1000, y: i, cat: cat || 5 }));
+  const flags = (rs) => rs.map((r) => r.tokens()[1].u8);
+  const c = A.poi34('c', pts(172));
+  assert.deepEqual(flags(c), [0x80, 0x40]);
+  assert.deepEqual(c.map((r) => r.n), [100, 72]);
+  assert.deepEqual(flags(A.poi34('m', pts(3).map((q, i) => Object.assign(q, { cat: i })))), [0xc1]);
+  const t = A.poi34('t', pts(836));
+  assert.deepEqual(flags(t), [0x83, 0x03, 0, 0, 0, 0, 0, 0, 0x03, 0, 0, 0, 0, 0, 0x40]);
+  assert.deepEqual(t.filter((r) => r.n).map((r) => r.n), [100, 100, 9, 100, 100, 9, 100, 100, 9, 100, 100, 9]);
+  const root = t[0].tokens();
+  assert.equal(root[4].ref, 't:t0');                   // 0x5f -> левый ребёнок — следующая запись
+  assert.equal(t[1].sym, 't:t0');
+  assert.ok(t.every((r) => r.n <= 100));
 });
 
 test('ключи точки: второе имя с поворотами, без повторов', () => {
@@ -219,23 +268,22 @@ test('узел 0x33: селекторы пишутся приращением (9
   assert.throws(() => A.select33('n', [{ sel: 18, target: 'a' }, { sel: 9, target: 'b' }]));
 });
 
-test('дерево категорий: группа 39 — все, заводские группы, список группы — из её категорий', () => {
+test('дерево категорий: группа 39 — категории групп, у каждой группы свои узлы и списки', () => {
   const pois = [{ name: 'BANK A', cat: 8, pos: [9, 1] }, { name: 'POST B', cat: 10, pos: [9, 2] },
-                { name: 'HOTEL C', cat: 29, pos: [9, 3] }, { name: 'SHOP D', cat: 181, pos: [9, 4] }];
-  const r = A.catTree('t', pois, 18, 'all');
+                { name: 'HOTEL C', cat: 29, pos: [9, 3] }, { name: 'SHOP D', cat: 181, pos: [9, 4] },
+                { name: 'GARAGE E', cat: 6, pos: [9, 5] }];
+  const r = A.catTree('t', pois, 18);
   const bySym = new Map(r.records.map((x) => [x.sym, x]));
   const sels = (s) => { let a = 0; return bySym.get(s).tokens().filter((x) => x.v !== undefined).map((x) => (a += x.v)); };
-  assert.deepEqual(sels('t'), [39, 42, 47]);            // 181 — вне групп и от 150: в дереве нет
-  assert.deepEqual(sels('t:s39'), [8, 10, 29]);
+  assert.deepEqual(sels('t'), [39, 42, 47]);            // 181 — вне групп: в дереве нет
+  assert.deepEqual(sels('t:s39'), [6, 8, 10, 29]);      // 6 (автосервис) — только в группе 39
   assert.deepEqual(sels('t:s47'), [8, 10]);
   assert.deepEqual(sels('t:m47'), [2, 18]);
-  assert.deepEqual(sels('t:l8'), [18]);
-  const ref = (s) => bySym.get(s).tokens().filter((x) => x.ref !== undefined).map((x) => x.ref);
-  assert.ok(String(ref('t:m39')[1]).startsWith('t:g39'), 'точка вне дерева есть — у группы 39 свой список');
-  const u = A.catTree('u', pois.slice(0, 3), 18, 'all').records.find((x) => x.sym === 'u:m39');
-  assert.equal(u.tokens().filter((x) => x.ref !== undefined)[1].ref, 'all', 'все в дереве — общий список');
-  assert.equal(ref('t:m42')[1], ref('t:l29')[0], 'одна категория — её же список');
-  assert.ok(String(ref('t:m47')[1]).startsWith('t:g47'), 'у группы из двух категорий — свой список');
-  const m = A.catTree('c', pois, 1, 'all').records.find((x) => x.sym === 'c:m47');
+  assert.deepEqual(sels('t:39:l8'), [18]);
+  // как у завода (Мальта): ни один узел и ни один список не общий у двух ссылок
+  const refs = [];
+  for (const x of r.records) for (const tk of x.tokens()) if (typeof tk.ref === 'string') refs.push(tk.ref);
+  assert.equal(new Set(refs).size, refs.length, 'на каждую запись — одна ссылка');
+  const m = A.catTree('c', pois, 1).records.find((x) => x.sym === 'c:m47');
   assert.deepEqual(m.tokens().filter((x) => x.v !== undefined).map((x) => x.v), [1, 1], 'у города: 1 названия, 2 категории');
 });

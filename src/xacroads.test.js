@@ -111,15 +111,15 @@ test('тайл из дорог: рёбра между блоками сшиты 
 
   // У каждой встречной ссылки в другой блок цель — межблочный вектор,
   // указывающий обратно в наш узел. Это и значит «сшито в обе стороны».
+  // Встречные ссылки берём из списков узлов: номер в таблице есть только у
+  // первой (как у завода), остальные лежат в списке без номера.
   let far = 0;
   for (const b of blocks) {
-    const tab = b.readUInt32BE(0x6c), cnt = b.readUInt16BE(0x70), base = b.readUInt16BE(0x36);
-    const me = xg.entryCoords(b);
-    for (let i = 1; i < cnt; i++) {
-      const p = b.readUInt16BE(tab + i * 2) * 2;
-      if (!p || p + 4 > b.length) continue;
-      const w = b.readUInt16BE(p);
-      if ((w & 0xc000) !== 0x8000) continue;
+    const base = b.readUInt16BE(0x36), ox = b.readInt32BE(0x28), oy = b.readInt32BE(0x2c);
+    for (const [off, list] of xg.nodeLists(b)) for (const el of list) {
+      if (el.tag !== 2) continue;
+      const p = el.at, w = b.readUInt16BE(p);
+      const me = { coords: { node: xv.koord(b, off, ox, oy) } }, i = 'node';
       far++;
       const t = byId.get(base + (b.readUInt16BE(p + 2) & 0x7fff));
       assert.ok(t, 'блок-цель встречной ссылки найден');
@@ -388,12 +388,12 @@ test('индексы атрибутов: «именующие» отбирают
   }
 });
 
-test('хвост записи: имена пишутся по два байта, бит 6 — продолжение', () => {
+test('хвост записи: имена пишутся по два байта, бит 6 — продолжение, бит 15 — запись не кончилась', () => {
   const xw = require('./xacwrite');
   const one = xw.encodeNames([5]);
   assert.deepEqual([...one], [0x00, 0x05], 'одно имя, продолжения нет');
   const two = xw.encodeNames([0x1234, 7]);
-  assert.deepEqual([...two], [0x40 | 0x12, 0x34, 0x00, 0x07], 'у первого бит 6');
+  assert.deepEqual([...two], [0xc0 | 0x12, 0x34, 0x00, 0x07], 'у первого биты 6 и 15');
   assert.throws(() => xw.encodeNames([0x3fff]), /вне 14 бит/);
 });
 
@@ -588,7 +588,7 @@ function readBans(graph, built) {
       const ts = xg.nodeTurns(b, n.off);
       if (!ts.length) continue;
       // рукав -> линия: по координате дальнего конца
-      const far = n.entries.map((en) => {
+      const far = n.arms.map((en) => {
         const m = g.nodes[en.to !== undefined ? en.to : g.entryNode[en.back]];
         const e = graph.edges.find((x) => [x.a, x.b].some((k) => graph.nodes[k].x === m.x && graph.nodes[k].y === m.y));
         return e.wid;
