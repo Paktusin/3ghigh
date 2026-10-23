@@ -2137,3 +2137,25 @@ GDB в заводских рамках: магнитола грузится бе
   `umount -f /mnt/nav/SDS`, `/SDS`, `/mnt/nav`, затем `mkqnx6fs -q /dev/hd0t77`.
   То есть «удаление раздела» — это новая файловая система QNX6 на `hd0t77`.
 * `cleanup_navi.sh`: при `/tmp/clear_nobss` удаляет `/nobss/*.swap`.
+
+### Аварийный образ `ifs-emg` (разобрано 23.10)
+
+Пакет MU содержит второй образ системы — `MU9308/ifs-emg` (QNX 6.3.2, «MMI3G Audi
+EMERGENCY SETUP»; распакован в `out/ifs-emg/`). Его стартовый скрипт поднимает
+`devb-eide-hbfpga` (жёсткий диск виден как `/dev/hd0t77`), `devb-sdc-hbfpga`,
+`io-usb`/`devb-umass`, `vdev-medialaunch`, графику и запускает
+`/usr/apps/MMI3GEmergencyApp`, затем `fesh -i` на последовательной консоли
+(`devc-sersci scif1`, 115200) и, при сетевой карте, `inetd` (telnet/ftp).
+Навигации (`MMI3GApplication`) в нём нет.
+
+* `MMI3GEmergencyApp` — установщик SWDL: ищет `/metainfo2.txt` на `/fs/cd0`,
+  `/mnt/sdcard1|2`, USB, NFS/CIFS, исполняет скрипты обновления
+  (`/tmp/SWDLscript%.8d.sh`, ksh), прошивает флеш. Флаги — в
+  `/HBpersistence/SWDL/` (`Emergency/Update`, `Emergency/FpgaOK`, `update.txt`).
+* В аварийном образе нет `fs-qnx6.so` и `mkqnx6fs` (есть только `fs-qnx4`,
+  `fs-dos`); в основном `ifs-root` — есть (`/sbin/mkqnx6fs`, `lib/dll/fs-qnx6.so`).
+  Догадка: скрипт обновления с карты мог бы запустить `mkqnx6fs` с карты на
+  `/dev/hd0t77` — не проверено.
+* **Как попасть в аварийный режим — не установлено.** Выбор образа делает IPL
+  (`ipl-3g_9308.bin` есть в пакете 0206, строк почти нет); сочетание клавиш или
+  флаг не найдены. Без этого путь не годится — восстановление через съём диска.
