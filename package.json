@@ -7,7 +7,7 @@
   "type": "commonjs",
   "scripts": {
     "test": "node --test \"src/*.test.js\"",
-    "build": "npm run image && npm run meta && npm run check",
+    "build": "npm run prep && npm run image && npm run meta && npm run check",
     "image": "node src/mkcyprus.js out/cyprus",
     "meta": "node src/mkmeta.js out/cyprus",
     "check": "node src/setcheck.js out/cyprus",
@@ -17,9 +17,10 @@
     "gdb": "node src/gdbgen.js --roads out/cyp/roads.geojson --out out/gdb-cyprus --levels all",
     "lit": "node src/cyplit.js --out out/cyp/CY.lit",
     "xah": "node src/xah.js",
-    "roads": "node src/osm2geo.js out/cyp/roads.json out/cyp/roads.geojson",
+    "roads": "node src/osm2geo.js out/cyp/cyprus-latest.osm.pbf out/cyp/roads.geojson",
     "sums": "node src/checksum.js out/cyprus",
     "preview": "node src/preview.js out/cyprus",
-    "catalog": "node src/catalog.js"
+    "catalog": "node src/catalog.js",
+    "prep": "node src/prep.js"
   }
 }

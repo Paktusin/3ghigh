@@ -10,7 +10,8 @@
 //   * порядок точек сохраняется, ничего не упрощается: прореживание сместило
 //     бы геометрию, а нам важно совпадение с реальностью.
 //
-//   node src/osm2geo.js <overpass.json> <выход.geojson> [--max 254]
+//   node src/osm2geo.js <overpass.json | файл.osm.pbf> <выход.geojson> [--max 254]
+//   (из pbf — только классы DEFAULT_CLASSES src/mkcyprus.js)
 
 const fs = require('fs');
 
@@ -60,9 +61,18 @@ function maxspeedOf(t) {
   return speedOf(t['maxspeed:type']);
 }
 
-function convert(src, max) {
-  const j = JSON.parse(fs.readFileSync(src, 'utf8'));
-  const ways = (j.elements || []).filter(e => e.type === 'way' && Array.isArray(e.geometry));
+// Дороги прямо из .osm.pbf — те же поля, что у ответа Overpass (`out geom`).
+function pbfWays(src, classes) {
+  const osm = require('./osmpbf');
+  const want = new Set(classes);
+  const idx = osm.read(src, { node: () => false, way: t => want.has(t.highway) });
+  return idx.ways.map(w => ({ type: 'way', id: w.id, tags: w.tags,
+    geometry: w.refs.map(r => osm.coord(idx, r)).filter(Boolean).map(([x, y]) => ({ lon: x / 1e7, lat: y / 1e7 })) }));
+}
+
+function convert(src, max, classes) {
+  const ways = src.endsWith('.pbf') ? pbfWays(src, classes)
+    : (JSON.parse(fs.readFileSync(src, 'utf8')).elements || []).filter(e => e.type === 'way' && Array.isArray(e.geometry));
   const features = [];
   let split_ = 0;
   for (const w of ways) {
@@ -92,8 +102,8 @@ if (require.main === module) {
   const [src, dst] = process.argv.slice(2).filter(a => !a.startsWith('--'));
   const mi = process.argv.indexOf('--max');
   const max = mi > 0 ? Number(process.argv[mi + 1]) : 254;
-  if (!src || !dst) { console.error('укажите: <overpass.json> <выход.geojson>'); process.exit(1); }
-  const r = convert(src, max);
+  if (!src || !dst) { console.error('укажите: <overpass.json | .osm.pbf> <выход.geojson>'); process.exit(1); }
+  const r = convert(src, max, require('./mkcyprus').DEFAULT_CLASSES);
   fs.writeFileSync(dst, JSON.stringify(r.fc));
   const pts = r.fc.features.reduce((n, f) => n + f.geometry.coordinates.length, 0);
   console.log('дорог в ответе :', r.ways);

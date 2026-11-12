@@ -144,6 +144,9 @@ function mkcyprus(outDir, opt) {
                                       places,
                                       { classes, districts, houses: o.houses,
                                         addrs: litaddr.readAddresses(o.pbf || 'out/cyp/cyprus-latest.osm.pbf') });
+  // город в подробностях (тег '1') — у завода у всех точек (5360 из 5360);
+  // берём тот, к которому точка привязана в справочнике (её 0x66 — туда же)
+  for (const q of pois) { const c = addr.nearest(q.x, q.y); if (c >= 0) q.city = addr.places[c].name; }
   const factory = ['LIT', 'LIT2', 'LIT3', 'LIT4'].map((d) => path.join(root, 'pkgdb', d));
   const l = cyplit.build(pois, { from: litPath, addr, factory, xah: cyplit.factoryXah(root) });
   log('адреса: городов ' + l.cities + ', улиц ' + l.streets + '; части: корень ' + l.parts.root +
