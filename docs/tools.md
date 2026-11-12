@@ -54,6 +54,9 @@ src/repack.js     пересборка контейнера, проверка ro
 src/coverage.js   сводка по набору: регион, версия, страны
 src/countries.js  таблица стран европейского набора
 src/tmc.js        реестр таблиц локаций TMC
+src/tlt.js        таблица локаций TMC .tlt и реестр: разбор (BS00, SP02, XY00, BR00, OV)
+src/cyptmc.js     кипрская таблица TMC из OSM -> out/cyp/tmc (tmc/table.md)
+src/tltenc.js     сборка .tlt и реестра EJ211_global.tlt; проверка — src/tltenc.test.js
 src/xac.js        разделы тайла, заголовки блоков, проекция
 src/xacvec.js     дорожная сеть блоков v5: таблица, узлы, координаты
 src/xacrec.js     запись вектора по FUN_08272938, покрытие байт блока

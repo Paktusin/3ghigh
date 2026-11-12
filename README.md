@@ -91,6 +91,7 @@ Automotive). Всё получено чтением файлов; оригина
 | [docs/formats/lit.md](docs/formats/lit.md) | `LIT`/`PIT`: база точек интереса и адресный справочник ввода цели, каталог, словарь, транскрипции |
 | [docs/formats/atlas.md](docs/formats/atlas.md) | `CTY` (трёхмерные здания) и `TER` (рельеф) |
 | [docs/formats/tmc.md](docs/formats/tmc.md) | `TMC` |
+| [tmc/](tmc/README.md) | подпроект: пробки из интернета в MMI через свой FM-передатчик RDS-TMC — план, железо, разбор приёма в прошивке |
 | [docs/formats/xar.md](docs/formats/xar.md) | архив стилей карты `.xar`: цвета и ширины по классам GDB, значки POI по категориям LIT, растры; `src/xar.js` |
 | [docs/device.md](docs/device.md) | правила работы с головным устройством, установка, проверки целостности |
 | [docs/firmware.md](docs/firmware.md) | карта читателей в прошивке, инициализация NDL, зависание на 28 % (первая версия причины; окончательная — манифест `.pkg`, в device.md) |

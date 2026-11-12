@@ -113,10 +113,43 @@ function names(d) {
       if (magic === 'SP02') pre = t[p++];
     }
   }
+  out.tok = tok;
   return out;
 }
 
-module.exports = { chunk, xy, records, names };
+// BR00 — рамка и растр покрытия, по FUN_08275ac8. У заводских один вход,
+// один прямоугольник с растром (вид ≥ 8 = смещение растра от BR00).
+function br(d) {
+  const c = chunk(d, 'BR'), b = c.subarray(c.readUInt32BE(0x18));
+  const e = b.subarray(b.readUInt32BE(8));
+  const rect = [0, 4, 8, 12].map(o => e.readInt32BE(4 + o));
+  const r = b.subarray(e.readUInt32BE(20));
+  const bpr = r.readUInt16BE(2), rows = ((rect[3] - rect[1]) >> r[1]) + 1;
+  return { rect, shift: r[0], bpr, raster: Buffer.from(r.subarray(4, 4 + bpr * rows)) };
+}
+
+// Реестр EJ211_global.tlt (блок OV): записи по 36 байт, у каждой каталог блоков
+// своего файла таблицы, строки — в общем пуле (строка 0 пустая).
+function ov(d) {
+  const c = chunk(d, 'OV'), pool = [];
+  for (let i = 0, p = c.readUInt32BE(4) + 2, n = c.readUInt16BE(c.readUInt32BE(4)); i < n; i++, p += 1 + c[p]) {
+    pool.push(c.toString('latin1', p + 1, p + 1 + c[p]));
+  }
+  return Array.from({ length: c.readUInt16BE(2) }, (_, i) => {
+    const o = 8 + i * 36, k = c.readUInt32BE(o + 0x20);
+    return {
+      file: pool[c.readUInt16BE(o)], version: pool[c.readUInt16BE(o + 2)],
+      iso: c.toString('latin1', o + 4, o + 6), ecc: c[o + 6], cc: c[o + 7], ltn: c[o + 8],
+      extra: c.toString('hex', o + 9, o + 12), rect: [0, 4, 8, 12].map(q => c.readInt32BE(o + 12 + q)),
+      lang: c.toString('latin1', o + 0x1c, o + 0x1e),
+      blocks: Array.from({ length: c.readUInt16BE(k) }, (_, j) => ({
+        off: c.readUInt32BE(k + 4 + j * 12), size: c.readUInt32BE(k + 8 + j * 12), tag: pool[c.readUInt16BE(k + 12 + j * 12)],
+      })),
+    };
+  });
+}
+
+module.exports = { chunk, xy, records, names, br, ov };
 
 if (require.main === module) {
   const pts = xy(fs.readFileSync(process.argv[2]));
